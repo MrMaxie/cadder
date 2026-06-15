@@ -92,8 +92,47 @@ impl IisBindingRecord {
   }
 
   pub fn backend_http_binding(&self, port: u16, route_host: &str) -> Self {
+    self.backend_binding_with_protocol(port, route_host, "http", None)
+  }
+
+  pub fn backend_binding(&self, port: u16, route_host: &str) -> Result<Self, IisIssue> {
+    if self.protocol.eq_ignore_ascii_case("http") {
+      return Ok(self.backend_http_binding(port, route_host));
+    }
+    if self.protocol.eq_ignore_ascii_case("https") {
+      let Some(tls_certificate) = self.usable_tls_certificate() else {
+        return Err(IisIssue::new(
+          IisIssueKind::MissingTlsCertificate,
+          format!(
+            "HTTPS IIS binding `{}` cannot be handed off because IIS did not expose usable TLS certificate metadata. Repair the IIS HTTPS certificate binding, refresh IIS discovery, and retry handoff.",
+            self.binding_information
+          ),
+        ));
+      };
+      return Ok(self.backend_binding_with_protocol(
+        port,
+        route_host,
+        "https",
+        Some(tls_certificate.clone()),
+      ));
+    }
+    Err(IisIssue::new(
+      IisIssueKind::UnsupportedBindingShape,
+      format!(
+        "IIS protocol `{}` is not supported for handoff.",
+        self.protocol
+      ),
+    ))
+  }
+
+  fn backend_binding_with_protocol(
+    &self,
+    port: u16,
+    route_host: &str,
+    protocol: &str,
+    tls_certificate: Option<IisTlsCertificate>,
+  ) -> Self {
     let ip_address = "127.0.0.1".to_string();
-    let protocol = "http".to_string();
     let original_host = self.host_header.trim();
     let host_header = if original_host.is_empty() || original_host == "*" {
       canonicalize_domain(route_host)
@@ -103,13 +142,21 @@ impl IisBindingRecord {
     let binding_information = format!("{ip_address}:{port}:{host_header}");
     Self {
       site_name: self.site_name.clone(),
-      protocol,
+      protocol: protocol.to_string(),
       binding_information,
       ip_address,
       port,
       host_header,
-      tls_certificate: None,
+      tls_certificate,
     }
+  }
+
+  fn usable_tls_certificate(&self) -> Option<&IisTlsCertificate> {
+    self
+      .tls_certificate
+      .as_ref()
+      .filter(|certificate| !certificate.thumbprint.trim().is_empty())
+      .filter(|certificate| !certificate.store_name.trim().is_empty())
   }
 
   #[cfg(windows)]
@@ -843,6 +890,19 @@ pub fn unsupported_binding_issue(binding: &IisBindingRecord) -> Option<IisIssue>
 mod tests {
   use super::*;
 
+  fn tls_certificate() -> IisTlsCertificate {
+    IisTlsCertificate {
+      thumbprint: "aabbcc".to_string(),
+      store_name: "My".to_string(),
+      ssl_flags: Some(1),
+    }
+  }
+
+  fn with_tls_certificate(mut binding: IisBindingRecord) -> IisBindingRecord {
+    binding.tls_certificate = Some(tls_certificate());
+    binding
+  }
+
   #[test]
   fn parses_iis_binding_information_from_right() {
     let binding =
@@ -940,6 +1000,40 @@ mod tests {
     );
   }
 
+  #[test]
+  fn backend_binding_preserves_https_certificate_for_iis_listener() {
+    let binding = with_tls_certificate(
+      IisBindingRecord::from_binding_information("Default Web Site", "https", "*:443:").unwrap(),
+    );
+
+    let backend = binding.backend_binding(41043, "iis-app.localhost").unwrap();
+
+    assert_eq!(backend.protocol, "https");
+    assert_eq!(backend.ip_address, "127.0.0.1");
+    assert_eq!(
+      backend.binding_information,
+      "127.0.0.1:41043:iis-app.localhost"
+    );
+    assert_eq!(backend.tls_certificate, Some(tls_certificate()));
+  }
+
+  #[test]
+  fn backend_binding_rejects_https_without_certificate_metadata() {
+    let binding = IisBindingRecord::from_binding_information(
+      "Default Web Site",
+      "https",
+      "*:443:secure.localhost",
+    )
+    .unwrap();
+
+    let issue = binding
+      .backend_binding(41043, "secure.localhost")
+      .unwrap_err();
+
+    assert_eq!(issue.kind, IisIssueKind::MissingTlsCertificate);
+    assert!(issue.message.contains("TLS certificate metadata"));
+  }
+
   #[tokio::test]
   async fn metadata_store_persists_and_removes_handoffs() {
     let dir = tempfile::tempdir().unwrap();
@@ -974,16 +1068,13 @@ mod tests {
       "*:443:secure.localhost",
     )
     .unwrap();
-    binding.tls_certificate = Some(IisTlsCertificate {
-      thumbprint: "aabbcc".to_string(),
-      store_name: "My".to_string(),
-      ssl_flags: Some(1),
-    });
+    binding.tls_certificate = Some(tls_certificate());
+    let backend_binding = binding.backend_binding(41043, "secure.localhost").unwrap();
     let record = IisRestoreRecord {
       binding: binding.clone(),
       domain_key: "secure.localhost".to_string(),
       registration_id: None,
-      backend_binding: Some(binding.backend_http_binding(41043, "secure.localhost")),
+      backend_binding: Some(backend_binding),
     };
 
     let store = IisMetadataStore::load(path.clone()).await.unwrap();
@@ -998,6 +1089,13 @@ mod tests {
     assert_eq!(tls.thumbprint, "aabbcc");
     assert_eq!(tls.store_name, "My");
     assert_eq!(tls.ssl_flags, Some(1));
+    assert_eq!(
+      snapshot
+        .get(&binding.binding_id())
+        .and_then(|record| record.backend_binding.as_ref())
+        .and_then(|binding| binding.tls_certificate.as_ref()),
+      Some(&tls_certificate())
+    );
   }
 
   #[tokio::test]

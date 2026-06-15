@@ -336,6 +336,22 @@ struct IisProxyRoute {
   route: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IisProxyBackendProtocol {
+  Http,
+  Https,
+}
+
+impl IisProxyBackendProtocol {
+  pub fn from_iis_protocol(protocol: &str) -> Self {
+    if protocol.eq_ignore_ascii_case("https") {
+      Self::Https
+    } else {
+      Self::Http
+    }
+  }
+}
+
 impl CaddyConfigCoordinator {
   pub fn new(adapter: CaddyConfigAdapter, runtime: ProcessRuntime) -> Self {
     Self {
@@ -361,19 +377,12 @@ impl CaddyConfigCoordinator {
     binding_id: impl Into<String>,
     domain_key: impl Into<String>,
     backend_dial: impl Into<String>,
+    backend_protocol: IisProxyBackendProtocol,
   ) {
     let binding_id = binding_id.into();
     let domain_key = domain_key.into();
     let backend_dial = backend_dial.into();
-    let route = json!({
-        "@id": format!("iis_handoff_{}", route_id_fragment(&binding_id)),
-        "match": [{ "host": [domain_key.clone()] }],
-        "handle": [{
-            "handler": "reverse_proxy",
-            "upstreams": [{ "dial": backend_dial }]
-        }],
-        "terminal": true
-    });
+    let route = iis_proxy_route(&binding_id, &domain_key, &backend_dial, backend_protocol);
     self
       .iis_routes
       .insert(domain_key.clone(), IisProxyRoute { domain_key, route });
@@ -539,6 +548,33 @@ impl CaddyConfigCoordinator {
   pub async fn shutdown(&mut self) -> Result<()> {
     self.runtime.stop().await
   }
+}
+
+fn iis_proxy_route(
+  binding_id: &str,
+  domain_key: &str,
+  backend_dial: &str,
+  backend_protocol: IisProxyBackendProtocol,
+) -> Value {
+  let mut handler = json!({
+      "handler": "reverse_proxy",
+      "upstreams": [{ "dial": backend_dial }]
+  });
+  if backend_protocol == IisProxyBackendProtocol::Https {
+    handler["transport"] = json!({
+        "protocol": "http",
+        "tls": {
+            "server_name": domain_key,
+            "insecure_skip_verify": true
+        }
+    });
+  }
+  json!({
+      "@id": format!("iis_handoff_{}", route_id_fragment(binding_id)),
+      "match": [{ "host": [domain_key] }],
+      "handle": [handler],
+      "terminal": true
+  })
 }
 
 fn compose_config(
@@ -1146,6 +1182,59 @@ exit 1
     assert_eq!(
       routes[1].pointer("/match/0/host/0").and_then(Value::as_str),
       Some("iis-app.localhost")
+    );
+  }
+
+  #[test]
+  fn iis_proxy_route_leaves_http_backend_plaintext() {
+    let route = iis_proxy_route(
+      "Default Web Site|http|*:80:app.localhost",
+      "app.localhost",
+      "127.0.0.1:41043",
+      IisProxyBackendProtocol::Http,
+    );
+
+    assert_eq!(
+      route
+        .pointer("/handle/0/upstreams/0/dial")
+        .and_then(Value::as_str),
+      Some("127.0.0.1:41043")
+    );
+    assert!(route.pointer("/handle/0/transport").is_none());
+  }
+
+  #[test]
+  fn iis_proxy_route_configures_tls_transport_for_https_backend() {
+    let route = iis_proxy_route(
+      "Default Web Site|https|*:443:secure.localhost",
+      "secure.localhost",
+      "127.0.0.1:41043",
+      IisProxyBackendProtocol::Https,
+    );
+
+    assert_eq!(
+      route
+        .pointer("/handle/0/upstreams/0/dial")
+        .and_then(Value::as_str),
+      Some("127.0.0.1:41043")
+    );
+    assert_eq!(
+      route
+        .pointer("/handle/0/transport/protocol")
+        .and_then(Value::as_str),
+      Some("http")
+    );
+    assert_eq!(
+      route
+        .pointer("/handle/0/transport/tls/server_name")
+        .and_then(Value::as_str),
+      Some("secure.localhost")
+    );
+    assert_eq!(
+      route
+        .pointer("/handle/0/transport/tls/insecure_skip_verify")
+        .and_then(Value::as_bool),
+      Some(true)
     );
   }
 

@@ -1,5 +1,6 @@
 use crate::{
   CaddyConfigCoordinator,
+  caddy::IisProxyBackendProtocol,
   iis::{
     IisBindingRecord, IisMetadataStore, IisMutation, IisProvider, IisRestoreRecord,
     binding_to_view, unsupported_binding_issue,
@@ -65,16 +66,12 @@ impl DaemonState {
     let iis_store = IisMetadataStore::load(paths.metadata_path()).await?;
     let handoffs = iis_store.snapshot().await;
     for (binding_id, restore) in &handoffs {
-      let backend_binding = restore.backend_binding.clone().unwrap_or_else(|| {
-        restore.binding.backend_http_binding(
-          backend_port_for_binding(&restore.binding),
-          &restore.domain_key,
-        )
-      });
+      let backend_binding = legacy_backend_binding(restore);
       coordinator.set_iis_proxy_route(
         binding_id.clone(),
         restore.domain_key.clone(),
-        format!("127.0.0.1:{}", backend_binding.port),
+        backend_dial(&backend_binding),
+        IisProxyBackendProtocol::from_iis_protocol(&backend_binding.protocol),
       );
     }
     let mut state = Self::new(coordinator);
@@ -559,7 +556,27 @@ impl DaemonState {
     mark_step_succeeded(&mut steps, "iis-classify-binding");
 
     let backend_binding =
-      binding.backend_http_binding(backend_port_for_binding(&binding), &domain_key);
+      match binding.backend_binding(backend_port_for_binding(&binding), &domain_key) {
+        Ok(backend_binding) => backend_binding,
+        Err(issue) => {
+          mark_step_issue(&mut steps, "iis-classify-binding", &issue);
+          let view = binding_to_view(
+            &binding,
+            IisHandoffState::Unsupported,
+            Some(issue.clone()),
+            None,
+          );
+          return iis_response_with_steps(
+            request.request_id,
+            false,
+            issue.message.clone(),
+            Some(view),
+            issue.clone(),
+            steps,
+            Vec::new(),
+          );
+        }
+      };
     let restore = IisRestoreRecord {
       binding: binding.clone(),
       domain_key: domain_key.clone(),
@@ -633,7 +650,8 @@ impl DaemonState {
       inner.coordinator.set_iis_proxy_route(
         binding.binding_id(),
         domain_key.clone(),
-        format!("127.0.0.1:{}", backend_binding.port),
+        backend_dial(&backend_binding),
+        IisProxyBackendProtocol::from_iis_protocol(&backend_binding.protocol),
       );
       let registrations = inner.registrations.values().cloned().collect::<Vec<_>>();
       let apply_state = inner.coordinator.apply(&registrations, &self.logs).await;
@@ -764,12 +782,7 @@ impl DaemonState {
       );
     };
     mark_step_succeeded(&mut steps, "iis-read-restore-metadata");
-    let backend_binding = restore.backend_binding.clone().unwrap_or_else(|| {
-      restore.binding.backend_http_binding(
-        backend_port_for_binding(&restore.binding),
-        &restore.domain_key,
-      )
-    });
+    let backend_binding = legacy_backend_binding(&restore);
 
     {
       let inner = self.inner.lock().await;
@@ -833,7 +846,8 @@ impl DaemonState {
       inner.coordinator.set_iis_proxy_route(
         request.binding_id.clone(),
         restore.domain_key.clone(),
-        format!("127.0.0.1:{}", backend_binding.port),
+        backend_dial(&backend_binding),
+        IisProxyBackendProtocol::from_iis_protocol(&backend_binding.protocol),
       );
       let registrations = inner.registrations.values().cloned().collect::<Vec<_>>();
       inner.coordinator.apply(&registrations, &self.logs).await;
@@ -936,6 +950,10 @@ impl DaemonState {
             )),
             None,
           );
+        }
+        if let Err(issue) = binding.backend_binding(backend_port_for_binding(binding), &domain_key)
+        {
+          return binding_to_view(binding, IisHandoffState::Unsupported, Some(issue), None);
         }
         if let Some(issue) = active_registration_conflict(&inner.registrations, &domain_key) {
           binding_to_view(binding, IisHandoffState::Conflict, Some(issue), None)
@@ -1057,6 +1075,19 @@ fn backend_port_for_binding(binding: &IisBindingRecord) -> u16 {
     hash.wrapping_mul(33).wrapping_add(byte as u32)
   });
   41000 + (hash % 8000) as u16
+}
+
+fn legacy_backend_binding(restore: &IisRestoreRecord) -> IisBindingRecord {
+  restore.backend_binding.clone().unwrap_or_else(|| {
+    restore.binding.backend_http_binding(
+      backend_port_for_binding(&restore.binding),
+      &restore.domain_key,
+    )
+  })
+}
+
+fn backend_dial(binding: &IisBindingRecord) -> String {
+  format!("127.0.0.1:{}", binding.port)
 }
 
 fn active_registration_conflict(
@@ -1303,6 +1334,20 @@ mod tests {
     IisBindingRecord::from_binding_information(site, protocol, binding).unwrap()
   }
 
+  fn tls_certificate() -> crate::iis::IisTlsCertificate {
+    crate::iis::IisTlsCertificate {
+      thumbprint: "aabbcc".to_string(),
+      store_name: "My".to_string(),
+      ssl_flags: Some(1),
+    }
+  }
+
+  fn https_iis_binding(site: &str, binding: &str) -> IisBindingRecord {
+    let mut binding = iis_binding(site, "https", binding);
+    binding.tls_certificate = Some(tls_certificate());
+    binding
+  }
+
   fn write_fake_caddy(path: &Path) {
     #[cfg(windows)]
     fs::write(
@@ -1440,7 +1485,7 @@ exit 1
     let provider = IisProvider::fake(vec![
       iis_binding("Default Web Site", "http", "*:80:app.localhost"),
       iis_binding("Default Web Site", "http", "127.0.0.1:80:app.localhost"),
-      iis_binding("Default Web Site", "https", "*:443:secure.localhost"),
+      https_iis_binding("Default Web Site", "*:443:secure.localhost"),
       iis_binding("Other", "http", "*:80:missing.localhost"),
       iis_binding("Default Web Site", "https", "*:443:"),
     ]);
@@ -1480,7 +1525,7 @@ exit 1
       "fake-caddy"
     });
     write_fake_caddy(&caddy);
-    let binding = iis_binding("Default Web Site", "https", "*:443:");
+    let binding = https_iis_binding("Default Web Site", "*:443:");
     let provider = IisProvider::fake(vec![binding.clone()]);
     let (state, paths) = state_with_fake_caddy_paths(provider, &caddy);
     let backend_port = backend_port_for_binding(&binding);
@@ -1540,6 +1585,46 @@ exit 1
         .and_then(serde_json::Value::as_str),
       Some(expected_backend_dial.as_str())
     );
+    assert_eq!(
+      iis_route
+        .pointer("/handle/0/transport/tls/server_name")
+        .and_then(serde_json::Value::as_str),
+      Some("iis-app.localhost")
+    );
+    assert_eq!(
+      iis_route
+        .pointer("/handle/0/transport/tls/insecure_skip_verify")
+        .and_then(serde_json::Value::as_bool),
+      Some(true)
+    );
+  }
+
+  #[tokio::test]
+  async fn iis_handoff_rejects_https_binding_without_certificate_before_mutation() {
+    let binding = iis_binding("Default Web Site", "https", "*:443:secure.localhost");
+    let provider = IisProvider::fake(vec![binding.clone()]);
+    let state = state_with_iis(provider.clone());
+
+    let response = state
+      .set_iis_handoff(SetIisHandoffRequest {
+        request_id: "iis-on".to_string(),
+        binding_id: binding.binding_id(),
+        enabled: true,
+        route_host: None,
+      })
+      .await;
+    let rediscovered = provider.discover().await.unwrap();
+
+    assert!(!response.accepted);
+    assert_eq!(
+      response.issue.as_ref().map(|issue| issue.kind),
+      Some(IisIssueKind::MissingTlsCertificate)
+    );
+    assert!(response.steps.iter().any(|step| {
+      step.step_id == "iis-classify-binding" && step.status == IisOperationStepStatus::Failed
+    }));
+    assert_eq!(rediscovered, vec![binding]);
+    assert!(state.iis_store.snapshot().await.is_empty());
   }
 
   #[tokio::test]
@@ -1576,10 +1661,11 @@ exit 1
     write_fake_caddy(&caddy);
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     paths.ensure_dirs().unwrap();
-    let binding = iis_binding("Default Web Site", "https", "*:443:");
+    let binding = https_iis_binding("Default Web Site", "*:443:");
     let domain_key = "iis-app.localhost".to_string();
-    let backend_binding =
-      binding.backend_http_binding(backend_port_for_binding(&binding), &domain_key);
+    let backend_binding = binding
+      .backend_binding(backend_port_for_binding(&binding), &domain_key)
+      .unwrap();
     let store = IisMetadataStore::load(paths.metadata_path()).await.unwrap();
     store
       .insert(
@@ -1606,6 +1692,7 @@ exit 1
 
     assert!(rendered.contains("iis-app.localhost"));
     assert!(rendered.contains(&format!("127.0.0.1:{}", backend_binding.port)));
+    assert!(rendered.contains("\"server_name\": \"iis-app.localhost\""));
   }
 
   #[tokio::test]
@@ -1774,6 +1861,49 @@ exit 1
   }
 
   #[tokio::test]
+  async fn iis_https_handoff_success_and_restore_use_https_backend_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let caddy = temp.path().join(if cfg!(windows) {
+      "fake-caddy.cmd"
+    } else {
+      "fake-caddy"
+    });
+    write_fake_caddy(&caddy);
+    let binding = https_iis_binding("Default Web Site", "*:443:secure.localhost");
+    let provider = IisProvider::fake(vec![binding.clone()]);
+    let state = state_with_fake_caddy(provider.clone(), &caddy);
+
+    let enabled = state
+      .set_iis_handoff(SetIisHandoffRequest {
+        request_id: "iis-on".to_string(),
+        binding_id: binding.binding_id(),
+        enabled: true,
+        route_host: None,
+      })
+      .await;
+    let after_enable = provider.discover().await.unwrap();
+    let restored = state
+      .set_iis_handoff(SetIisHandoffRequest {
+        request_id: "iis-off".to_string(),
+        binding_id: binding.binding_id(),
+        enabled: false,
+        route_host: None,
+      })
+      .await;
+    let after_restore = provider.discover().await.unwrap();
+    let _ = state.shutdown().await;
+
+    assert!(enabled.accepted, "{enabled:?}");
+    assert_eq!(after_enable.len(), 1);
+    assert_eq!(after_enable[0].protocol, "https");
+    assert_eq!(after_enable[0].ip_address, "127.0.0.1");
+    assert_eq!(after_enable[0].host_header, "secure.localhost");
+    assert_eq!(after_enable[0].tls_certificate, Some(tls_certificate()));
+    assert!(restored.accepted, "{restored:?}");
+    assert_eq!(after_restore, vec![binding]);
+  }
+
+  #[tokio::test]
   async fn iis_handoff_denied_by_elevation_keeps_user_level_state_usable() {
     let binding = iis_binding("Default Web Site", "http", "*:80:app.localhost");
     let provider = IisProvider::fake(vec![binding.clone()]);
@@ -1819,7 +1949,7 @@ exit 1
 
   #[tokio::test]
   async fn iis_handoff_reports_unsupported_elevation_without_mutating_iis() {
-    let binding = iis_binding("Default Web Site", "https", "*:443:secure.localhost");
+    let binding = https_iis_binding("Default Web Site", "*:443:secure.localhost");
     let provider = IisProvider::fake(vec![binding.clone()]);
     provider
       .set_elevation_issue(IisIssue::new(

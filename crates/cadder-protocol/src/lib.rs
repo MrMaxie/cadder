@@ -522,6 +522,7 @@ pub enum IisIssueKind {
   ElevationDenied,
   ElevationUnsupported,
   UnsupportedBindingShape,
+  MissingTlsCertificate,
   Conflict,
   MissingBinding,
   MissingRoute,
@@ -812,6 +813,13 @@ mod tests {
     assert!(json.contains("\"approval\":\"denied\""));
     assert!(json.contains("\"retryElevation\""));
     assert_eq!(decoded, handoff_response);
+
+    let missing_tls = IisIssue::new(
+      IisIssueKind::MissingTlsCertificate,
+      "Missing certificate metadata.",
+    );
+    let json = serde_json::to_string(&missing_tls).unwrap();
+    assert!(json.contains("\"kind\":\"missingTlsCertificate\""));
 
     let request = SetIisHandoffRequest {
       request_id: "iis-on".to_string(),

@@ -14,6 +14,7 @@ Use a disposable IIS binding first. Do not test this on a production IIS site.
 - Permission to approve a Windows administrator prompt when Cadder needs to mutate IIS bindings.
 - A supported IIS binding: `http` on port `80` or `https` on port `443`.
 - One route host for the binding. Cadder can use a concrete IIS host header directly. For wildcard or empty-host bindings, you must type the host or full URL in the TUI.
+- For `https:443` bindings, IIS discovery must expose the binding certificate hash and store name. If Cadder cannot read usable TLS certificate metadata, it rejects the handoff before changing IIS.
 
 Cadder keeps discovery, route planning, restore metadata, Caddy config changes, and TUI operation in the normal user context. Only IIS binding changes are elevated. The handoff mutation batch creates the loopback backend binding and removes the public IIS binding in one administrator prompt. Restore uses one administrator prompt to recreate the public binding and remove the loopback binding. Cadder does not include Caddy route application, registration changes, discovery, or unrelated IIS rows in those privileged batches.
 
@@ -27,9 +28,11 @@ Cadder keeps discovery, route planning, restore metadata, Caddy config changes, 
 6. Press `Space` to hand off the binding.
 7. Review the TUI status line before approving the Windows prompt. It should explain that administrator access is needed for the IIS binding mutation batch.
 
-Cadder stores restore metadata before it changes IIS. It then creates a loopback HTTP backend binding on the same IIS site, removes the public IIS binding, adds a Caddy reverse-proxy route for the route host, and applies the generated Caddy config.
+Cadder stores restore metadata before it changes IIS. It then creates a loopback backend binding on the same IIS site, removes the public IIS binding, adds a Caddy reverse-proxy route for the route host, and applies the generated Caddy config.
 
-The backend binding uses `127.0.0.1:<port>`. Cadder chooses a deterministic port below the default Windows dynamic TCP range, which avoids common HTTP.sys excluded-port failures.
+The backend binding uses `127.0.0.1:<port>`. Cadder chooses a deterministic port below the default Windows dynamic TCP range, which avoids common HTTP.sys excluded-port failures. For `http:80`, the backend remains HTTP.
+
+For `https:443`, Cadder creates an HTTPS backend binding and copies the IIS binding certificate metadata. Caddy then uses TLS to the loopback backend with the route host as SNI. Caddy skips certificate verification for that loopback hop because IIS certificates commonly do not validate for `127.0.0.1`; keep IIS handoff limited to local development bindings.
 
 If you deny the administrator prompt, Cadder reports the denied steps and a retry-elevation follow-up. The original IIS binding remains available, the daemon and TUI remain usable, and you can retry the same row later.
 
@@ -46,7 +49,7 @@ A routing smoke passes when the response goes through Caddy and reaches IIS. For
 - `Via: 1.1 Caddy`
 - `Server: Microsoft-IIS/...`
 
-If the TUI status line shows the backend port, you can also check IIS directly:
+If the TUI status line shows the backend port for an HTTP handoff, you can also check IIS directly:
 
 ```powershell
 $backendPort = 41043
@@ -54,6 +57,13 @@ curl.exe -I "http://127.0.0.1:$backendPort/legacy/status"
 ```
 
 Set `$backendPort` to the port shown by your TUI.
+
+For an HTTPS handoff, connect to the loopback port while keeping the route host as the request host and TLS server name:
+
+```powershell
+$backendPort = 41043
+curl.exe -k -I --connect-to "iis-app.localhost:$backendPort:127.0.0.1:$backendPort" "https://iis-app.localhost:$backendPort/legacy/status"
+```
 
 ## Restore a binding
 
@@ -70,6 +80,7 @@ The handoff response reports each operation step with its privilege level, appro
 - `Elevation denied`: approve the Windows prompt and retry when you are ready. Non-IIS Cadder operations should remain usable.
 - `Insufficient privileges`: approve the Windows prompt if one appears. If PowerShell still reports an access problem, verify the account can manage the disposable IIS binding.
 - `Missing route host`: press `/`, enter the intended host or URL, press `Enter`, then press `Space` again.
+- `Missing TLS certificate`: repair the IIS HTTPS binding certificate, confirm IIS discovery can read the certificate hash and store name, then refresh and retry handoff.
 - `Unsupported binding shape`: leave the binding under IIS, or change it to a supported `http:80` or `https:443` binding before handing it off.
 - `Conflict`: another IIS binding or active Cadder domain already uses the same route host. Resolve that conflict before handing off the row.
 - `Rollback failed` or `Restore failed`: do not delete the runtime metadata. Fix the IIS permission or binding problem, then retry restore from the TUI.
