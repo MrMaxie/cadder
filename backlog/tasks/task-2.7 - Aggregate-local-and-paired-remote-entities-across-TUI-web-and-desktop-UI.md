@@ -4,6 +4,7 @@ title: 'Aggregate local and paired remote entities across TUI, web, and desktop 
 status: To Do
 assignee: []
 created_date: '2026-06-11 16:35'
+updated_date: '2026-06-16 15:41'
 labels: []
 milestone: m-3
 dependencies:
@@ -20,7 +21,7 @@ ordinal: 26700
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Make Cadder management clients resolve and display both local and paired remote entities in one coherent model. TUI, web, and desktop surfaces should show local and remote daemons, entrypoints, domains, logs, diagnostics, DNS and certificate status with clear provenance, and route actions to the daemon that owns each entity.
+Extend Cadder management clients, including the v1.0 local GPUI desktop app, to resolve and display both local and paired remote entities in one coherent model. TUI, web, and desktop surfaces should show local and remote daemons, entrypoints, domains, logs, diagnostics, DNS and certificate status with clear provenance, and route actions to the daemon that owns each entity.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -39,3 +40,13 @@ Make Cadder management clients resolve and display both local and paired remote 
 - [ ] #1 Tests or explicit verification were run for the changed behavior
 - [ ] #2 Coverage was measured and remains at or above the project threshold
 <!-- DOD:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: Codex
+created: 2026-06-16 15:41
+---
+Clarified relationship during backlog intake: TASK-2.6 now delivers the local-only GPUI surface for v1.0, while this task remains the follow-up for remote-aware aggregation and paired-daemon UI behavior in v2.0.
+---
+<!-- COMMENTS:END -->
