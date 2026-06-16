@@ -76,9 +76,10 @@ cadderctl watch status --output jsonl
 
 ## Relation to the TUI
 
-`cadderctl` and `cadder-tui` share the same daemon contracts and runtime model.
+`cadderctl`, `cadder-mcp`, and `cadder-tui` share the same daemon contracts and runtime model.
 
 - Use `cadderctl` when you need predictable output, non-interactive toggles, or agent-friendly polling and watches.
+- Use `cadder-mcp` when your agent host already speaks MCP and should call structured local tools instead of shelling out.
 - Use `cadder-tui` when you need interactive browsing, navigation, filters, and richer operator context.
 
 Neither tool changes daemon ownership semantics. They are clients of the same per-user backend.
@@ -93,4 +94,4 @@ The command structure and output modes are intentionally stable so future Cadder
 - toggle managed routes explicitly;
 - map command failures to stable exit codes and typed machine-readable errors.
 
-That keeps agent workflows aligned with the same backend used by the interactive TUI instead of creating a parallel automation API.
+That keeps agent workflows aligned with the same backend used by the interactive TUI instead of creating a parallel automation API. If you want a local MCP surface instead of shell-oriented commands, see [cadder-mcp](../cadder-mcp/).

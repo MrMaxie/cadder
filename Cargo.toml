@@ -1,5 +1,7 @@
 [workspace]
 members = [
+  "crates/cadder-mcp",
+  "crates/cadder-operator",
   "crates/cadderctl",
   "crates/cadder-daemon",
   "crates/cadder-protocol",

@@ -127,6 +127,18 @@ fn verify_dist(options: &VerifyDistOptions) -> Result<()> {
     bail!("cadderctl --help failed with {}", ctl_output.status);
   }
 
+  let mcp = options
+    .dir
+    .join(exe_name("cadder-mcp", options.target.as_deref()));
+  let mcp_output = Command::new(&mcp)
+    .arg("--help")
+    .stdin(Stdio::null())
+    .output()
+    .with_context(|| format!("run {}", mcp.display()))?;
+  if !mcp_output.status.success() {
+    bail!("cadder-mcp --help failed with {}", mcp_output.status);
+  }
+
   Ok(())
 }
 
@@ -179,8 +191,8 @@ fn package_with_dist(
   Ok(())
 }
 
-fn portable_binaries() -> [&'static str; 4] {
-  ["cadderd", "cadderctl", "cadder-tui", "caddy"]
+fn portable_binaries() -> [&'static str; 5] {
+  ["cadderd", "cadderctl", "cadder-mcp", "cadder-tui", "caddy"]
 }
 
 fn release_binary_path(name: &str, target: Option<&str>) -> PathBuf {
@@ -211,6 +223,8 @@ fn build_release_binaries(target: Option<&str>) -> Result<()> {
     "cadderd",
     "-p",
     "cadderctl",
+    "-p",
+    "cadder-mcp",
     "-p",
     "cadder-tui",
     "-p",
@@ -723,7 +737,7 @@ edition = "2024"
   fn portable_layout_includes_expected_binaries() {
     assert_eq!(
       portable_binaries(),
-      ["cadderd", "cadderctl", "cadder-tui", "caddy"]
+      ["cadderd", "cadderctl", "cadder-mcp", "cadder-tui", "caddy"]
     );
   }
 
@@ -864,6 +878,7 @@ edition = "2024"
           &[
             "cadderd.exe",
             "cadderctl.exe",
+            "cadder-mcp.exe",
             "cadder-tui.exe",
             "caddy.exe",
           ],
@@ -881,6 +896,7 @@ edition = "2024"
       &[
         "cadder-1.2.3-windows-x64/",
         "cadder-1.2.3-windows-x64/cadderctl.exe",
+        "cadder-1.2.3-windows-x64/cadder-mcp.exe",
         "cadder-1.2.3-windows-x64/cadder-tui.exe",
         "cadder-1.2.3-windows-x64/cadder.toml",
         "cadder-1.2.3-windows-x64/cadderd.exe",
@@ -916,7 +932,7 @@ edition = "2024"
         );
         write_fake_portable_layout(
           &dist_options.out_dir,
-          &["cadderd", "cadderctl", "cadder-tui", "caddy"],
+          &["cadderd", "cadderctl", "cadder-mcp", "cadder-tui", "caddy"],
         )
       },
     )
@@ -931,6 +947,7 @@ edition = "2024"
       &[
         "cadder-1.2.3-linux-x64/",
         "cadder-1.2.3-linux-x64/cadderctl",
+        "cadder-1.2.3-linux-x64/cadder-mcp",
         "cadder-1.2.3-linux-x64/cadder-tui",
         "cadder-1.2.3-linux-x64/cadder.toml",
         "cadder-1.2.3-linux-x64/cadderd",

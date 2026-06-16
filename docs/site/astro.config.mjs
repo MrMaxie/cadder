@@ -28,6 +28,7 @@ export default defineConfig({
           items: [
             { label: 'How to use', slug: 'user-guide/how-to-use' },
             { label: 'cadderctl', slug: 'user-guide/cadderctl' },
+            { label: 'cadder-mcp', slug: 'user-guide/cadder-mcp' },
             { label: 'cadder.toml', slug: 'user-guide/cadder-toml' },
             { label: 'PATH and shim strategy', slug: 'user-guide/path-and-shim' },
             { label: 'TUI and diagnostics', slug: 'user-guide/tui-diagnostics' },

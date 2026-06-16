@@ -8,11 +8,12 @@ Published documentation: <https://maxie.dev/Cadder/>
 
 ## What's included
 
-Cadder ships four executables:
+Cadder ships five executables:
 
 - `caddy` is the Caddy-compatible shim. For `caddy run`, it attaches to a running `cadderd`, registers the current project's Caddyfile, keeps that registration alive while the shim process runs, and unregisters on exit. If the backend is unavailable, Cadder fails with guidance instead of starting it implicitly. Other Caddy commands are delegated to the safely resolved real Caddy binary.
 - `cadderd` is the per-user daemon. It owns local IPC, entrypoint registrations, adapted Caddy config composition, the generated effective runtime config, the real Caddy process it starts, diagnostics, and bounded log storage.
 - `cadderctl` is the non-TUI operator CLI. It attaches to the daemon for one-shot state queries, logs, and toggles, and provides an explicit `daemon start` path for scripting and automation.
+- `cadder-mcp` is the local stdio MCP server. It attaches to the same daemon, exposes entrypoints, domains, diagnostics, and logs as MCP tools, and keeps daemon startup explicit through a dedicated `cadder_start_daemon` tool.
 - `cadder-tui` is the terminal UI. It attaches to the daemon, shows overview state, entrypoints, domains, per-domain logs, diagnostics, filters, toggles, log export, and daemon shutdown, and exposes an explicit `s` action when the backend needs to be started.
 
 Each executable supports `--help` and `--version`.
@@ -22,7 +23,7 @@ Each executable supports `--help` and `--version`.
 1. Download the latest Cadder release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases).
 2. Create `cadder.toml` next to Cadder with the path to the real Caddy binary.
 3. Start `cadderd`, then run a project through Cadder's `caddy` shim.
-4. Use `cadderctl` for automation-friendly state and log queries, or open `cadder-tui` for the interactive dashboard.
+4. Use `cadderctl` for automation-friendly state and log queries, start `cadder-mcp` from an MCP-capable host when you want agent tools, or open `cadder-tui` for the interactive dashboard.
 
 Full setup docs:
 
@@ -36,6 +37,7 @@ Full setup docs:
 ```sh
 cadderd
 cadderctl daemon status
+cadder-mcp --help
 caddy run
 cadder-tui
 ```
@@ -50,6 +52,8 @@ cadderctl entrypoints list --output json
 cadderctl domains disable app.localhost --registration shim-1
 cadderctl logs show --limit 20 domain app.localhost --registration shim-1 --output json
 ```
+
+An MCP-capable host can also start `cadder-mcp` and interact with Cadder through local stdio tools. The server is intentionally local-only, applies extra redaction to returned text, and only launches the backend through the explicit `cadder_start_daemon` tool.
 
 For a local checkout, run the project checks with:
 

@@ -1,0 +1,13 @@
+[package]
+name = "cadder-operator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "=1.0.102"
+cadder-daemon = { version = "0.8.0", path = "../cadder-daemon" }
+cadder-protocol = { version = "0.8.0", path = "../cadder-protocol" }
+chrono = { version = "=0.4.45", features = ["serde"] }
+serde = { version = "=1.0.228", features = ["derive"] }

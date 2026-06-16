@@ -1,0 +1,54 @@
+---
+title: cadder-mcp
+description: Run Cadder's local MCP server for agent-friendly inspection and explicit control.
+---
+
+`cadder-mcp` is Cadder's local stdio MCP server. It exposes structured tools for the same per-user backend used by `cadderctl` and `cadder-tui`, so an MCP-capable host can inspect state, read diagnostics, fetch logs, and toggle managed routes without scraping terminal output.
+
+## Start the server
+
+Run the server directly:
+
+```sh
+cadder-mcp
+```
+
+You can also override the runtime directory, daemon binary, or real Caddy resolution inputs when your host needs an explicit launch context:
+
+```sh
+cadder-mcp --runtime-dir /tmp/cadder-runtime
+cadder-mcp --daemon-path /absolute/path/to/cadderd
+cadder-mcp --real-caddy-command /absolute/path/to/caddy
+```
+
+## Available tools
+
+`cadder-mcp` exposes these operator-facing tools:
+
+- `cadder_get_overview`
+- `cadder_list_entrypoints`
+- `cadder_list_domains`
+- `cadder_show_diagnostics`
+- `cadder_get_logs`
+- `cadder_start_daemon`
+- `cadder_set_entrypoint_enabled`
+- `cadder_set_domain_enabled`
+
+The server stays attach-only by default. Read-only tools and toggle tools connect to an existing daemon and return typed unavailable errors when `cadderd` is not running. Only `cadder_start_daemon` may launch the backend.
+
+## Trust boundary
+
+`cadder-mcp` is intentionally local-only:
+
+- it serves tools over stdio for the host process that launched it;
+- it does not open a network listener;
+- it applies an extra redaction pass to returned paths and free-form text;
+- it truncates large log payloads instead of streaming the full daemon log store in v1.
+
+This makes the MCP surface appropriate for local agents and editors that already have workstation access, while keeping daemon ownership and startup policy aligned with the CLI and TUI.
+
+## When to use it
+
+- Use `cadder-mcp` when your host already speaks MCP and should call structured local tools.
+- Use `cadderctl` when you want shell-friendly commands, JSON output, or scripts outside an MCP host.
+- Use `cadder-tui` when you want an interactive dashboard, navigation, filters, and browsing.

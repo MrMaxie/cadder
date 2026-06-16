@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::view::{SelectedDomain, resolve_domain};
 use crate::{
   cli::{
     CliArgs, Command, DaemonCommand, DiagnosticsCommand, DomainsCommand, LogsCommand,
@@ -8,19 +10,15 @@ use crate::{
   },
   render,
   view::{
-    ActionResultView, ConnectionStateView, DaemonStartView, LogsView, SelectedDomain,
-    daemon_status_connected, daemon_status_unavailable, diagnostics_view, domains_view,
-    entrypoints_view, map_severity, resolve_domain,
+    ActionResultView, ConnectionStateView, DaemonStartView, LogsView, daemon_status_connected,
+    daemon_status_unavailable, diagnostics_view, domains_view, entrypoints_view, map_severity,
   },
 };
 use anyhow::Result as AnyResult;
-use cadder_daemon::{
-  CadderClient, DaemonLaunchOptions, RuntimePaths, StateSubscription,
-  ensure_daemon_running_with_options,
-};
+use cadder_daemon::{DaemonLaunchOptions, RuntimePaths, StateSubscription};
+use cadder_operator::{DomainSelector, OperatorContext};
 use cadder_protocol::{
-  BasicResponse, GuiStateSnapshot, LogStreamIdentity, QueryLogsRequest, QueryStateRequest,
-  QueryStateResponse, SetDomainEnabledRequest, SetEntrypointEnabledRequest, ShutdownDaemonRequest,
+  BasicResponse, GuiStateSnapshot, LogStreamIdentity, QueryStateResponse, ShutdownDaemonRequest,
   StateChangedEvent, message_types, new_request_id,
 };
 use chrono::Utc;
@@ -63,44 +61,32 @@ impl From<io::Error> for ExecuteError {
 
 struct AppContext {
   output: OutputMode,
-  paths: RuntimePaths,
-  client: CadderClient,
-  launch_options: DaemonLaunchOptions,
+  operator: OperatorContext,
 }
 
 impl AppContext {
   fn new(args: &CliArgs) -> Result<Self, CliError> {
     let command = args.command_label();
-    let paths = RuntimePaths::resolve(args.runtime_dir.clone()).map_err(|error| {
-      CliError::invalid_usage(
-        command,
-        format!("Could not resolve the Cadder runtime directory: {error}."),
-        None,
-      )
-    })?;
     Ok(Self {
       output: args.output,
-      client: CadderClient::new(paths.clone()),
-      paths,
-      launch_options: DaemonLaunchOptions {
-        explicit_daemon: args.daemon_path.clone(),
-        real_caddy_command: args.real_caddy_command.clone(),
-        shim_path: None,
-      },
+      operator: OperatorContext::new(
+        command,
+        args.runtime_dir.clone(),
+        DaemonLaunchOptions {
+          explicit_daemon: args.daemon_path.clone(),
+          real_caddy_command: args.real_caddy_command.clone(),
+          shim_path: None,
+        },
+      )?,
     })
   }
 
+  fn paths(&self) -> &RuntimePaths {
+    self.operator.paths()
+  }
+
   async fn query_state_response(&self) -> AnyResult<QueryStateResponse> {
-    self
-      .client
-      .request(
-        message_types::QUERY_STATE_REQUEST,
-        message_types::QUERY_STATE_RESPONSE,
-        &QueryStateRequest {
-          request_id: new_request_id("ctl-state"),
-        },
-      )
-      .await
+    self.operator.query_state_response().await
   }
 
   async fn query_snapshot(
@@ -108,19 +94,7 @@ impl AppContext {
     command: &'static str,
     action: &str,
   ) -> Result<GuiStateSnapshot, CliError> {
-    let response = self.query_state_response().await.map_err(|error| {
-      CliError::daemon_request(command, self.paths.runtime_dir(), action, &error)
-    })?;
-    response.snapshot.ok_or_else(|| {
-      CliError::new(
-        command,
-        CliErrorKind::IpcFailure,
-        "Cadder daemon returned no state snapshot.".to_string(),
-        Some(
-          "Retry the command after the daemon finishes its current state transition.".to_string(),
-        ),
-      )
-    })
+    self.operator.query_snapshot(command, action).await
   }
 
   async fn request_basic(
@@ -132,10 +106,9 @@ impl AppContext {
     request: &impl Serialize,
   ) -> Result<BasicResponse, CliError> {
     self
-      .client
-      .request(message_type, response_type, request)
+      .operator
+      .request_basic(command, action, message_type, response_type, request)
       .await
-      .map_err(|error| CliError::daemon_request(command, self.paths.runtime_dir(), action, &error))
   }
 
   async fn query_logs(
@@ -147,24 +120,10 @@ impl AppContext {
     cursor: Option<String>,
     minimum_severity: Option<cadder_protocol::LogSeverity>,
   ) -> Result<LogsView, CliError> {
-    let response = self
-      .client
-      .request::<_, cadder_protocol::QueryLogsResponse>(
-        message_types::QUERY_LOGS_REQUEST,
-        message_types::QUERY_LOGS_RESPONSE,
-        &QueryLogsRequest {
-          request_id: new_request_id("ctl-logs"),
-          stream,
-          limit: Some(limit),
-          cursor,
-          minimum_severity,
-        },
-      )
+    self
+      .operator
+      .query_logs(command, action, stream, limit, cursor, minimum_severity)
       .await
-      .map_err(|error| {
-        CliError::daemon_request(command, self.paths.runtime_dir(), action, &error)
-      })?;
-    Ok(LogsView::from(response))
   }
 
   async fn subscribe_state(
@@ -172,11 +131,43 @@ impl AppContext {
     command: &'static str,
     action: &str,
   ) -> Result<StateSubscription, CliError> {
+    self.operator.subscribe_state(command, action).await
+  }
+
+  async fn ensure_daemon_running(&self, command: &'static str) -> Result<(), CliError> {
+    self.operator.ensure_daemon_running(command).await
+  }
+
+  async fn set_entrypoint_enabled(
+    &self,
+    command: &'static str,
+    registration_id: String,
+    enabled: bool,
+  ) -> Result<BasicResponse, CliError> {
     self
-      .client
-      .subscribe_state(new_request_id("ctl-watch"))
+      .operator
+      .set_entrypoint_enabled(command, registration_id, enabled)
       .await
-      .map_err(|error| CliError::daemon_request(command, self.paths.runtime_dir(), action, &error))
+  }
+
+  async fn set_domain_enabled(
+    &self,
+    command: &'static str,
+    selector: &DomainSelector,
+    enabled: bool,
+  ) -> Result<BasicResponse, CliError> {
+    self
+      .operator
+      .set_domain_enabled(command, selector, enabled)
+      .await
+  }
+
+  async fn resolve_logs_target(
+    &self,
+    command: &'static str,
+    target: cadder_operator::LogsTarget,
+  ) -> Result<LogStreamIdentity, CliError> {
+    self.operator.resolve_logs_target(command, target).await
   }
 }
 
@@ -275,19 +266,19 @@ async fn handle_daemon(
             )
             .into());
           };
-          daemon_status_connected(context.paths.runtime_dir(), &snapshot)
+          daemon_status_connected(context.paths().runtime_dir(), &snapshot)
         }
         Err(error) if daemon_error_indicates_unavailable(&error) => daemon_status_unavailable(
-          context.paths.runtime_dir(),
+          context.paths().runtime_dir(),
           connection_state_from_error(&error),
-          unavailable_message(context.paths.runtime_dir(), &error),
-          Some(start_guidance(context.paths.runtime_dir())),
+          unavailable_message(context.paths().runtime_dir(), &error),
+          Some(start_guidance(context.paths().runtime_dir())),
         ),
         Err(error) => {
           return Err(
             CliError::daemon_request(
               command.label(),
-              context.paths.runtime_dir(),
+              context.paths().runtime_dir(),
               "query daemon status",
               &error,
             )
@@ -311,7 +302,7 @@ async fn handle_daemon(
           return Err(
             CliError::daemon_request(
               command.label(),
-              context.paths.runtime_dir(),
+              context.paths().runtime_dir(),
               "check daemon status before start",
               &error,
             )
@@ -320,11 +311,7 @@ async fn handle_daemon(
         }
       };
 
-      ensure_daemon_running_with_options(&context.paths, context.launch_options.clone())
-        .await
-        .map_err(|error| {
-          CliError::daemon_start(command.label(), context.paths.runtime_dir(), &error)
-        })?;
+      context.ensure_daemon_running(command.label()).await?;
       let snapshot = context
         .query_snapshot(command.label(), "query daemon status after start")
         .await?;
@@ -335,7 +322,7 @@ async fn handle_daemon(
         } else {
           "cadderd started.".to_string()
         },
-        status: daemon_status_connected(context.paths.runtime_dir(), &snapshot),
+        status: daemon_status_connected(context.paths().runtime_dir(), &snapshot),
       };
       write_one_shot(
         context.output,
@@ -426,29 +413,8 @@ async fn toggle_entrypoint(
   stdout: &mut dyn Write,
 ) -> Result<(), ExecuteError> {
   let response = context
-    .request_basic(
-      command,
-      "toggle entrypoint activation",
-      message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
-      message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
-      &SetEntrypointEnabledRequest {
-        request_id: new_request_id("ctl-entrypoint-toggle"),
-        registration_id: registration_id.clone(),
-        shim_session_nonce: None,
-        enabled,
-      },
-    )
+    .set_entrypoint_enabled(command, registration_id, enabled)
     .await?;
-  if !response.accepted {
-    return Err(
-      CliError::target_not_found(
-        command,
-        format!("Entrypoint `{registration_id}` was not found."),
-        Some("Run `cadderctl entrypoints list` to inspect valid registration IDs.".to_string()),
-      )
-      .into(),
-    );
-  }
 
   write_one_shot(
     context.output,
@@ -498,32 +464,16 @@ async fn toggle_domain(
   enabled: bool,
   stdout: &mut dyn Write,
 ) -> Result<(), ExecuteError> {
-  let snapshot = context.query_snapshot(command, "query domains").await?;
-  let selected = select_domain(command, &snapshot, &selector)?;
   let response = context
-    .request_basic(
+    .set_domain_enabled(
       command,
-      "toggle domain activation",
-      message_types::SET_DOMAIN_ENABLED_REQUEST,
-      message_types::SET_DOMAIN_ENABLED_RESPONSE,
-      &SetDomainEnabledRequest {
-        request_id: new_request_id("ctl-domain-toggle"),
-        registration_id: selected.registration_id,
-        domain_key: selected.canonical_domain,
-        enabled,
+      &DomainSelector {
+        domain: selector.domain,
+        registration: selector.registration,
       },
+      enabled,
     )
     .await?;
-  if !response.accepted {
-    return Err(
-      CliError::conflict_or_rejected(
-        command,
-        response.message,
-        Some("Refresh the domain list and retry the command with an explicit `--registration` filter if needed.".to_string()),
-      )
-      .into(),
-    );
-  }
   write_one_shot(
     context.output,
     command,
@@ -644,7 +594,7 @@ async fn handle_watch(
     let event = tokio::select! {
       _ = tokio::signal::ctrl_c() => return Ok(()),
       result = subscription.next_event() => {
-        result.map_err(|error| CliError::daemon_request(command.label(), context.paths.runtime_dir(), "stream daemon state", &error))?
+        result.map_err(|error| CliError::daemon_request(command.label(), context.paths().runtime_dir(), "stream daemon state", &error))?
       }
     };
 
@@ -656,57 +606,7 @@ async fn handle_watch(
   }
 }
 
-async fn resolve_logs_target(
-  context: &AppContext,
-  command: &'static str,
-  target: LogsTargetCommand,
-) -> Result<LogStreamIdentity, CliError> {
-  match target {
-    LogsTargetCommand::Runtime => Ok(LogStreamIdentity::runtime_control()),
-    LogsTargetCommand::Entrypoint { registration_id } => {
-      let snapshot = context.query_snapshot(command, "query entrypoints").await?;
-      let entrypoint = snapshot
-        .registrations
-        .iter()
-        .find(|entrypoint| entrypoint.registration_id == registration_id)
-        .ok_or_else(|| {
-          CliError::target_not_found(
-            command,
-            format!("Entrypoint `{registration_id}` was not found."),
-            Some("Run `cadderctl entrypoints list` to inspect valid registration IDs.".to_string()),
-          )
-        })?;
-      Ok(entrypoint.log_stream.clone())
-    }
-    LogsTargetCommand::Domain {
-      domain,
-      registration,
-    } => {
-      let snapshot = context.query_snapshot(command, "query domains").await?;
-      let selected = select_domain(
-        command,
-        &snapshot,
-        &crate::cli::DomainSelectorArgs {
-          domain,
-          registration,
-        },
-      )?;
-      let domain = domains_view(&snapshot, Some(&selected.registration_id))
-        .domains
-        .into_iter()
-        .find(|domain| domain.canonical_domain == selected.canonical_domain)
-        .ok_or_else(|| {
-          CliError::target_not_found(
-            command,
-            "The selected domain no longer exists in the current daemon snapshot.",
-            Some("Retry the command after refreshing the daemon state.".to_string()),
-          )
-        })?;
-      Ok(domain.log_stream)
-    }
-  }
-}
-
+#[cfg(test)]
 fn select_domain(
   command: &'static str,
   snapshot: &GuiStateSnapshot,
@@ -745,6 +645,42 @@ fn select_domain(
       ),
     }
   })
+}
+
+async fn resolve_logs_target(
+  context: &AppContext,
+  command: &'static str,
+  target: LogsTargetCommand,
+) -> Result<LogStreamIdentity, CliError> {
+  match target {
+    LogsTargetCommand::Runtime => {
+      context
+        .resolve_logs_target(command, cadder_operator::LogsTarget::Runtime)
+        .await
+    }
+    LogsTargetCommand::Entrypoint { registration_id } => {
+      context
+        .resolve_logs_target(
+          command,
+          cadder_operator::LogsTarget::Entrypoint { registration_id },
+        )
+        .await
+    }
+    LogsTargetCommand::Domain {
+      domain,
+      registration,
+    } => {
+      context
+        .resolve_logs_target(
+          command,
+          cadder_operator::LogsTarget::Domain(DomainSelector {
+            domain,
+            registration,
+          }),
+        )
+        .await
+    }
+  }
 }
 
 fn write_one_shot<T: Serialize>(
@@ -793,7 +729,7 @@ fn write_watch_event(
 ) -> io::Result<()> {
   match command {
     WatchCommand::Status => {
-      let status = daemon_status_connected(context.paths.runtime_dir(), &event.snapshot);
+      let status = daemon_status_connected(context.paths().runtime_dir(), &event.snapshot);
       match context.output {
         OutputMode::Human => {
           writeln!(
@@ -1033,9 +969,7 @@ mod tests {
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let context = AppContext {
       output,
-      client: CadderClient::new(paths.clone()),
-      paths,
-      launch_options: DaemonLaunchOptions::default(),
+      operator: OperatorContext::from_paths(paths, DaemonLaunchOptions::default()),
     };
     (temp, context)
   }
