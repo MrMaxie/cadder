@@ -10,9 +10,9 @@ Published documentation: <https://maxie.dev/Cadder/>
 
 Cadder ships three executables:
 
-- `caddy` is the Caddy-compatible shim. For `caddy run`, it starts or connects to `cadderd`, registers the current project's Caddyfile, keeps that registration alive while the shim process runs, and unregisters on exit. Other Caddy commands are delegated to the safely resolved real Caddy binary.
+- `caddy` is the Caddy-compatible shim. For `caddy run`, it attaches to a running `cadderd`, registers the current project's Caddyfile, keeps that registration alive while the shim process runs, and unregisters on exit. If the backend is unavailable, Cadder fails with guidance instead of starting it implicitly. Other Caddy commands are delegated to the safely resolved real Caddy binary.
 - `cadderd` is the per-user daemon. It owns local IPC, entrypoint registrations, adapted Caddy config composition, the generated effective runtime config, the real Caddy process it starts, diagnostics, and bounded log storage.
-- `cadder-tui` is the terminal UI. It connects to the daemon, can start it unless `--no-start` is used, and shows overview state, entrypoints, domains, per-domain logs, diagnostics, filters, toggles, log export, and daemon shutdown.
+- `cadder-tui` is the terminal UI. It attaches to the daemon, shows overview state, entrypoints, domains, per-domain logs, diagnostics, filters, toggles, log export, and daemon shutdown, and exposes an explicit `s` action when the backend needs to be started.
 
 Each executable supports `--help` and `--version`.
 
@@ -20,8 +20,8 @@ Each executable supports `--help` and `--version`.
 
 1. Download the latest Cadder release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases).
 2. Create `cadder.toml` next to Cadder with the path to the real Caddy binary.
-3. Run a project through Cadder's `caddy` shim.
-4. Open `cadder-tui` for state, domains, logs, and diagnostics.
+3. Start `cadderd`, then run a project through Cadder's `caddy` shim.
+4. Open `cadder-tui` for state, domains, logs, diagnostics, and explicit backend control.
 
 Full setup docs:
 
@@ -33,9 +33,12 @@ Full setup docs:
 ## Commands
 
 ```sh
+cadderd
 caddy run
 cadder-tui
 ```
+
+`caddy run` now requires a running Cadder backend. Start `cadderd` directly or open `cadder-tui` and press `s` before retrying the shim command.
 
 For a local checkout, run the project checks with:
 

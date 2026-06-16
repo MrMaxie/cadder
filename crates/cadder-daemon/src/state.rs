@@ -21,9 +21,12 @@ use cadder_protocol::{
 use chrono::Utc;
 use std::{
   collections::{BTreeMap, BTreeSet},
-  sync::Arc,
+  sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+  },
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast};
 
 #[derive(Debug, Clone)]
 pub struct DaemonState {
@@ -33,6 +36,7 @@ pub struct DaemonState {
   iis_provider: IisProvider,
   iis_store: IisMetadataStore,
   iis_operation: Arc<Mutex<()>>,
+  shutdown_signal: ShutdownSignal,
 }
 
 #[derive(Debug)]
@@ -40,6 +44,29 @@ struct DaemonInner {
   registrations: BTreeMap<String, EntrypointRegistration>,
   coordinator: CaddyConfigCoordinator,
   sequence: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ShutdownSignal {
+  requested: Arc<AtomicBool>,
+  notify: Arc<Notify>,
+}
+
+impl ShutdownSignal {
+  fn request(&self) {
+    if !self.requested.swap(true, Ordering::SeqCst) {
+      self.notify.notify_waiters();
+    }
+  }
+
+  pub async fn wait(&self) {
+    let notified = self.notify.notified();
+    tokio::pin!(notified);
+    if self.requested.load(Ordering::SeqCst) {
+      return;
+    }
+    notified.await;
+  }
 }
 
 impl DaemonState {
@@ -56,6 +83,7 @@ impl DaemonState {
       iis_provider: IisProvider::system(),
       iis_store: IisMetadataStore::memory(),
       iis_operation: Arc::new(Mutex::new(())),
+      shutdown_signal: ShutdownSignal::default(),
     }
   }
 
@@ -92,6 +120,10 @@ impl DaemonState {
 
   pub fn subscribe(&self) -> broadcast::Receiver<StateChangedEvent> {
     self.events.subscribe()
+  }
+
+  pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
+    self.shutdown_signal.clone()
   }
 
   pub fn logs(&self) -> CaddyLogStore {
@@ -377,6 +409,9 @@ impl DaemonState {
   pub async fn shutdown(&self) -> BasicResponse {
     let mut inner = self.inner.lock().await;
     let result = inner.coordinator.shutdown().await;
+    if result.is_ok() {
+      self.shutdown_signal.request();
+    }
     BasicResponse {
       request_id: "shutdown".to_string(),
       accepted: result.is_ok(),

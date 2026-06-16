@@ -22,16 +22,17 @@ You can also run Cadder by direct path. That is useful for testing or for setups
 ## Run a project
 
 ```sh
+cadderd
 caddy run
 ```
 
-The shim starts or connects to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running.
+The shim attaches to the running `cadderd` backend, registers the project Caddyfile, and keeps that registration alive while the command is running. If the backend is unavailable, Cadder reports how to start it instead of spawning it implicitly.
 
 ```sh
 cadder-tui
 ```
 
-Use the TUI to inspect current state, domains, logs, diagnostics, and toggles.
+Use the TUI to inspect current state, domains, logs, diagnostics, toggles, and explicit backend controls. If you prefer, you can also open `cadder-tui` first and press `s` to start the backend from inside the dashboard.
 
 ## OS cookbooks
 

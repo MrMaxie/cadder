@@ -3,8 +3,8 @@ use anyhow::{Context, Result, anyhow};
 use cadder_protocol::{
   BasicResponse, HeartbeatEntrypointRequest, IpcEnvelope, QueryIisBindingsRequest,
   QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, SetDomainEnabledRequest,
-  SetEntrypointEnabledRequest, SetIisHandoffRequest, ShutdownDaemonRequest, SubscribeStateRequest,
-  UnregisterEntrypointRequest, message_types,
+  SetEntrypointEnabledRequest, SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent,
+  SubscribeStateRequest, UnregisterEntrypointRequest, message_types,
 };
 use fs4::{FileExt, TryLockError};
 use interprocess::local_socket::{
@@ -45,9 +45,11 @@ impl DaemonServer {
       .try_overwrite(true)
       .create_tokio()
       .context("create local IPC listener")?;
+    let shutdown_signal = self.state.shutdown_signal();
 
     loop {
       tokio::select! {
+          _ = shutdown_signal.wait() => break,
           changed = shutdown.changed() => {
               if changed.is_ok() && *shutdown.borrow() {
                   break;
@@ -294,6 +296,12 @@ impl CadderClient {
       CadderSession::connect_name(name, self.paths.socket_name().to_string()).await?;
     session.request(message_type, response_type, request).await
   }
+
+  pub async fn subscribe_state(&self, request_id: String) -> Result<StateSubscription> {
+    let name = self.paths.socket_name().to_ns_name::<GenericNamespaced>()?;
+    let session = CadderSession::connect_name(name, self.paths.socket_name().to_string()).await?;
+    session.subscribe_state(request_id).await
+  }
 }
 
 #[derive(Debug)]
@@ -336,15 +344,64 @@ impl CadderSession {
     let mut line = String::new();
     self.reader.read_line(&mut line).await?;
     if line.is_empty() {
-      return Err(anyhow!(
-        "daemon closed the IPC connection without a response"
-      ));
+      return Err(
+        io::Error::new(
+          io::ErrorKind::UnexpectedEof,
+          "daemon closed the IPC connection without a response",
+        )
+        .into(),
+      );
     }
     let envelope: IpcEnvelope = serde_json::from_str(line.trim_end())?;
     if envelope.message_type != response_type {
       return Err(anyhow!(
         "unexpected response type `{}`, expected `{response_type}`",
         envelope.message_type
+      ));
+    }
+    Ok(envelope.decode()?)
+  }
+
+  pub async fn subscribe_state(self, request_id: String) -> Result<StateSubscription> {
+    let mut subscription = StateSubscription {
+      reader: self.reader,
+      writer: self.writer,
+    };
+    write_envelope(
+      &mut subscription.writer,
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      &SubscribeStateRequest { request_id },
+    )
+    .await?;
+    Ok(subscription)
+  }
+}
+
+#[derive(Debug)]
+pub struct StateSubscription {
+  reader: BufReader<tokio::io::ReadHalf<Stream>>,
+  writer: tokio::io::WriteHalf<Stream>,
+}
+
+impl StateSubscription {
+  pub async fn next_event(&mut self) -> Result<StateChangedEvent> {
+    let mut line = String::new();
+    self.reader.read_line(&mut line).await?;
+    if line.is_empty() {
+      return Err(
+        io::Error::new(
+          io::ErrorKind::UnexpectedEof,
+          "daemon closed the state subscription",
+        )
+        .into(),
+      );
+    }
+    let envelope: IpcEnvelope = serde_json::from_str(line.trim_end())?;
+    if envelope.message_type != message_types::STATE_CHANGED_EVENT {
+      return Err(anyhow!(
+        "unexpected response type `{}`, expected `{}`",
+        envelope.message_type,
+        message_types::STATE_CHANGED_EVENT
       ));
     }
     Ok(envelope.decode()?)

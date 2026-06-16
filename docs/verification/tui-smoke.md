@@ -22,12 +22,12 @@ Run the checklist on each backend available for the platform under test:
 
 ## Checklist
 
-- Launch `cargo run -p cadder-tui -- --runtime-dir <runtime-dir> --no-start` while no daemon is running for that runtime and confirm the Overview view renders without layout corruption, panic, immediate exit, or broken terminal echo/cursor behavior.
+- Launch `cargo run -p cadder-tui -- --runtime-dir <runtime-dir>` while no daemon is running for that runtime and confirm the Overview view renders without layout corruption, panic, immediate exit, or broken terminal echo/cursor behavior. Optionally repeat with `--no-start` and confirm it behaves the same as the default attach-only launch.
 - Confirm Overview shows `Daemon: Not running` or `Daemon: Connection failed` with actionable guidance to press `s`, `r`, or `q`.
-- Confirm the footer advertises `s start/reconnect`.
+- Confirm the footer advertises `s start backend`.
 - Press `r` and confirm the TUI remains usable if the daemon is still unavailable.
 - Relaunch with `--daemon-path <path-to-cadderd>` if `cadderd` is not next to `cadder-tui` or on `PATH`, press `s`, and confirm the Overview state changes to `Starting` while input remains responsive.
-- After a successful in-TUI start, confirm Overview changes to `Daemon: Connected` and normal state refresh resumes.
+- After a successful in-TUI start, confirm Overview changes to `Daemon: Connected`, the dashboard attaches without restarting, and normal state refresh resumes.
 - If testing a start failure, pass a missing `--daemon-path`, press `s`, and confirm Overview changes to `Start failed` while retry with `s` and quit with `q` remain available.
 - Confirm Overview shows runtime status, config status, entrypoint count, domain count, and active domain count.
 - Change daemon state from a shim session and confirm Overview updates automatically within a few seconds; press `r` and confirm manual refresh still works.
@@ -50,7 +50,7 @@ Run the checklist on each backend available for the platform under test:
 - With the domain log stream still open, switch to Settings, use `Up` and `Down` to choose `All`, `Info and higher`, `Warnings and errors`, or `Errors only`, then press `Enter` or `Space`; return to Logs and confirm the severity label and displayed page reset without mixing entries from different filters.
 - Press `Enter` in Logs and confirm manual refresh remains responsive.
 - Press `Tab` to open Diagnostics and confirm config/runtime diagnostics are shown when a conflict or runtime reload failure exists; otherwise confirm the empty diagnostics message is shown.
-- Confirm the footer advertises `Tab`/`Shift+Tab`/`Left`/`Right`, manual refresh, daemon start/reconnect, Settings severity selection, log pause/refresh/export, daemon shutdown, and quit controls.
+- Confirm the footer advertises `Tab`/`Shift+Tab`/`Left`/`Right`, manual refresh, explicit backend start, Settings severity selection, log pause/refresh/export, daemon shutdown, and quit controls.
 - On Windows, confirm the footer advertises IIS refresh and handoff/restore controls.
 - Press `d` and confirm the daemon shutdown request returns a status message and does not freeze terminal input.
 - Press `q` and confirm the terminal exits cleanly with normal echo/cursor behavior restored.

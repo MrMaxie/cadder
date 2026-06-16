@@ -3,13 +3,15 @@ title: TUI and diagnostics
 description: Inspect daemon state, domains, per-domain logs, and diagnostics through cadder-tui.
 ---
 
-`cadder-tui` opens the Cadder dashboard. It starts `cadderd` by default unless `--no-start` is passed.
+`cadder-tui` opens the Cadder dashboard. It attaches to an existing `cadderd` backend by default and never starts it implicitly. Use `s` for the explicit backend start action when the daemon is unavailable.
 
 ```sh
 cadder-tui
 cadder-tui --no-start
 cadder-tui --runtime-dir <runtime-dir>
 ```
+
+`--no-start` remains as a compatibility alias, but attach-only behavior is already the default.
 
 ## Views
 
@@ -20,12 +22,14 @@ cadder-tui --runtime-dir <runtime-dir>
 - Settings controls the minimum log severity shown in Logs.
 - Diagnostics shows config and runtime diagnostics, including domain conflicts and runtime apply failures.
 
-The TUI refreshes daemon state automatically on a short interval. Press `r` when you want an explicit refresh immediately.
+The TUI refreshes daemon state automatically after it attaches and keeps background attach probes running while the daemon is unavailable. Press `r` when you want an explicit attach or refresh immediately.
 
 ## Controls
 
 - `Tab`, `Shift+Tab`, `Left`, and `Right` switch views with wraparound.
 - Arrow keys move selection.
+- `s` explicitly starts `cadderd` when the backend is unavailable.
+- `r` retries attach or refreshes the current daemon state.
 - `Space` toggles the selected entrypoint or domain when the current view supports it.
 - `f` enters search mode.
 - In IIS Handoff on Windows, `/` enters route-host input for wildcard or empty-host bindings.

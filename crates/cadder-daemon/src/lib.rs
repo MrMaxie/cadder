@@ -11,8 +11,8 @@ pub use caddy::{CaddyConfigAdapter, CaddyConfigCoordinator, RealCaddyResolver};
 pub use config::{CONFIG_FILE_NAME, CadderConfig, CaddyRuntimeConfig};
 pub use iis::{IisBindingRecord, IisMetadataStore, IisProvider};
 pub use ipc::{
-  CadderClient, CadderSession, DaemonLaunchOptions, DaemonServer, ensure_daemon_running,
-  ensure_daemon_running_with_options,
+  CadderClient, CadderSession, DaemonLaunchOptions, DaemonServer, StateSubscription,
+  ensure_daemon_running, ensure_daemon_running_with_options,
 };
 pub use logs::{CaddyLogStore, Redactor};
 pub use paths::{DaemonLock, RuntimePaths};

@@ -23,9 +23,9 @@ That makes local reverse-proxy setups easier to run side by side. Cadder can com
 
 ## Binaries
 
-- `caddy` is the Caddy-compatible shim. For `caddy run`, it starts or connects to `cadderd`, registers the current project, and unregisters on exit. Other Caddy commands are delegated to the real Caddy binary.
+- `caddy` is the Caddy-compatible shim. For `caddy run`, it attaches to a running `cadderd`, registers the current project, and unregisters on exit. If the backend is unavailable, Cadder reports how to start it instead of spawning it implicitly. Other Caddy commands are delegated to the real Caddy binary.
 - `cadderd` is the daemon. It owns registrations, generated Caddy config, the real Caddy process it starts, diagnostics, and bounded logs.
-- `cadder-tui` is the terminal UI for inspecting domains, entrypoints, diagnostics, logs, filters, toggles, and daemon shutdown.
+- `cadder-tui` is the terminal UI for inspecting domains, entrypoints, diagnostics, logs, filters, toggles, daemon shutdown, and explicit backend start when needed.
 
 Each binary supports `--help` and `--version`.
 
@@ -54,6 +54,6 @@ Each binary supports `--help` and `--version`.
 
 1. Download the release for your operating system.
 2. Create `cadder.toml` with the path to the real Caddy binary. See [cadder.toml](user-guide/cadder-toml/) for the supported forms.
-3. Run Cadder's `caddy` shim instead of the real `caddy` command.
+3. Start `cadderd`, then run Cadder's `caddy` shim instead of the real `caddy` command.
 
-Open `cadder-tui` whenever you want to inspect active projects, domains, logs, or diagnostics.
+Open `cadder-tui` whenever you want to inspect active projects, domains, logs, diagnostics, or explicitly start or stop the backend.

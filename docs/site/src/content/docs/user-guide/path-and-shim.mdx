@@ -3,7 +3,7 @@ title: PATH and shim strategy
 description: Use Cadder with direct paths, a user-managed PATH directory, or an explicit shim copy without implying automatic PATH mutation.
 ---
 
-Cadder's `caddy` binary is a compatibility shim. It is useful when you want existing `caddy run` habits to register projects with Cadder.
+Cadder's `caddy` binary is a compatibility shim. It is useful when you want existing `caddy run` habits to register projects with Cadder, while keeping daemon ownership in `cadderd`.
 
 Cadder does not need to own your shell setup. Use direct paths, put the shim on `PATH`, or wrap it in your own tooling.
 
@@ -24,6 +24,8 @@ Use a direct path when you want to be explicit:
 If you want `caddy run` to go through Cadder, copy or symlink the Cadder shim into a directory you control under the name `caddy`, then put that directory before the real Caddy directory on `PATH`.
 
 The real Caddy binary still needs to be resolvable by Cadder. The recommended place is [cadder.toml](../cadder-toml/).
+
+The shim does not start `cadderd` automatically. Start `cadderd` yourself, or open `cadder-tui` and press `s`, before running `caddy run`.
 
 ## Keep a separate real Caddy path
 

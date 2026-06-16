@@ -16,17 +16,25 @@ The `caddy` command is Cadder's shim. Use it for project `caddy run` workflows t
 
 1. Get the release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases/latest).
 2. Point Cadder at the real Caddy binary with [cadder.toml](../cadder-toml/).
-3. Run your project through Cadder:
+3. Start the Cadder backend:
+
+```sh
+cadderd
+```
+
+4. Run your project through Cadder:
 
 ```sh
 caddy run
 ```
 
-4. Inspect the daemon when needed:
+5. Inspect the daemon when needed:
 
 ```sh
 cadder-tui
 ```
+
+`caddy run` attaches to the running backend. If `cadderd` is unavailable, Cadder reports how to start it instead of starting it implicitly.
 
 ## Direct or PATH-based use
 

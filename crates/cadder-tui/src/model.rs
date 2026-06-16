@@ -153,13 +153,17 @@ impl DaemonConnectionState {
 
   pub fn guidance(&self) -> &'static str {
     match self {
-      Self::Connected => "Use r to refresh state or d to request daemon shutdown.",
-      Self::Starting { .. } => "Starting cadderd; controls stay responsive.",
-      Self::NotRunning { .. } => "Press s to start cadderd, r to retry connection, or q to quit.",
-      Self::ConnectionFailed { .. } => {
-        "Press s to start/reconnect, r to retry connection, or q to quit."
+      Self::Connected => {
+        "Use r to refresh or reattach the dashboard, or d to request backend shutdown."
       }
-      Self::StartFailed { .. } => "Fix the start error, then press s to retry or q to quit.",
+      Self::Starting { .. } => "Starting cadderd; controls stay responsive.",
+      Self::NotRunning { .. } => "Press s to start cadderd, r to retry attach, or q to quit.",
+      Self::ConnectionFailed { .. } => {
+        "Press r to retry attach, s to start cadderd if needed, or q to quit."
+      }
+      Self::StartFailed { .. } => {
+        "Fix the backend start error, then press s to retry or r to attach if cadderd is already running."
+      }
     }
   }
 

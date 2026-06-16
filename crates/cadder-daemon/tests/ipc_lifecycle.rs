@@ -8,7 +8,7 @@ use cadder_protocol::{
   LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity, QueryLogsRequest, QueryLogsResponse,
   QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse,
   SetDomainEnabledRequest, SetEntrypointEnabledRequest, ShimRunMetadata, SourcePath,
-  UnregisterEntrypointRequest, message_types, new_request_id,
+  StateChangeKind, UnregisterEntrypointRequest, message_types, new_request_id,
 };
 use chrono::Utc;
 use std::{
@@ -31,6 +31,80 @@ async fn ipc_lifecycle_starts_with_zero_registrations() {
 }
 
 #[tokio::test]
+async fn ipc_state_subscriptions_broadcast_updates_to_multiple_dashboard_clients() {
+  let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
+  let harness = Harness::start(FakeCaddy::new(fixture)).await;
+  let mut first = harness
+    .client
+    .subscribe_state(new_request_id("dashboard-1"))
+    .await
+    .unwrap();
+  let mut second = harness
+    .client
+    .subscribe_state(new_request_id("dashboard-2"))
+    .await
+    .unwrap();
+
+  let first_initial = tokio::time::timeout(Duration::from_secs(1), first.next_event())
+    .await
+    .unwrap()
+    .unwrap();
+  let second_initial = tokio::time::timeout(Duration::from_secs(1), second.next_event())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(first_initial.change_kind, StateChangeKind::Snapshot);
+  assert_eq!(second_initial.change_kind, StateChangeKind::Snapshot);
+  assert!(first_initial.snapshot.registrations.is_empty());
+  assert!(second_initial.snapshot.registrations.is_empty());
+
+  let mut session = CadderSession::connect(&harness.paths).await.unwrap();
+  assert!(
+    register_on_session(
+      &mut session,
+      registration("shim-1", "nonce-1", &harness.config_path)
+    )
+    .await
+    .accepted
+  );
+
+  let first_update = tokio::time::timeout(Duration::from_secs(1), first.next_event())
+    .await
+    .unwrap()
+    .unwrap();
+  let second_update = tokio::time::timeout(Duration::from_secs(1), second.next_event())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    first_update.change_kind,
+    StateChangeKind::RegistrationsChanged
+  );
+  assert_eq!(
+    second_update.change_kind,
+    StateChangeKind::RegistrationsChanged
+  );
+  assert_eq!(first_update.snapshot.registrations.len(), 1);
+  assert_eq!(second_update.snapshot.registrations.len(), 1);
+
+  drop(first);
+  let toggle =
+    set_domain_enabled(&harness.client, "shim-1", "api.smarketing.localhost", false).await;
+  assert!(toggle.accepted, "{}", toggle.message);
+
+  let second_follow_up = tokio::time::timeout(Duration::from_secs(1), second.next_event())
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(
+    second_follow_up.change_kind,
+    StateChangeKind::RegistrationsChanged
+  );
+  assert_eq!(second_follow_up.snapshot.registrations.len(), 1);
+  harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn ipc_lifecycle_registers_one_shim_and_applies_config() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
@@ -48,6 +122,44 @@ async fn ipc_lifecycle_registers_one_shim_and_applies_config() {
   wait_for_command_log(&harness.command_log_path, "adapt").await;
   wait_for_command_log(&harness.command_log_path, "run").await;
   harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_daemon_request_stops_server_and_rejects_new_clients() {
+  let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
+  let harness = Harness::start(FakeCaddy::new(fixture)).await;
+
+  let response: BasicResponse = harness
+    .client
+    .request(
+      message_types::SHUTDOWN_DAEMON_REQUEST,
+      message_types::SHUTDOWN_DAEMON_RESPONSE,
+      &cadder_protocol::ShutdownDaemonRequest {
+        request_id: new_request_id("shutdown-daemon"),
+      },
+    )
+    .await
+    .unwrap();
+  assert!(response.accepted, "{}", response.message);
+
+  for _ in 0..50 {
+    let result = harness
+      .client
+      .request::<_, QueryStateResponse>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: new_request_id("after-shutdown"),
+        },
+      )
+      .await;
+    if result.is_err() {
+      return;
+    }
+    sleep(Duration::from_millis(20)).await;
+  }
+
+  panic!("daemon server still accepted new IPC clients after shutdown request");
 }
 
 #[tokio::test]

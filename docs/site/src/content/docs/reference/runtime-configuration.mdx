@@ -21,6 +21,8 @@ caddy --cadder-runtime-dir <runtime-dir> run
 
 This is useful for tests, demos, and isolated sessions that should not share daemon state with the normal user runtime.
 
+Use the same runtime override when you start `cadderd`, attach with `cadder-tui`, or run `caddy --cadder-runtime-dir <runtime-dir> run`. The shim and dashboard only attach to a backend that is already running for that exact runtime directory.
+
 ## Runtime files
 
 The daemon runtime directory contains:

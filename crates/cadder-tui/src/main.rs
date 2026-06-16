@@ -8,7 +8,7 @@ use cadder_protocol::{
   ActivationState, BasicResponse, ConfigApplyStatus, GuiStateSnapshot, LogEntry, LogSeverity,
   LogStreamIdentity, LogStreamStatus, QueryLogsRequest, QueryLogsResponse, QueryStateRequest,
   QueryStateResponse, RuntimeStatus, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
-  ShutdownDaemonRequest, message_types, new_request_id,
+  ShutdownDaemonRequest, StateChangedEvent, message_types, new_request_id,
 };
 #[cfg(windows)]
 use cadder_protocol::{
@@ -33,14 +33,14 @@ use tokio::sync::mpsc;
 
 const STATE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const LOG_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
-const DAEMON_START_MESSAGE: &str = "Starting cadderd and reconnecting.";
+const DAEMON_START_MESSAGE: &str = "Starting cadderd.";
 
 #[derive(Debug, Parser)]
 #[command(
   name = "cadder-tui",
   version,
   about = "Cadder terminal UI for daemon state, domains, logs, and diagnostics",
-  long_about = "Opens the Cadder terminal UI. It connects to cadderd, starts it by default, and displays entrypoints, domains, logs, diagnostics, activation controls, and daemon shutdown."
+  long_about = "Opens the Cadder terminal UI. It attaches to an existing cadderd backend, displays entrypoints, domains, logs, diagnostics, activation controls, and offers an explicit start action when the backend is unavailable."
 )]
 struct Args {
   #[arg(
@@ -49,18 +49,21 @@ struct Args {
   )]
   runtime_dir: Option<PathBuf>,
 
-  #[arg(long, help = "Path to a cadderd executable to start when needed")]
+  #[arg(
+    long,
+    help = "Path to a cadderd executable for the explicit backend start action"
+  )]
   daemon_path: Option<PathBuf>,
 
   #[arg(
     long,
-    help = "Command or path passed to cadderd for starting the real Caddy binary"
+    help = "Command or path passed to cadderd when explicitly starting the real Caddy binary"
   )]
   real_caddy_command: Option<String>,
 
   #[arg(
     long,
-    help = "Connect to an existing daemon instead of starting cadderd"
+    help = "Deprecated compatibility alias; the dashboard is attach-only by default and never auto-starts cadderd"
   )]
   no_start: bool,
 }
@@ -78,10 +81,9 @@ async fn main() -> Result<()> {
   };
   let mut app = TuiApp::new(paths, launch_options);
   if no_start {
-    app.start_state_refresh();
-  } else {
-    app.start_daemon();
+    app.message = "`--no-start` is now the default attach-only behavior.".to_string();
   }
+  app.start_state_refresh();
 
   let terminal = ratatui::init();
   let result = app.run(terminal).await;
@@ -100,6 +102,8 @@ struct TuiApp {
   state_request_in_flight: bool,
   state_refresh_pending: bool,
   state_request_serial: u64,
+  state_subscription_running: bool,
+  state_subscription_generation: u64,
   daemon_start_in_flight: bool,
   toggle_request_in_flight: bool,
   shutdown_request_in_flight: bool,
@@ -115,7 +119,15 @@ enum AppResponse {
     serial: u64,
     result: Result<QueryStateResponse, DaemonConnectionIssue>,
   },
-  DaemonStart(Result<QueryStateResponse, String>),
+  StateEvent {
+    generation: u64,
+    event: StateChangedEvent,
+  },
+  StateSubscriptionClosed {
+    generation: u64,
+    issue: DaemonConnectionIssue,
+  },
+  DaemonStart(Result<(), String>),
   Toggle(Result<BasicResponse, String>),
   #[cfg(windows)]
   IisBindings(Result<QueryIisBindingsResponse, String>),
@@ -151,6 +163,8 @@ impl TuiApp {
       state_request_in_flight: false,
       state_refresh_pending: false,
       state_request_serial: 0,
+      state_subscription_running: false,
+      state_subscription_generation: 0,
       daemon_start_in_flight: false,
       toggle_request_in_flight: false,
       shutdown_request_in_flight: false,
@@ -295,14 +309,28 @@ impl TuiApp {
           }
           self.start_pending_state_refresh();
         }
+        AppResponse::StateEvent { generation, event } => {
+          if generation != self.state_subscription_generation {
+            continue;
+          }
+          self.state_subscription_running = true;
+          self.apply_state_event(event);
+        }
+        AppResponse::StateSubscriptionClosed { generation, issue } => {
+          if generation != self.state_subscription_generation {
+            continue;
+          }
+          self.state_subscription_running = false;
+          if !self.daemon_start_in_flight {
+            self.apply_daemon_issue("Daemon unavailable", issue);
+          }
+        }
         AppResponse::DaemonStart(result) => {
           self.daemon_start_in_flight = false;
           match result {
-            Ok(response) => {
-              self.apply_state_response(response);
-              if self.model.can_use_daemon() {
-                self.message = "cadderd started and connected.".to_string();
-              }
+            Ok(()) => {
+              self.message = "cadderd started. Attaching dashboard.".to_string();
+              self.start_state_subscription();
             }
             Err(error) => {
               self.model.mark_daemon_start_failed(error.clone());
@@ -316,7 +344,7 @@ impl TuiApp {
           match result {
             Ok(response) => {
               self.message = response.message;
-              self.start_state_refresh();
+              self.refresh_state_after_mutation();
             }
             Err(error) => self.apply_daemon_request_error("Toggle failed", error),
           }
@@ -347,7 +375,7 @@ impl TuiApp {
             Ok(response) => {
               self.message = iis_handoff_message(&response);
               self.start_iis_refresh();
-              self.start_state_refresh();
+              self.refresh_state_after_mutation();
             }
             Err(error) => self.apply_daemon_request_error("IIS handoff failed", error),
           }
@@ -388,6 +416,8 @@ impl TuiApp {
           self.shutdown_request_in_flight = false;
           match result {
             Ok(response) => {
+              self.state_subscription_generation += 1;
+              self.state_subscription_running = false;
               self.model.mark_daemon_unavailable(
                 DaemonUnavailableKind::NotRunning,
                 "Daemon shutdown was requested.",
@@ -417,10 +447,7 @@ impl TuiApp {
   fn maybe_refresh_state(&mut self) {
     if self.daemon_start_in_flight
       || self.state_request_in_flight
-      || matches!(
-        self.model.daemon.state,
-        model::DaemonConnectionState::StartFailed { .. }
-      )
+      || (self.model.can_use_daemon() && self.state_subscription_running)
       || self.last_state_refresh.elapsed() < STATE_REFRESH_INTERVAL
     {
       return;
@@ -430,14 +457,10 @@ impl TuiApp {
 
   fn apply_state_response(&mut self, response: QueryStateResponse) {
     if let Some(snapshot) = response.snapshot {
-      #[cfg(windows)]
-      let was_connected = self.model.can_use_daemon();
-      self.model.set_snapshot(snapshot);
-      self.model.mark_daemon_connected();
+      self.apply_snapshot(snapshot);
       self.message = response.message;
-      #[cfg(windows)]
-      if !was_connected {
-        self.start_iis_refresh();
+      if !self.state_subscription_running {
+        self.start_state_subscription();
       }
     } else {
       let message = "Daemon returned no state snapshot.";
@@ -450,7 +473,7 @@ impl TuiApp {
 
   fn start_state_refresh(&mut self) {
     if self.daemon_start_in_flight {
-      self.message = "Daemon start is already in progress.".to_string();
+      self.message = "Backend start is already in progress.".to_string();
       return;
     }
     if self.state_request_in_flight {
@@ -479,6 +502,47 @@ impl TuiApp {
     });
   }
 
+  fn start_state_subscription(&mut self) {
+    if self.state_subscription_running {
+      return;
+    }
+    self.state_subscription_running = true;
+    self.state_subscription_generation += 1;
+    let generation = self.state_subscription_generation;
+    let client = self.client.clone();
+    let responses = self.responses_tx.clone();
+    tokio::spawn(async move {
+      let mut subscription = match client
+        .subscribe_state(new_request_id("tui-subscribe"))
+        .await
+      {
+        Ok(subscription) => subscription,
+        Err(error) => {
+          let _ = responses.send(AppResponse::StateSubscriptionClosed {
+            generation,
+            issue: classify_daemon_error(error),
+          });
+          return;
+        }
+      };
+
+      loop {
+        match subscription.next_event().await {
+          Ok(event) => {
+            let _ = responses.send(AppResponse::StateEvent { generation, event });
+          }
+          Err(error) => {
+            let _ = responses.send(AppResponse::StateSubscriptionClosed {
+              generation,
+              issue: classify_daemon_error(error),
+            });
+            return;
+          }
+        }
+      }
+    });
+  }
+
   fn start_pending_state_refresh(&mut self) {
     if !self.state_refresh_pending {
       return;
@@ -488,8 +552,12 @@ impl TuiApp {
   }
 
   fn start_daemon(&mut self) {
+    if self.model.can_use_daemon() {
+      self.message = "Dashboard is already attached to cadderd.".to_string();
+      return;
+    }
     if !self.model.can_start_daemon() || self.daemon_start_in_flight {
-      self.message = "Daemon start is already in progress.".to_string();
+      self.message = "Backend start is already in progress.".to_string();
       return;
     }
     self.daemon_start_in_flight = true;
@@ -500,26 +568,12 @@ impl TuiApp {
     self.message = DAEMON_START_MESSAGE.to_string();
     let paths = self.paths.clone();
     let launch_options = self.launch_options.clone();
-    let client = self.client.clone();
     let responses = self.responses_tx.clone();
     tokio::spawn(async move {
-      let result = async {
-        ensure_daemon_running_with_options(&paths, launch_options)
-          .await
-          .context("start cadderd")?;
-        client
-          .request(
-            message_types::QUERY_STATE_REQUEST,
-            message_types::QUERY_STATE_RESPONSE,
-            &QueryStateRequest {
-              request_id: new_request_id("tui-state"),
-            },
-          )
-          .await
-          .context("refresh daemon state after start")
-      }
-      .await
-      .map_err(|error| format_error_chain(&error));
+      let result = ensure_daemon_running_with_options(&paths, launch_options)
+        .await
+        .context("start cadderd")
+        .map_err(|error| format_error_chain(&error));
       let _ = responses.send(AppResponse::DaemonStart(result));
     });
   }
@@ -820,7 +874,10 @@ impl TuiApp {
     self
       .model
       .mark_daemon_unavailable(issue.kind, issue.message.clone());
-    self.message = format!("{prefix}: {}. Press s to start/reconnect.", issue.message);
+    self.message = format!(
+      "{prefix}: {}. Press r to retry attach or s to start cadderd.",
+      issue.message
+    );
   }
 
   fn apply_daemon_request_error(&mut self, prefix: &str, error: String) {
@@ -858,6 +915,29 @@ impl TuiApp {
     self.message = format!("Exported {}", output_path.display());
     Ok(())
   }
+
+  fn apply_snapshot(&mut self, snapshot: GuiStateSnapshot) -> bool {
+    let was_connected = self.model.can_use_daemon();
+    self.model.set_snapshot(snapshot);
+    self.model.mark_daemon_connected();
+    #[cfg(windows)]
+    if !was_connected {
+      self.start_iis_refresh();
+    }
+    !was_connected
+  }
+
+  fn apply_state_event(&mut self, event: StateChangedEvent) {
+    if self.apply_snapshot(event.snapshot) {
+      self.message = "Attached to cadderd.".to_string();
+    }
+  }
+
+  fn refresh_state_after_mutation(&mut self) {
+    if !self.state_subscription_running {
+      self.start_state_refresh();
+    }
+  }
 }
 
 enum ToggleRequest {
@@ -867,7 +947,7 @@ enum ToggleRequest {
 
 fn daemon_action_unavailable(action: &str) -> String {
   format!(
-    "{action} requires a connected daemon. Press s to start/reconnect, r to retry, or q to quit."
+    "{action} requires a connected daemon. Press r to retry attach, s to start cadderd, or q to quit."
   )
 }
 
@@ -932,7 +1012,11 @@ fn classify_daemon_error(error: anyhow::Error) -> DaemonConnectionIssue {
     cause.downcast_ref::<io::Error>().is_some_and(|error| {
       matches!(
         error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+        io::ErrorKind::NotFound
+          | io::ErrorKind::ConnectionRefused
+          | io::ErrorKind::ConnectionAborted
+          | io::ErrorKind::ConnectionReset
+          | io::ErrorKind::UnexpectedEof
       )
     })
   }) {
@@ -1201,8 +1285,7 @@ impl TuiApp {
       iis_route_host,
       describe_log_severity(self.model.logs.minimum_severity)
     );
-    let navigation_help =
-      "Tab/Shift+Tab/Left/Right views  r refresh  s start/reconnect  f search  Space toggle/apply";
+    let navigation_help = "Tab/Shift+Tab/Left/Right views  r attach/refresh  s start backend  f search  Space toggle/apply";
     #[cfg(windows)]
     let action_help = "IIS: / route host Enter refresh Space handoff/restore  Settings: Up/Down severity Enter apply  Logs: p pause Enter refresh x export  d shutdown  q quit";
     #[cfg(not(windows))]
@@ -1765,7 +1848,7 @@ mod tests {
       "long help output should describe --daemon-path: {help}"
     );
     assert!(
-      help.contains("Connect to an existing daemon"),
+      help.contains("attach-only by default"),
       "long help output should describe --no-start: {help}"
     );
   }
@@ -1836,7 +1919,7 @@ mod tests {
     assert!(text.contains("Daemon"));
     assert!(text.contains("Not running"));
     assert!(text.contains("Press s to start"));
-    assert!(text.contains("s start/reconnect"));
+    assert!(text.contains("s start backend"));
   }
 
   #[test]
@@ -2395,26 +2478,40 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn daemon_start_response_marks_connected_after_valid_snapshot() {
+  async fn daemon_start_response_starts_attach_flow_and_applies_subscription_snapshot() {
     let mut app = test_app();
     app.daemon_start_in_flight = true;
     app.model.mark_daemon_starting(DAEMON_START_MESSAGE);
     app
       .responses_tx
-      .send(AppResponse::DaemonStart(Ok(QueryStateResponse {
-        request_id: "state".to_string(),
-        accepted: true,
-        message: "connected".to_string(),
-        snapshot: Some(snapshot()),
-      })))
+      .send(AppResponse::DaemonStart(Ok(())))
       .unwrap();
 
     app.drain_responses();
 
     assert!(!app.daemon_start_in_flight);
+    assert!(app.state_subscription_running);
+    assert_eq!(app.message, "cadderd started. Attaching dashboard.");
+
+    app
+      .responses_tx
+      .send(AppResponse::StateEvent {
+        generation: app.state_subscription_generation,
+        event: StateChangedEvent {
+          request_id: "subscribe".to_string(),
+          sequence_number: 0,
+          change_kind: cadder_protocol::StateChangeKind::Snapshot,
+          snapshot: snapshot(),
+          registration_id: None,
+        },
+      })
+      .unwrap();
+
+    app.drain_responses();
+
     assert!(app.model.can_use_daemon());
     assert_eq!(app.model.daemon.state.label(), "Connected");
-    assert_eq!(app.message, "cadderd started and connected.");
+    assert_eq!(app.message, "Attached to cadderd.");
   }
 
   #[tokio::test]
@@ -2438,7 +2535,7 @@ mod tests {
     assert_eq!(app.model.daemon.state.label(), "Starting");
 
     app.start_daemon();
-    assert_eq!(app.message, "Daemon start is already in progress.");
+    assert_eq!(app.message, "Backend start is already in progress.");
 
     drain_until(&mut app, |app| !app.daemon_start_in_flight).await;
 
@@ -2448,8 +2545,13 @@ mod tests {
 
     app.last_state_refresh = Instant::now() - STATE_REFRESH_INTERVAL - Duration::from_millis(10);
     app.maybe_refresh_state();
-    assert!(!app.state_request_in_flight);
-    assert_eq!(app.model.daemon.state.label(), "Start failed");
+    assert!(app.state_request_in_flight);
+    drain_until(&mut app, |app| !app.state_request_in_flight).await;
+    assert!(matches!(
+      app.model.daemon.state,
+      model::DaemonConnectionState::NotRunning { .. }
+        | model::DaemonConnectionState::ConnectionFailed { .. }
+    ));
   }
 
   #[tokio::test]
@@ -2464,6 +2566,49 @@ mod tests {
 
     assert!(app.message.starts_with("Daemon unavailable:"));
     assert!(!app.model.can_use_daemon());
+  }
+
+  #[tokio::test]
+  async fn subscription_loss_marks_dashboard_unavailable_and_manual_attach_recovers() {
+    let mut app = test_app();
+    app.state_subscription_running = true;
+    app.state_subscription_generation = 2;
+
+    app
+      .responses_tx
+      .send(AppResponse::StateSubscriptionClosed {
+        generation: 2,
+        issue: DaemonConnectionIssue {
+          kind: DaemonUnavailableKind::NotRunning,
+          message: "backend exited".to_string(),
+        },
+      })
+      .unwrap();
+
+    app.drain_responses();
+
+    assert!(!app.model.can_use_daemon());
+    assert!(app.message.contains("retry attach"));
+
+    app.state_request_serial = 4;
+    app.state_request_in_flight = true;
+    app
+      .responses_tx
+      .send(AppResponse::State {
+        serial: 4,
+        result: Ok(QueryStateResponse {
+          request_id: "reconnect".to_string(),
+          accepted: true,
+          message: "attached".to_string(),
+          snapshot: Some(snapshot()),
+        }),
+      })
+      .unwrap();
+
+    app.drain_responses();
+
+    assert!(app.model.can_use_daemon());
+    assert!(app.state_subscription_running);
   }
 
   #[tokio::test]
@@ -2698,6 +2843,7 @@ mod tests {
   #[test]
   fn apply_state_response_uses_snapshot_or_guidance_message() {
     let mut app = test_app();
+    app.state_subscription_running = true;
 
     app.apply_state_response(QueryStateResponse {
       request_id: "state".to_string(),

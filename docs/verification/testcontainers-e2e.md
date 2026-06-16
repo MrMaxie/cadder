@@ -39,7 +39,7 @@ error.
 - Shim unregister/exit cleanup removes only the exiting registration.
 - Duplicate domains report `domain-conflict`.
 - Invalid Caddyfiles report `adapt-failed`.
-- Daemon runtime shutdown stops real Caddy while the container is still alive.
+- Daemon shutdown stops real Caddy and terminates `cadderd` while the container is still alive.
 
 ## Run Record
 

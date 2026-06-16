@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use cadder_daemon::{
-  CadderSession, DaemonLaunchOptions, RealCaddyResolver, RuntimePaths,
-  ensure_daemon_running_with_options,
-};
+use cadder_daemon::{CadderSession, RealCaddyResolver, RuntimePaths};
 use cadder_protocol::{
   ActivationState, BasicResponse, EntrypointInstanceIdentity, EntrypointRegistration,
   HeartbeatEntrypointRequest, LogStreamIdentity, OwnerProcessIdentity, RegisterEntrypointRequest,
@@ -24,7 +21,7 @@ use tokio::{process::Command, sync::Mutex, time::interval};
   name = "caddy",
   version,
   about = "Cadder PATH-facing Caddy shim",
-  long_about = "Acts as the Cadder-managed caddy command. `caddy run` starts or connects to cadderd and registers the current project; other commands are delegated to the safely resolved real Caddy binary."
+  long_about = "Acts as the Cadder-managed caddy command. `caddy run` requires a running cadderd backend and registers the current project; other commands are delegated to the safely resolved real Caddy binary."
 )]
 struct ShimArgs {
   #[arg(long = "cadder-runtime-dir", hide = true)]
@@ -73,16 +70,13 @@ async fn main() -> Result<ExitCode> {
 
 async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
   let paths = RuntimePaths::resolve(args.runtime_dir)?;
-  ensure_daemon_running_with_options(
-    &paths,
-    DaemonLaunchOptions {
-      explicit_daemon: args.daemon_path,
-      real_caddy_command: args.real_caddy_command,
-      shim_path: env::current_exe().ok(),
-    },
-  )
-  .await?;
-  let session = std::sync::Arc::new(Mutex::new(CadderSession::connect(&paths).await?));
+  let session = match CadderSession::connect(&paths).await {
+    Ok(session) => std::sync::Arc::new(Mutex::new(session)),
+    Err(error) => {
+      eprintln!("{}", managed_backend_unavailable_message(&paths, &error));
+      return Ok(ExitCode::FAILURE);
+    }
+  };
   let registration = build_registration(&args.caddy_args)?;
   let registration_id = registration.registration_id.clone();
   let shim_session_nonce = registration.entrypoint_instance.shim_session_nonce.clone();
@@ -146,6 +140,44 @@ async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
     .await?;
 
   Ok(ExitCode::SUCCESS)
+}
+
+fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &anyhow::Error) -> String {
+  let runtime_dir = paths.runtime_dir().display();
+  let retry = format!(
+    "Start `cadderd --runtime-dir \"{}\"` explicitly, or open `cadder-tui` and press s, then retry `caddy run`.",
+    runtime_dir
+  );
+
+  if daemon_error_indicates_not_running(error) {
+    format!("Cadder backend `cadderd` is not running for runtime `{runtime_dir}`. {retry}")
+  } else {
+    format!(
+      "Cadder could not attach `caddy run` to backend runtime `{runtime_dir}`: {}. {retry}",
+      format_error_chain(error)
+    )
+  }
+}
+
+fn daemon_error_indicates_not_running(error: &anyhow::Error) -> bool {
+  error.chain().any(|cause| {
+    cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+      matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound
+          | std::io::ErrorKind::ConnectionRefused
+          | std::io::ErrorKind::ConnectionAborted
+          | std::io::ErrorKind::ConnectionReset
+          | std::io::ErrorKind::UnexpectedEof
+      )
+    })
+  })
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+  let mut messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+  messages.dedup();
+  messages.join(": ")
 }
 
 fn build_registration(args: &[String]) -> Result<EntrypointRegistration> {
@@ -349,6 +381,39 @@ mod tests {
     let code = delegate_to_real_caddy(Some("definitely-missing-caddy-binary".to_string()), &[])
       .await
       .unwrap();
+
+    assert_eq!(code, ExitCode::FAILURE);
+  }
+
+  #[test]
+  fn managed_backend_unavailable_message_explains_manual_backend_start() {
+    let paths = RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-shim-test"))).unwrap();
+    let error = anyhow::Error::from(std::io::Error::new(
+      std::io::ErrorKind::ConnectionRefused,
+      "connection refused",
+    ));
+
+    let message = managed_backend_unavailable_message(&paths, &error);
+
+    assert!(message.contains("Cadder backend `cadderd` is not running"));
+    assert!(message.contains("Start `cadderd --runtime-dir"));
+    assert!(message.contains("retry `caddy run`"));
+  }
+
+  #[tokio::test]
+  async fn run_managed_returns_failure_when_backend_is_unavailable() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+      "cadder-shim-missing-backend-{}",
+      std::process::id()
+    ));
+    let code = run_managed(ShimArgs {
+      runtime_dir: Some(runtime_dir),
+      daemon_path: None,
+      real_caddy_command: None,
+      caddy_args: vec!["run".to_string()],
+    })
+    .await
+    .unwrap();
 
     assert_eq!(code, ExitCode::FAILURE);
   }

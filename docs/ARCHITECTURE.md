@@ -5,8 +5,8 @@ Cadder is a cross-platform Rust daemon, shim, and terminal UI for routing projec
 ## Process Roles
 
 - `cadderd`: per-user daemon. It owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, and bounded log storage.
-- `caddy`: PATH-facing shim. It intentionally shadows Caddy for managed `caddy run` commands, starts or connects to `cadderd`, registers the caller's config, heartbeats while alive, and unregisters on exit.
-- `cadder-tui`: Ratatui/Crossterm UI. It connects to the daemon and shows overview, entrypoints, grouped domains, per-domain logs, diagnostics, search/filtering, and activation toggles.
+- `caddy`: PATH-facing shim. It intentionally shadows Caddy for managed `caddy run` commands, attaches to an already running `cadderd`, registers the caller's config, heartbeats while alive, and unregisters on exit.
+- `cadder-tui`: Ratatui/Crossterm UI. It attaches to the daemon and shows overview, entrypoints, grouped domains, per-domain logs, diagnostics, search/filtering, activation toggles, and explicit backend start or shutdown actions.
 - Real Caddy runtime: resolved external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
 
 All three Cadder binaries expose `--help` and `--version` through their Clap command definitions. The release-facing command names are `cadderd`, `caddy`, and `cadder-tui`.
@@ -20,7 +20,7 @@ Cadder uses per-user runtime paths from `directories::ProjectDirs`, with `CADDER
 - an effective generated Caddy JSON config file;
 - daemon metadata and bounded in-memory state.
 
-The daemon is started on demand by `caddy` and `cadder-tui` unless callers opt out. Launch attempts are serialized with a per-runtime launch lock before spawning `cadderd`; concurrent callers wait for the daemon socket instead of spawning another child, while the daemon's own runtime lock remains the final ownership guard. `cadder-tui` treats daemon startup and the first state query as recoverable background work: if the daemon is not running, cannot be reached, or fails to start, the terminal UI still opens and shows an explicit recovery state with retry, start/reconnect, and quit controls. OS services are intentionally deferred; v1 is a user daemon model.
+`cadderd` is a manually started per-user backend. The `caddy` shim and `cadder-tui` are attach-only clients: they connect to an existing daemon when it is available, surface explicit unavailable guidance when it is not, and never spawn it as an implicit side effect of opening a dashboard or running `caddy run`. Explicit backend start is limited to direct `cadderd` execution or deliberate client actions such as pressing `s` in `cadder-tui`. Explicit launch attempts still use a per-runtime launch lock before spawning `cadderd`, so concurrent start requests wait for the daemon socket instead of spawning another child, while the daemon's own runtime lock remains the final ownership guard. OS services are intentionally deferred; v1 remains a user daemon model.
 
 ## IPC Boundary
 
@@ -61,7 +61,7 @@ The TOML schema is:
 real_command = "/absolute/path/to/caddy"
 ```
 
-Cadder no longer treats `caddy-real` as a built-in default. Users may still configure `caddy-real` explicitly through CLI, TOML, or environment variables. PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`; when the shim starts the daemon, it passes its own path through that variable.
+Cadder no longer treats `caddy-real` as a built-in default. Users may still configure `caddy-real` explicitly through CLI, TOML, or environment variables. PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`, so Cadder does not resolve its own shim as real Caddy.
 
 For each registration, Cadder runs:
 
@@ -93,13 +93,13 @@ After planning the backend binding, Cadder removes the original public binding, 
 
 `cadder-tui` exposes per-domain logs from the Domains view. Pressing `Enter` or `l` on a domain row opens a log-focused view bound to that domain's `LogStreamIdentity`; the view keeps the selected stream even if registrations change later, so it never silently falls back to an entrypoint or unrelated domain.
 
-The TUI refreshes daemon state snapshots automatically on a short fixed interval while retaining `r` for explicit refreshes. It also loads a bounded log page through `query-logs-request`, stores the returned cursor, and tails by issuing follow-up requests with that cursor. Auto-tail is enabled by default and can be paused with `p`; while paused, the TUI keeps keyboard handling responsive and avoids automatic log refreshes until the user resumes or manually refreshes with `Enter`. Log severity is primarily controlled from the Settings view; applying a new severity resets the cursor before reloading so entries from different filters are not mixed.
+The TUI attempts to attach without spawning the daemon, upgrades successful attaches into a durable `subscribe-state-request` stream, and keeps periodic `query-state-request` probes only for late daemon availability and recovery after backend loss. It also loads a bounded log page through `query-logs-request`, stores the returned cursor, and tails by issuing follow-up requests with that cursor. Auto-tail is enabled by default and can be paused with `p`; while paused, the TUI keeps keyboard handling responsive and avoids automatic log refreshes until the user resumes or manually refreshes with `Enter`. Log severity is primarily controlled from the Settings view; applying a new severity resets the cursor before reloading so entries from different filters are not mixed.
 
 On Windows, `cadder-tui` also exposes an IIS Handoff view. The view lists site, protocol, IP address, port, host header, handoff state, and safety details. Pressing `Enter` refreshes IIS discovery; pressing `Space` hands off an available binding or restores a handed-off binding. Before dispatching a mixed-elevation action, the TUI states why administrator approval may be requested. After the daemon responds, the status line summarizes succeeded, approved, denied, failed, and follow-up operation steps. For wildcard or empty-host IIS rows, press `/`, type the route host or URL, press `Enter` to keep the value, then press `Space`. The view is absent on non-Windows platforms rather than shown as a disabled placeholder.
 
-Log refresh, state refresh, IIS discovery, activation toggles, IIS handoff actions, and shutdown requests are dispatched as short background IPC tasks. The TUI accepts at most one active state refresh and one active log refresh for the current stream, and surfaces IPC failures as a read-error state rather than blocking terminal input.
+Log refresh, late-availability probes, IIS discovery, activation toggles, IIS handoff actions, and shutdown requests are dispatched as short background IPC tasks. The TUI accepts at most one active state probe, one active state subscription stream, and one active log refresh for the current stream, and surfaces IPC failures as a read-error state rather than blocking terminal input.
 
-When the daemon is unavailable, the Overview view shows the daemon state as not running, connection failed, starting, or start failed. Press `s` to start `cadderd` through the same `ensure_daemon_running_with_options` path used by the shim, using the TUI's runtime directory, daemon path, and real Caddy command options. Press `r` to retry a state refresh without spawning a daemon. Daemon-dependent actions such as activation toggles, log refreshes, IIS discovery/handoff, and shutdown are gated until a valid state snapshot marks the daemon connected; navigation, retry, start/reconnect, settings, existing log export, and quit remain responsive.
+When the daemon is unavailable, the Overview view shows the daemon state as not running, connection failed, starting, or start failed. Press `s` to explicitly start `cadderd` with the TUI's runtime directory, daemon path, and real Caddy command options. Press `r` to retry attach or refresh without spawning a daemon. Daemon-dependent actions such as activation toggles, log refreshes, IIS discovery/handoff, and shutdown are gated until a valid state snapshot marks the daemon connected; navigation, retry, explicit start, settings, existing log export, and quit remain responsive. `ShutdownDaemonRequest` stops the owned real Caddy runtime and then terminates the actual `cadderd` process after it replies to the caller.
 
 The log store reports stream status and retention metadata in `query-logs-response`, including active, empty, stale, removed, read-error, gap, more-before, and truncated-by-retention states. Diagnostic exports are timestamped text files in the caller's current working directory and contain only the daemon-redacted `LogEntry.raw_message` content plus stream metadata.
 
@@ -118,7 +118,7 @@ The packaging workflow does not modify PATH, shell profiles, package-manager shi
 
 Image assets under `assets/` are documentation and release artwork only. They are not copied into the runtime layout and are not required by the daemon, shim, TUI, or verification commands.
 
-The current runtime model remains a single per-user daemon that owns the backend and serves the TUI/dashboard state. A future detached backend with multiple independent dashboards is intentionally outside the current implementation.
+The current runtime model is a single per-user daemon that owns the backend and serves zero-to-many independent dashboards or shim clients. Future UI surfaces, including a desktop `cadder` application, should attach to that same backend instead of changing ownership semantics.
 
 ## Workspace Layout
 
