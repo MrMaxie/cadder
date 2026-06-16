@@ -4,8 +4,9 @@ title: Negotiate backend ports and expose selected ports to hosted processes
 status: To Do
 assignee: []
 created_date: '2026-06-11 16:35'
+updated_date: '2026-06-16 15:23'
 labels: []
-milestone: m-3
+milestone: m-2
 dependencies:
   - TASK-2.1
 documentation:
