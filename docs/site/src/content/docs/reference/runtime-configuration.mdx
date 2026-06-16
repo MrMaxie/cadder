@@ -15,13 +15,14 @@ Set `CADDER_RUNTIME_DIR` or pass `--runtime-dir` to use a specific directory:
 
 ```sh
 cadderd --runtime-dir <runtime-dir>
+cadderctl --runtime-dir <runtime-dir> daemon status
 cadder-tui --runtime-dir <runtime-dir>
 caddy --cadder-runtime-dir <runtime-dir> run
 ```
 
 This is useful for tests, demos, and isolated sessions that should not share daemon state with the normal user runtime.
 
-Use the same runtime override when you start `cadderd`, attach with `cadder-tui`, or run `caddy --cadder-runtime-dir <runtime-dir> run`. The shim and dashboard only attach to a backend that is already running for that exact runtime directory.
+Use the same runtime override when you start `cadderd`, attach with `cadderctl` or `cadder-tui`, or run `caddy --cadder-runtime-dir <runtime-dir> run`. The shim and both client surfaces only attach to a backend that is already running for that exact runtime directory unless you explicitly run `cadderctl daemon start` or use the TUI start action.
 
 ## Runtime files
 

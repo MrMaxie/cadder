@@ -1,6 +1,6 @@
 ---
 title: Getting started
-description: Download Cadder, configure real Caddy, run a project through the shim, and inspect it in the TUI.
+description: Download Cadder, configure real Caddy, run a project through the shim, and inspect it in the CLI or TUI.
 ---
 
 ## What you need
@@ -23,16 +23,19 @@ You can also run Cadder by direct path. That is useful for testing or for setups
 
 ```sh
 cadderd
+cadderctl daemon status
 caddy run
 ```
 
 The shim attaches to the running `cadderd` backend, registers the project Caddyfile, and keeps that registration alive while the command is running. If the backend is unavailable, Cadder reports how to start it instead of spawning it implicitly.
 
 ```sh
+cadderctl entrypoints list --output json
+cadderctl logs show --limit 20 domain app.localhost --registration shim-1
 cadder-tui
 ```
 
-Use the TUI to inspect current state, domains, logs, diagnostics, toggles, and explicit backend controls. If you prefer, you can also open `cadder-tui` first and press `s` to start the backend from inside the dashboard.
+Use `cadderctl` for automation-friendly state, domain, and log commands. Use the TUI to inspect current state interactively, browse logs, and use explicit backend controls. If you prefer, you can also open `cadder-tui` first and press `s` to start the backend from inside the dashboard.
 
 ## OS cookbooks
 

@@ -427,6 +427,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadderctl"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "cadder-daemon",
+ "cadder-protocol",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "cadderd"
 version = "0.8.0"
 dependencies = [

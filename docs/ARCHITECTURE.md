@@ -1,15 +1,16 @@
 # Cadder Architecture
 
-Cadder is a cross-platform Rust daemon, shim, and terminal UI for routing project-local `caddy run` invocations into one persistent per-user Caddy runtime.
+Cadder is a cross-platform Rust daemon, shim, non-TUI CLI, and terminal UI for routing project-local `caddy run` invocations into one persistent per-user Caddy runtime.
 
 ## Process Roles
 
 - `cadderd`: per-user daemon. It owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, and bounded log storage.
 - `caddy`: PATH-facing shim. It intentionally shadows Caddy for managed `caddy run` commands, attaches to an already running `cadderd`, registers the caller's config, heartbeats while alive, and unregisters on exit.
+- `cadderctl`: non-TUI CLI. It attaches to the daemon for scriptable inspection, log queries, entrypoint and domain toggles, diagnostics, and explicit daemon lifecycle control.
 - `cadder-tui`: Ratatui/Crossterm UI. It attaches to the daemon and shows overview, entrypoints, grouped domains, per-domain logs, diagnostics, search/filtering, activation toggles, and explicit backend start or shutdown actions.
 - Real Caddy runtime: resolved external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
 
-All three Cadder binaries expose `--help` and `--version` through their Clap command definitions. The release-facing command names are `cadderd`, `caddy`, and `cadder-tui`.
+All four Cadder binaries expose `--help` and `--version` through their Clap command definitions. The release-facing command names are `cadderd`, `cadderctl`, `caddy`, and `cadder-tui`.
 
 ## Cross-Platform Runtime Model
 
@@ -20,7 +21,7 @@ Cadder uses per-user runtime paths from `directories::ProjectDirs`, with `CADDER
 - an effective generated Caddy JSON config file;
 - daemon metadata and bounded in-memory state.
 
-`cadderd` is a manually started per-user backend. The `caddy` shim and `cadder-tui` are attach-only clients: they connect to an existing daemon when it is available, surface explicit unavailable guidance when it is not, and never spawn it as an implicit side effect of opening a dashboard or running `caddy run`. Explicit backend start is limited to direct `cadderd` execution or deliberate client actions such as pressing `s` in `cadder-tui`. Explicit launch attempts still use a per-runtime launch lock before spawning `cadderd`, so concurrent start requests wait for the daemon socket instead of spawning another child, while the daemon's own runtime lock remains the final ownership guard. OS services are intentionally deferred; v1 remains a user daemon model.
+`cadderd` is a manually started per-user backend. The `caddy` shim is attach-only, while `cadder-tui` and `cadderctl` are attach-only except for their explicit daemon start actions. They connect to an existing daemon when it is available, surface explicit unavailable guidance when it is not, and never spawn it as an implicit side effect of opening a dashboard, querying state, or running `caddy run`. Explicit backend start is limited to direct `cadderd` execution or deliberate client actions such as pressing `s` in `cadder-tui` or running `cadderctl daemon start`. Explicit launch attempts still use a per-runtime launch lock before spawning `cadderd`, so concurrent start requests wait for the daemon socket instead of spawning another child, while the daemon's own runtime lock remains the final ownership guard. OS services are intentionally deferred; v1 remains a user daemon model.
 
 ## IPC Boundary
 
@@ -95,6 +96,8 @@ After planning the backend binding, Cadder removes the original public binding, 
 
 The TUI attempts to attach without spawning the daemon, upgrades successful attaches into a durable `subscribe-state-request` stream, and keeps periodic `query-state-request` probes only for late daemon availability and recovery after backend loss. It also loads a bounded log page through `query-logs-request`, stores the returned cursor, and tails by issuing follow-up requests with that cursor. Auto-tail is enabled by default and can be paused with `p`; while paused, the TUI keeps keyboard handling responsive and avoids automatic log refreshes until the user resumes or manually refreshes with `Enter`. Log severity is primarily controlled from the Settings view; applying a new severity resets the cursor before reloading so entries from different filters are not mixed.
 
+`cadderctl` reuses the same contracts for non-interactive workflows. One-shot inspection commands use `query-state-request` or `query-logs-request`, `watch` uses `subscribe-state-request`, domain and entrypoint toggles use the existing activation messages, and `logs tail` advances the daemon log cursor through repeated `query-logs-request` calls instead of introducing a new streaming backend protocol.
+
 On Windows, `cadder-tui` also exposes an IIS Handoff view. The view lists site, protocol, IP address, port, host header, handoff state, and safety details. Pressing `Enter` refreshes IIS discovery; pressing `Space` hands off an available binding or restores a handed-off binding. Before dispatching a mixed-elevation action, the TUI states why administrator approval may be requested. After the daemon responds, the status line summarizes succeeded, approved, denied, failed, and follow-up operation steps. For wildcard or empty-host IIS rows, press `/`, type the route host or URL, press `Enter` to keep the value, then press `Space`. The view is absent on non-Windows platforms rather than shown as a disabled placeholder.
 
 Log refresh, late-availability probes, IIS discovery, activation toggles, IIS handoff actions, and shutdown requests are dispatched as short background IPC tasks. The TUI accepts at most one active state probe, one active state subscription stream, and one active log refresh for the current stream, and surfaces IPC failures as a read-error state rather than blocking terminal input.
@@ -108,11 +111,12 @@ The log store reports stream status and retention metadata in `query-logs-respon
 `cargo run -p xtask -- dist --out <dir>` builds release binaries and copies the current platform's executable names into a portable layout:
 
 - `cadderd`
+- `cadderctl`
 - `cadder-tui`
 - `caddy`
 - `cadder.toml`
 
-On Windows the binaries include the `.exe` suffix. `cargo run -p xtask -- verify-dist --dir <dir>` checks the expected files and runs `caddy --cadder-shim-info` from the layout. `cargo run -p xtask -- package --out <dir> --platform <platform> --target <triple>` builds the target-specific layout, wraps it in a versioned portable archive, and writes a neighboring `.sha256` checksum file. The package version defaults to the root `Cargo.toml` `[workspace.package]` version, while `--version <version>` remains available for explicit dry-run overrides. Windows artifacts are `.zip` archives; Linux and macOS artifacts are `.tar.gz` archives.
+On Windows the binaries include the `.exe` suffix. `cargo run -p xtask -- verify-dist --dir <dir>` checks the expected files, runs `caddy --cadder-shim-info`, and verifies `cadderctl --help` from the layout. `cargo run -p xtask -- package --out <dir> --platform <platform> --target <triple>` builds the target-specific layout, wraps it in a versioned portable archive, and writes a neighboring `.sha256` checksum file. The package version defaults to the root `Cargo.toml` `[workspace.package]` version, while `--version <version>` remains available for explicit dry-run overrides. Windows artifacts are `.zip` archives; Linux and macOS artifacts are `.tar.gz` archives.
 
 The packaging workflow does not modify PATH, shell profiles, package-manager shims, OS services, or other system state.
 
@@ -124,6 +128,7 @@ The current runtime model is a single per-user daemon that owns the backend and 
 
 - `crates/cadder-protocol`: shared DTOs, activation/runtime/log states, IPC envelopes, and request/response contracts.
 - `crates/cadder-daemon`: runtime paths, daemon lock, local IPC server/client, registration state, Caddy integration, process runtime, and log store.
+- `crates/cadderctl`: non-TUI CLI for daemon status, entrypoints, domains, diagnostics, and logs.
 - `crates/cadderd`: daemon binary.
 - `crates/cadder-shim`: package containing the PATH-facing `caddy` binary.
 - `crates/cadder-tui`: terminal UI.

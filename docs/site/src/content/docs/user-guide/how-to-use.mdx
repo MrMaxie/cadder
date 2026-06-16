@@ -3,10 +3,11 @@ title: How to use
 description: Use Cadder releases, the caddy shim, and the TUI without changing Cadder itself.
 ---
 
-The release contains four files you normally care about:
+The release contains five files you normally care about:
 
 - `caddy`
 - `cadderd`
+- `cadderctl`
 - `cadder-tui`
 - `cadder.toml`
 
@@ -31,10 +32,14 @@ caddy run
 5. Inspect the daemon when needed:
 
 ```sh
+cadderctl daemon status
+cadderctl domains list --output json
 cadder-tui
 ```
 
 `caddy run` attaches to the running backend. If `cadderd` is unavailable, Cadder reports how to start it instead of starting it implicitly.
+
+Use `cadderctl` when you want stable machine-readable output, non-interactive toggles, or scriptable log queries. Use `cadder-tui` when you want an interactive dashboard with navigation and live browsing.
 
 ## Direct or PATH-based use
 

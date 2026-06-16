@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/cadderctl",
   "crates/cadder-daemon",
   "crates/cadder-protocol",
   "crates/cadder-shim",

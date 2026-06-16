@@ -115,6 +115,18 @@ fn verify_dist(options: &VerifyDistOptions) -> Result<()> {
     bail!("caddy --cadder-shim-info did not report the Cadder shim role");
   }
 
+  let ctl = options
+    .dir
+    .join(exe_name("cadderctl", options.target.as_deref()));
+  let ctl_output = Command::new(&ctl)
+    .arg("--help")
+    .stdin(Stdio::null())
+    .output()
+    .with_context(|| format!("run {}", ctl.display()))?;
+  if !ctl_output.status.success() {
+    bail!("cadderctl --help failed with {}", ctl_output.status);
+  }
+
   Ok(())
 }
 
@@ -167,8 +179,8 @@ fn package_with_dist(
   Ok(())
 }
 
-fn portable_binaries() -> [&'static str; 3] {
-  ["cadderd", "cadder-tui", "caddy"]
+fn portable_binaries() -> [&'static str; 4] {
+  ["cadderd", "cadderctl", "cadder-tui", "caddy"]
 }
 
 fn release_binary_path(name: &str, target: Option<&str>) -> PathBuf {
@@ -197,6 +209,8 @@ fn build_release_binaries(target: Option<&str>) -> Result<()> {
     "--release",
     "-p",
     "cadderd",
+    "-p",
+    "cadderctl",
     "-p",
     "cadder-tui",
     "-p",
@@ -707,7 +721,10 @@ edition = "2024"
 
   #[test]
   fn portable_layout_includes_expected_binaries() {
-    assert_eq!(portable_binaries(), ["cadderd", "cadder-tui", "caddy"]);
+    assert_eq!(
+      portable_binaries(),
+      ["cadderd", "cadderctl", "cadder-tui", "caddy"]
+    );
   }
 
   #[test]
@@ -844,7 +861,12 @@ edition = "2024"
         );
         write_fake_portable_layout(
           &dist_options.out_dir,
-          &["cadderd.exe", "cadder-tui.exe", "caddy.exe"],
+          &[
+            "cadderd.exe",
+            "cadderctl.exe",
+            "cadder-tui.exe",
+            "caddy.exe",
+          ],
         )
       },
     )
@@ -858,6 +880,7 @@ edition = "2024"
       &archive_path,
       &[
         "cadder-1.2.3-windows-x64/",
+        "cadder-1.2.3-windows-x64/cadderctl.exe",
         "cadder-1.2.3-windows-x64/cadder-tui.exe",
         "cadder-1.2.3-windows-x64/cadder.toml",
         "cadder-1.2.3-windows-x64/cadderd.exe",
@@ -891,7 +914,10 @@ edition = "2024"
           dist_options.target,
           Some("x86_64-unknown-linux-gnu".to_string())
         );
-        write_fake_portable_layout(&dist_options.out_dir, &["cadderd", "cadder-tui", "caddy"])
+        write_fake_portable_layout(
+          &dist_options.out_dir,
+          &["cadderd", "cadderctl", "cadder-tui", "caddy"],
+        )
       },
     )
     .unwrap();
@@ -904,6 +930,7 @@ edition = "2024"
       &archive_path,
       &[
         "cadder-1.2.3-linux-x64/",
+        "cadder-1.2.3-linux-x64/cadderctl",
         "cadder-1.2.3-linux-x64/cadder-tui",
         "cadder-1.2.3-linux-x64/cadder.toml",
         "cadder-1.2.3-linux-x64/cadderd",
