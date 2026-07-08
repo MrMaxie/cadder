@@ -51,7 +51,7 @@ impl DaemonState {
   }
 
   #[cfg(test)]
-  pub(super) fn with_iis_provider(
+  pub(crate) fn with_iis_provider(
     coordinator: CaddyConfigCoordinator,
     iis_provider: IisProvider,
   ) -> Self {

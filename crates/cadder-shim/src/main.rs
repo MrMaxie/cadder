@@ -26,7 +26,7 @@ use tokio::{process::Command, sync::Mutex, time::interval};
   name = "caddy",
   version,
   about = "Cadder PATH-facing Caddy shim",
-  long_about = "Acts as the Cadder-managed caddy command. `caddy run` requires a running cadderd backend and registers the current project; other commands are delegated to the safely resolved real Caddy binary."
+  long_about = "Acts as the Cadder-managed caddy command. `caddy run` requires a running cadderd backend and registers the current project; other commands are classified by the shim policy table before they are delegated to the safely resolved real Caddy binary or rejected."
 )]
 struct ShimArgs {
   #[arg(long = "cadder-runtime-dir", hide = true)]
@@ -56,10 +56,152 @@ struct ShimArgs {
     value_name = "CADDY_ARGS",
     trailing_var_arg = true,
     allow_hyphen_values = true,
-    help = "Arguments for the caddy command; `run` is managed by Cadder and other commands are delegated to real Caddy"
+    help = "Arguments for the caddy command; `run` is managed by Cadder and other commands must have an explicit shim policy"
   )]
   caddy_args: Vec<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShimCommandPolicyKind {
+  Managed,
+  ReadOnlyInspection,
+  ExplicitPassthrough,
+  Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShimCommandPolicyEntry {
+  command: &'static str,
+  kind: ShimCommandPolicyKind,
+  rationale: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClassifiedShimCommand<'a> {
+  command: &'a str,
+  kind: ShimCommandPolicyKind,
+  rationale: &'static str,
+}
+
+const fn policy_entry(
+  command: &'static str,
+  kind: ShimCommandPolicyKind,
+  rationale: &'static str,
+) -> ShimCommandPolicyEntry {
+  ShimCommandPolicyEntry {
+    command,
+    kind,
+    rationale,
+  }
+}
+
+const SHIM_COMMAND_POLICY_TABLE: &[ShimCommandPolicyEntry] = &[
+  policy_entry(
+    "run",
+    ShimCommandPolicyKind::Managed,
+    "Registers the project definition with cadderd and keeps Cadder as runtime owner.",
+  ),
+  policy_entry(
+    "adapt",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Reads a Caddy config and prints adapted JSON without mutating runtime state.",
+  ),
+  policy_entry(
+    "build-info",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Reports real Caddy build metadata.",
+  ),
+  policy_entry(
+    "environ",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Reports real Caddy environment information.",
+  ),
+  policy_entry(
+    "help",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Displays command help.",
+  ),
+  policy_entry(
+    "list-modules",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Reports installed real Caddy modules.",
+  ),
+  policy_entry(
+    "validate",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Validates config input without applying it to Cadder-managed runtime state.",
+  ),
+  policy_entry(
+    "version",
+    ShimCommandPolicyKind::ReadOnlyInspection,
+    "Reports real Caddy version metadata.",
+  ),
+  policy_entry(
+    "completion",
+    ShimCommandPolicyKind::ExplicitPassthrough,
+    "Generates shell completion output without touching Cadder-managed state.",
+  ),
+  policy_entry(
+    "file-server",
+    ShimCommandPolicyKind::ExplicitPassthrough,
+    "Starts an unmanaged one-shot real Caddy file server by explicit command.",
+  ),
+  policy_entry(
+    "fmt",
+    ShimCommandPolicyKind::ExplicitPassthrough,
+    "Formats user-provided config files without touching Cadder-managed runtime state.",
+  ),
+  policy_entry(
+    "manpage",
+    ShimCommandPolicyKind::ExplicitPassthrough,
+    "Generates manual page output without touching Cadder-managed state.",
+  ),
+  policy_entry(
+    "reverse-proxy",
+    ShimCommandPolicyKind::ExplicitPassthrough,
+    "Starts an unmanaged one-shot real Caddy reverse proxy by explicit command.",
+  ),
+  policy_entry(
+    "add-package",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates the real Caddy binary/module set outside Cadder release ownership.",
+  ),
+  policy_entry(
+    "reload",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates real Caddy runtime state outside Cadder's generated config model.",
+  ),
+  policy_entry(
+    "remove-package",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates the real Caddy binary/module set outside Cadder release ownership.",
+  ),
+  policy_entry(
+    "start",
+    ShimCommandPolicyKind::Unsupported,
+    "Starts an unmanaged real Caddy runtime that can drift from cadderd ownership.",
+  ),
+  policy_entry(
+    "stop",
+    ShimCommandPolicyKind::Unsupported,
+    "Stops real Caddy outside Cadder's runtime ownership boundary.",
+  ),
+  policy_entry(
+    "trust",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates local trust stores outside the current Cadder shim contract.",
+  ),
+  policy_entry(
+    "untrust",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates local trust stores outside the current Cadder shim contract.",
+  ),
+  policy_entry(
+    "upgrade",
+    ShimCommandPolicyKind::Unsupported,
+    "Mutates the real Caddy binary outside Cadder release ownership.",
+  ),
+];
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
@@ -83,14 +225,53 @@ async fn main() -> Result<ExitCode> {
   let caddy_backend = args
     .caddy_backend
     .map_or_else(CaddyBackendMode::from_env, Ok)?;
+  let command_policy = classify_caddy_command(&args.caddy_args);
 
-  if args.caddy_args.first().is_some_and(|arg| arg == "run") {
+  if command_policy.kind == ShimCommandPolicyKind::Managed {
     run_managed(args).await
+  } else if command_policy.kind == ShimCommandPolicyKind::Unsupported {
+    Ok(reject_unsupported_caddy_command(command_policy))
   } else if caddy_backend == CaddyBackendMode::Mock {
     run_mock_caddy_command(&args.caddy_args).await
   } else {
     delegate_to_real_caddy(args.real_caddy_command, &args.caddy_args).await
   }
+}
+
+fn classify_caddy_command(args: &[String]) -> ClassifiedShimCommand<'_> {
+  let command = normalized_caddy_command(args);
+  if let Some(entry) = SHIM_COMMAND_POLICY_TABLE
+    .iter()
+    .find(|entry| entry.command == command)
+  {
+    return ClassifiedShimCommand {
+      command,
+      kind: entry.kind,
+      rationale: entry.rationale,
+    };
+  }
+
+  ClassifiedShimCommand {
+    command,
+    kind: ShimCommandPolicyKind::Unsupported,
+    rationale: "No explicit Cadder shim policy entry exists for this Caddy command.",
+  }
+}
+
+fn normalized_caddy_command(args: &[String]) -> &str {
+  match args.first().map(String::as_str) {
+    None | Some("--help" | "-h" | "help") => "help",
+    Some("--version" | "-v" | "version") => "version",
+    Some(command) => command,
+  }
+}
+
+fn reject_unsupported_caddy_command(command: ClassifiedShimCommand<'_>) -> ExitCode {
+  eprintln!(
+    "Cadder shim does not support `caddy {}`. {}",
+    command.command, command.rationale
+  );
+  ExitCode::FAILURE
 }
 
 async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
@@ -498,8 +679,44 @@ mod tests {
       "long help output should describe managed caddy run behavior: {help}"
     );
     assert!(
-      help.contains("delegated to real Caddy"),
-      "long help output should describe delegation behavior: {help}"
+      help.contains("delegated to the safely resolved real Caddy binary or rejected"),
+      "long help output should describe command policy behavior: {help}"
+    );
+  }
+
+  #[test]
+  fn command_policy_table_classifies_core_caddy_command_paths() {
+    let run = vec!["run".to_string()];
+    let adapt = vec!["adapt".to_string()];
+    let fmt = vec!["fmt".to_string()];
+    let start = vec!["start".to_string()];
+    let version = vec!["--version".to_string()];
+    let unknown = vec!["frobnicate".to_string()];
+
+    assert_eq!(
+      classify_caddy_command(&run).kind,
+      ShimCommandPolicyKind::Managed
+    );
+    assert_eq!(
+      classify_caddy_command(&adapt).kind,
+      ShimCommandPolicyKind::ReadOnlyInspection
+    );
+    assert_eq!(
+      classify_caddy_command(&fmt).kind,
+      ShimCommandPolicyKind::ExplicitPassthrough
+    );
+    assert_eq!(
+      classify_caddy_command(&start).kind,
+      ShimCommandPolicyKind::Unsupported
+    );
+    assert_eq!(classify_caddy_command(&version).command, "version");
+    assert_eq!(
+      classify_caddy_command(&unknown),
+      ClassifiedShimCommand {
+        command: "frobnicate",
+        kind: ShimCommandPolicyKind::Unsupported,
+        rationale: "No explicit Cadder shim policy entry exists for this Caddy command.",
+      }
     );
   }
 

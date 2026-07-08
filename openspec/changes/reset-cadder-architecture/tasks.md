@@ -21,11 +21,11 @@
 - [x] 3.3 Extract daemon state concerns into focused modules for registrations, config composition, process lifecycle, runtime status, logs, and storage.
 - [x] 3.4 Define and implement production runtime locking with stale-lock recovery.
 - [x] 3.5 Define local IPC discovery and security for user clients contacting privileged runtime endpoints.
-- [ ] 3.6 Add daemon contract tests with fake Caddy, fake storage, fake IPC clients, and fake IIS providers.
+- [x] 3.6 Add daemon contract tests with fake Caddy, fake storage, fake IPC clients, and fake IIS providers.
 
 ## 4. Shim And Caddy Integration
 
-- [ ] 4.1 Write the shim command policy table for managed, read-only, passthrough, and unsupported Caddy commands.
+- [x] 4.1 Write the shim command policy table for managed, read-only, passthrough, and unsupported Caddy commands.
 - [ ] 4.2 Implement managed shim commands as requests to `cadderd` without starting unmanaged Caddy.
 - [ ] 4.3 Implement daemon-unavailable diagnostics and recovery guidance for shim commands.
 - [ ] 4.4 Harden real Caddy resolution against recursive shim execution.

@@ -140,6 +140,40 @@ async fn ipc_lifecycle_registers_one_shim_and_applies_config() {
 }
 
 #[tokio::test]
+async fn raw_ipc_registration_records_history_in_memory_storage() {
+  let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
+  let harness = Harness::start(FakeCaddy::new(fixture)).await;
+  let (mut reader, mut writer) = raw_ipc_session(&harness.paths).await;
+
+  write_raw_envelope(
+    &mut writer,
+    message_types::REGISTER_ENTRYPOINT_REQUEST,
+    &RegisterEntrypointRequest {
+      request_id: new_request_id("raw-register-contract"),
+      registration: registration("shim-raw", "nonce-raw", &harness.config_path),
+    },
+  )
+  .await;
+  let response: RegisterEntrypointResponse = read_raw_envelope(&mut reader).await.decode().unwrap();
+  let snapshot = query_state(&harness.client).await;
+  let history = query_history(&harness.client, cadder_protocol::HistoryKind::Registration).await;
+  let storage = history.storage.as_ref().unwrap();
+
+  assert!(response.accepted, "{}", response.message);
+  assert_eq!(snapshot.registrations.len(), 1);
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(storage.backend, "sqlite");
+  assert!(storage.path.is_none());
+  assert!(history.records.iter().any(|record| {
+    record.registration_id.as_deref() == Some("shim-raw")
+      && record.summary == "Registered entrypoint `shim-raw`."
+  }));
+  drop(writer);
+  drop(reader);
+  harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn ipc_local_operator_requests_cover_autostart_status() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;

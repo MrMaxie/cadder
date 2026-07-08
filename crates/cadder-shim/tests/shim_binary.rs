@@ -120,6 +120,27 @@ fn delegated_command_propagates_real_caddy_exit_code() {
 }
 
 #[test]
+fn unsupported_command_does_not_delegate_to_real_caddy() {
+  let fake_caddy = write_fake_real_caddy("unsupported-start", 0);
+  let fake_caddy_arg = fake_caddy.display().to_string();
+
+  let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "start"]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(
+    !String::from_utf8(output.stdout)
+      .unwrap()
+      .contains("delegated start")
+  );
+  let stderr = String::from_utf8(output.stderr).unwrap();
+  assert!(
+    stderr.contains("Cadder shim does not support `caddy start`"),
+    "{stderr}"
+  );
+  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
+}
+
+#[test]
 fn managed_run_reports_missing_backend_for_runtime_dir() {
   let runtime_dir = unique_runtime_dir("missing-backend");
   let runtime_dir_arg = runtime_dir.display().to_string();

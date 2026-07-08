@@ -876,10 +876,14 @@ fn prepend_path_dir(command: &mut Command, dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::{CaddyConfigCoordinator, PrivilegeStatus, discover_ipc_endpoint, logs::LogQuery};
+  use crate::{
+    CaddyConfigCoordinator, IisBindingRecord, IisProvider, PrivilegeStatus, discover_ipc_endpoint,
+    logs::LogQuery,
+  };
   use cadder_protocol::{
-    AutostartMode, BasicResponse, IpcEnvelope, ProtocolErrorKind, ProtocolErrorResponse,
-    QueryStateRequest, QueryStateResponse, message_types, new_request_id,
+    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorKind,
+    ProtocolErrorResponse, QueryIisBindingsRequest, QueryIisBindingsResponse, QueryStateRequest,
+    QueryStateResponse, message_types, new_request_id,
   };
   use std::{env, ffi::OsString, fs, future::Future};
   use tokio::{
@@ -1261,6 +1265,61 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn daemon_server_query_iis_bindings_uses_fake_provider_over_ipc() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let available = iis_binding("Default Web Site", "http", "*:80:app.localhost");
+    let missing_route = iis_binding("Default Web Site", "https", "*:443:");
+    let available_id = available.binding_id();
+    let missing_route_id = missing_route.binding_id();
+    let state = DaemonState::with_iis_provider(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      IisProvider::fake(vec![available, missing_route]),
+    );
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let daemon = tokio::spawn(DaemonServer::new(paths.clone(), state).run_until(shutdown_rx));
+    wait_for_ready(&paths).await;
+    let client = CadderClient::new(paths.clone());
+
+    let response: QueryIisBindingsResponse = client
+      .request(
+        message_types::QUERY_IIS_BINDINGS_REQUEST,
+        message_types::QUERY_IIS_BINDINGS_RESPONSE,
+        &QueryIisBindingsRequest {
+          request_id: "query-fake-iis".to_string(),
+        },
+      )
+      .await
+      .unwrap();
+
+    assert!(response.accepted, "{response:?}");
+    assert_eq!(response.request_id, "query-fake-iis");
+    assert_eq!(response.bindings.len(), 2);
+    let available = response
+      .bindings
+      .iter()
+      .find(|binding| binding.identity.binding_id == available_id)
+      .unwrap();
+    let missing_route = response
+      .bindings
+      .iter()
+      .find(|binding| binding.identity.binding_id == missing_route_id)
+      .unwrap();
+    assert_eq!(available.handoff_state, IisHandoffState::Available);
+    assert!(available.issue.is_none());
+    assert_eq!(missing_route.handoff_state, IisHandoffState::MissingRoute);
+    assert!(missing_route.issue.is_some());
+
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(2), daemon)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
   async fn ensure_daemon_running_returns_when_socket_already_available() {
     let server = ScriptedIpcServer::start(|_conn| async move {});
 
@@ -1535,6 +1594,10 @@ mod tests {
     }
 
     panic!("daemon server did not become ready");
+  }
+
+  fn iis_binding(site: &str, protocol: &str, binding: &str) -> IisBindingRecord {
+    IisBindingRecord::from_binding_information(site, protocol, binding).unwrap()
   }
 
   async fn write_basic_response(writer: &mut tokio::io::WriteHalf<Stream>, message_type: &str) {

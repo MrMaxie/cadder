@@ -33,6 +33,18 @@ For `caddy run`, the shim is attach-first. If the Cadder daemon is missing, reco
 
 When `CADDER_CADDY_BACKEND=mock` or `--cadder-caddy-backend mock` is active, real Caddy fallback is skipped and the shim tries the daemon path directly.
 
+## Command policy
+
+The shim classifies the first Caddy command before it decides what may run:
+
+| Command path | Policy | Result |
+| --- | --- | --- |
+| `run` | Managed | Registers the project with `cadderd`; Cadder owns the effective runtime state. |
+| `adapt`, `build-info`, `environ`, `help`, `list-modules`, `validate`, `version`, `--version` | Read-only inspection | Delegates to the safely resolved real Caddy command when real backend mode is active. |
+| `completion`, `file-server`, `fmt`, `manpage`, `reverse-proxy` | Explicit passthrough | Delegates to real Caddy as an explicit unmanaged command path. |
+| `add-package`, `reload`, `remove-package`, `start`, `stop`, `trust`, `untrust`, `upgrade` | Unsupported | Fails before real Caddy runs because the command can mutate runtime, trust, or binary state outside Cadder ownership. |
+| Any unlisted command | Unsupported | Fails until the command has an explicit Cadder shim policy. |
+
 ## Keep a separate real Caddy path
 
 The practical idea is simple:
