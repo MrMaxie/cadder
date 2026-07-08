@@ -56,11 +56,40 @@ runtime directories, visible labels, and separate locks.
 This gives normal users predictable behavior while preserving a deliberate path
 for debugging and integration tests.
 
+### Runtime Locking
+
+Production daemon startup uses an operating-system file lock for exclusive
+ownership and a separate readable lock metadata sidecar for diagnostics. The
+lock file is the authority for exclusion. The sidecar records the owning process
+id, Cadder version, protocol compatibility range, capability set, runtime
+profile, runtime directory, socket name, acquisition time, and executable path.
+
+Keeping metadata outside the locked file lets clients report the active owner
+even on platforms where an exclusive file lock prevents reading the locked byte
+range. If the OS lock is free but the sidecar remains, startup treats the
+sidecar as stale crash residue, replaces it, and records the recovery in daemon
+logs. A clean daemon shutdown removes the sidecar when the lock guard is
+released.
+
 ### Local Control Plane
 
 Cadder uses a local daemon protocol with typed envelopes, requests, responses,
 events, and errors. The protocol should tolerate additive compatible changes and
 report unsupported capabilities explicitly.
+
+Compatibility is capability-first. Daemons, shims, operator clients, and future
+surfaces advertise the protocol version they speak and the versioned
+capabilities they provide. A version mismatch is diagnostic unless the receiving
+side cannot decode the envelope or a required capability/version is missing.
+When an older node participates in communication, the newer node should suggest
+updating the older participant, but it must not fail an otherwise supported
+operation solely because the peer version is older or newer.
+
+Capabilities are versioned independently from the envelope protocol. Each
+capability advertises its current version and the oldest compatible capability
+version still supported. This allows Cadder to keep older daemon, shim, and
+operator builds working during an intentional support window instead of forcing
+the whole local stack to update at once.
 
 Transport is an edge concern. Core protocol types stay transport-neutral.
 Platform-specific transport security belongs behind a narrow policy layer.
@@ -70,9 +99,20 @@ Platform-specific transport security belongs behind a narrow policy layer.
 Normal operation should run at user privilege. Operations that require higher
 privilege must be explicit, scoped, and observable from user-level clients.
 
-The implementation must document how user-level clients discover and contact a
-more privileged daemon or helper. The security policy must be testable without
-requiring real OS mutation in every test.
+The daemon publishes local IPC discovery metadata in `cadder-ipc.json` inside
+the runtime directory after the listener is bound. The metadata records the
+socket name, runtime identity, protocol compatibility range, advertised
+capabilities, daemon process id, endpoint privilege status, owning local
+principal, and the active security policy version.
+
+The initial local IPC policy is account-owner based. A client running as the
+same local account that owns the runtime may use documented read-only and
+state-changing operations, even when the endpoint process is elevated and the
+client process is not. A different local account is denied before state-changing
+handlers run, and the daemon records a redacted runtime-control log entry for
+the denied attempt. Unit tests exercise the policy with fake principals; later
+system smoke coverage validates the platform transport and peer-credential
+behavior.
 
 ### Shim Boundary
 
@@ -112,6 +152,27 @@ Clients must remain useful when the daemon is offline. Read-only flows can show
 setup information, diagnostics, and last-known state where available.
 State-changing flows must explain that the daemon is unavailable and offer a
 start/recovery path.
+
+### Workspace Crate Topology
+
+The Rust workspace keeps a closed set of documented members for the reset:
+
+- `crates/cadder-daemon`: daemon runtime library.
+- `crates/cadderd`: daemon binary.
+- `crates/cadder-shim`: PATH-facing `caddy` shim package.
+- `crates/cadder`: operator CLI/TUI executable package.
+- `crates/cadder-operator`: internal operator service and view-model library.
+- `crates/cadder-protocol`: shared protocol/API package.
+- `xtask`: repository-specific validation tooling.
+
+`cadder-operator` remains a separate internal library for this change. It is
+not a release-facing product surface; it exists to keep daemon access, daemon
+launch policy, state shaping, and operator view models mockable across CLI and
+TUI code. A future change may merge it into `cadder` only if the boundary no
+longer carries an independently testable responsibility.
+
+Workspace membership and runtime release packages must be validated against
+this topology so undocumented product crates cannot be introduced silently.
 
 ### Logs
 
@@ -155,12 +216,8 @@ do not cover clearly.
 ## Open Questions
 
 - What is the exact CLI/TUI invocation model for the operator executable?
-- What local IPC security model should be used for user-level clients talking to
-  a privileged daemon or helper?
 - Should privileged platform operations use a narrow helper executable or a
   privileged daemon mode?
 - Which exact Caddy command paths belong in each shim policy category?
 - What file-size/cohesion threshold should validation enforce, and which
   generated files are exempt?
-- Should the existing operator support crate remain separate or become part of
-  the final operator crate boundary?

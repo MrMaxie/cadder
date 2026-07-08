@@ -1,0 +1,46 @@
+projects:
+  - name: aaa
+    path: D:/Projects/Personal/Cadder/crates
+    enabled: true
+    created_at: 2026-02-11 11:02:57
+    updated_at: 2026-02-12 12:20:40
+    domains:
+      - domain: app.aaa.local
+        port: 8000
+        enabled: true
+        created_at: 2026-02-11 11:02:57
+        updated_at: 2026-02-11 11:02:57
+      - domain: api.aaa.local
+        port: 3000
+        enabled: true
+        created_at: 2026-02-11 11:02:57
+        updated_at: 2026-02-11 11:02:57
+      - domain: db.aaa.local
+        port: 3442
+        enabled: false
+        created_at: 2026-02-11 11:02:57
+        updated_at: 2026-02-12 12:20:40
+  - name: bbb
+    path: D:/Projects/Personal/Cadder
+    enabled: false
+    created_at: 2026-03-03 13:33:33
+    updated_at: 2026-03-03 13:33:33
+    domains:
+      - domain: dupa.bbb.local
+        port: 3233
+        enabled: false
+        created_at: 2026-03-03 13:33:33
+        updated_at: 2026-03-03 13:33:33
+      - domain: xd.local
+        port: 2333
+        enabled: true
+        created_at: 2026-03-03 13:33:33
+        updated_at: 2026-03-03 13:33:33
+iis:
+  enabled: true
+  domains:
+    - domain: test.iis.local
+      port: 2221
+      created_at: 2026-03-03 13:33:33
+      updated_at: 2026-03-03 13:33:33
+      enabled: true

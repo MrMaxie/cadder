@@ -9,13 +9,29 @@ Cadder never embeds Caddy. For normal use, configure `[caddy].real_command` in `
 
 The resolver uses this exact order:
 
-1. CLI override: `--real-caddy-command` for `cadderd` and `cadder-tui` daemon launch, or `--cadder-real-caddy-command` for the shim.
+1. CLI override: `--real-caddy-command` for `cadderd` and `cadder` daemon launch, or `--cadder-real-caddy-command` for the shim.
 2. `[caddy].real_command` in `cadder.toml` in the current working directory.
 3. `[caddy].real_command` in `cadder.toml` next to the executable.
 4. Environment variables, including `CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND`.
 5. A safe real `caddy` executable on `PATH`.
 
 This differs from the recommended setup order because explicit per-command and per-project overrides must win at runtime.
+
+## Shim fallback for `caddy run`
+
+When the PATH-facing shim handles `caddy run`, it first tries to attach to the configured Cadder runtime. If no daemon is available, recovery uses this order:
+
+1. Delegate to the safely resolved real Caddy command when the backend mode is `real`.
+2. Start the missing daemon through Cadder's detached background launch contract.
+3. Print a terminal error that includes the original attach failure, real Caddy fallback result, daemon-start result, and concrete retry guidance.
+
+The fallback uses the same resolver described above, including recursion-safety exclusions for the current executable and `CADDER_CADDY_SHIM_PATH`. In mock backend mode, real Caddy fallback is skipped and the shim tries daemon startup directly.
+
+## Mock backend for development
+
+Set `CADDER_CADDY_BACKEND=mock` or pass `--caddy-backend mock` to use Cadder's development mock backend. In this mode the daemon does not resolve or execute a real Caddy binary, does not run `caddy adapt`, and does not bind HTTP or HTTPS ports. It records deterministic runtime state and effective config for local UI and operator workflows.
+
+`--real-caddy-command` cannot be combined with `--caddy-backend mock`. Leave the backend unset for normal use; the default is `real`.
 
 ## TOML schema
 

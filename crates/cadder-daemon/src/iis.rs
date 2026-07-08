@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IisBindingRecord {
@@ -350,6 +353,13 @@ impl IisProvider {
   }
 
   #[cfg(test)]
+  pub async fn set_fail_discovery(&self, issue: IisIssue) {
+    if let IisProviderInner::Fake(state) = &self.inner {
+      state.lock().await.fail_discovery = Some(issue);
+    }
+  }
+
+  #[cfg(test)]
   pub async fn set_fail_remove(&self, issue: IisIssue) {
     if let IisProviderInner::Fake(state) = &self.inner {
       state.lock().await.fail_remove = Some(issue);
@@ -442,8 +452,6 @@ impl FakeIisProviderState {
 
 #[cfg(windows)]
 async fn system_discover() -> Result<Vec<IisBindingRecord>, IisIssue> {
-  use tokio::process::Command;
-
   let script = r#"
 $ErrorActionPreference = 'Stop'
 Import-Module WebAdministration -ErrorAction Stop
@@ -467,7 +475,7 @@ Get-WebBinding | ForEach-Object {
   }
 } | ConvertTo-Json -Depth 4
 "#;
-  let output = Command::new("powershell")
+  let output = powershell_command()
     .arg("-NoProfile")
     .arg("-NonInteractive")
     .arg("-Command")
@@ -640,9 +648,7 @@ async fn system_execute_privileged_batch(
 
 #[cfg(windows)]
 async fn run_powershell_mutation(script: String) -> Result<(), IisIssue> {
-  use tokio::process::Command;
-
-  let output = Command::new("powershell")
+  let output = powershell_command()
     .arg("-NoProfile")
     .arg("-NonInteractive")
     .arg("-Command")
@@ -659,8 +665,6 @@ async fn run_powershell_mutation(script: String) -> Result<(), IisIssue> {
 
 #[cfg(windows)]
 async fn run_elevated_powershell_batch(reason: &str, script: String) -> Result<(), IisIssue> {
-  use tokio::process::Command;
-
   let stamp = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .map(|duration| duration.as_nanos())
@@ -697,7 +701,7 @@ try {{
     "$ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath 'powershell' -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}'); exit $p.ExitCode",
     ps_escape(&script_path.display().to_string())
   );
-  let output = Command::new("powershell")
+  let output = powershell_command()
     .arg("-NoProfile")
     .arg("-NonInteractive")
     .arg("-Command")
@@ -744,6 +748,25 @@ try {{
   } else {
     Err(classify_powershell_error(message.as_bytes()))
   }
+}
+
+#[cfg(windows)]
+fn powershell_command() -> tokio::process::Command {
+  #[cfg(test)]
+  if let Some(program) = std::env::var_os("CADDER_TEST_POWERSHELL") {
+    let mut command = tokio::process::Command::new(program);
+    configure_hidden_child(&mut command);
+    return command;
+  }
+
+  let mut command = tokio::process::Command::new("powershell");
+  configure_hidden_child(&mut command);
+  command
+}
+
+#[cfg(windows)]
+fn configure_hidden_child(command: &mut tokio::process::Command) {
+  command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(windows)]
@@ -822,17 +845,39 @@ fn provider_error(error: std::io::Error) -> IisIssue {
 #[cfg(windows)]
 fn classify_powershell_error(stderr: &[u8]) -> IisIssue {
   let message = String::from_utf8_lossy(stderr).trim().to_string();
-  let kind = if message.contains("Access is denied")
-    || message.contains("UnauthorizedAccess")
-    || message.contains("administrator")
-  {
-    IisIssueKind::InsufficientPrivileges
-  } else if message.contains("WebAdministration") || message.contains("module") {
-    IisIssueKind::IisUnavailable
+  let normalized = message.to_lowercase();
+  let (kind, message) = if powershell_message_needs_admin(&normalized) {
+    (
+      IisIssueKind::InsufficientPrivileges,
+      "IIS access requires administrator approval.".to_string(),
+    )
+  } else if message.contains("WebAdministration") || normalized.contains("module") {
+    (
+      IisIssueKind::IisUnavailable,
+      "IIS WebAdministration module is unavailable.".to_string(),
+    )
   } else {
-    IisIssueKind::ProviderError
+    (
+      IisIssueKind::ProviderError,
+      if message.is_empty() {
+        "PowerShell IIS command failed.".to_string()
+      } else {
+        message
+      },
+    )
   };
   IisIssue::new(kind, message)
+}
+
+#[cfg(windows)]
+fn powershell_message_needs_admin(normalized: &str) -> bool {
+  normalized.contains("access is denied")
+    || normalized.contains("unauthorizedaccess")
+    || normalized.contains("administrator")
+    || normalized.contains("elevated")
+    || normalized.contains("requires elevation")
+    || normalized.contains("insufficient privilege")
+    || (normalized.contains("podwy") && normalized.contains("uprawnieni"))
 }
 
 pub fn binding_to_view(
@@ -889,6 +934,8 @@ pub fn unsupported_binding_issue(binding: &IisBindingRecord) -> Option<IisIssue>
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(windows)]
+  use std::{env, ffi::OsString, fs, path::Path, process::Command as StdCommand};
 
   fn tls_certificate() -> IisTlsCertificate {
     IisTlsCertificate {
@@ -1034,6 +1081,49 @@ mod tests {
     assert!(issue.message.contains("TLS certificate metadata"));
   }
 
+  #[test]
+  fn backend_binding_rejects_unsupported_backend_protocol() {
+    let binding =
+      IisBindingRecord::from_binding_information("Default Web Site", "ftp", "*:21:app.localhost")
+        .unwrap();
+
+    let issue = binding.backend_binding(41021, "app.localhost").unwrap_err();
+
+    assert_eq!(issue.kind, IisIssueKind::UnsupportedBindingShape);
+    assert!(issue.message.contains("protocol `ftp`"));
+  }
+
+  #[test]
+  fn backend_binding_rejects_blank_https_certificate_fields() {
+    let mut binding = IisBindingRecord::from_binding_information(
+      "Default Web Site",
+      "https",
+      "*:443:secure.localhost",
+    )
+    .unwrap();
+    binding.tls_certificate = Some(IisTlsCertificate {
+      thumbprint: " ".to_string(),
+      store_name: "My".to_string(),
+      ssl_flags: None,
+    });
+    let blank_thumbprint = binding.backend_binding(41043, "secure.localhost");
+    binding.tls_certificate = Some(IisTlsCertificate {
+      thumbprint: "aabbcc".to_string(),
+      store_name: " ".to_string(),
+      ssl_flags: None,
+    });
+    let blank_store = binding.backend_binding(41043, "secure.localhost");
+
+    assert_eq!(
+      blank_thumbprint.unwrap_err().kind,
+      IisIssueKind::MissingTlsCertificate
+    );
+    assert_eq!(
+      blank_store.unwrap_err().kind,
+      IisIssueKind::MissingTlsCertificate
+    );
+  }
+
   #[tokio::test]
   async fn metadata_store_persists_and_removes_handoffs() {
     let dir = tempfile::tempdir().unwrap();
@@ -1056,6 +1146,50 @@ mod tests {
     let removed = reloaded.remove(&binding.binding_id()).await.unwrap();
     assert_eq!(removed.unwrap().domain_key, "app.localhost");
     assert!(reloaded.snapshot().await.is_empty());
+  }
+
+  #[tokio::test]
+  async fn metadata_store_memory_mode_accepts_noop_persistence() {
+    let binding =
+      IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:app.localhost")
+        .unwrap();
+    let record = IisRestoreRecord {
+      binding: binding.clone(),
+      domain_key: "app.localhost".to_string(),
+      registration_id: None,
+      backend_binding: None,
+    };
+    let store = IisMetadataStore::memory();
+
+    store.insert(binding.binding_id(), record).await.unwrap();
+    let removed = store.remove(&binding.binding_id()).await.unwrap();
+
+    assert_eq!(removed.unwrap().domain_key, "app.localhost");
+    assert!(store.snapshot().await.is_empty());
+  }
+
+  #[tokio::test]
+  async fn metadata_store_reports_write_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let binding =
+      IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:app.localhost")
+        .unwrap();
+    let record = IisRestoreRecord {
+      binding: binding.clone(),
+      domain_key: "app.localhost".to_string(),
+      registration_id: None,
+      backend_binding: None,
+    };
+    let store = IisMetadataStore::load(dir.path().to_path_buf())
+      .await
+      .unwrap();
+
+    let error = store
+      .insert(binding.binding_id(), record)
+      .await
+      .unwrap_err();
+
+    assert!(error.to_string().contains("write daemon metadata"));
   }
 
   #[tokio::test]
@@ -1133,6 +1267,22 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn fake_provider_reports_configured_discovery_failure() {
+    let provider = IisProvider::fake(Vec::new());
+    provider
+      .set_fail_discovery(IisIssue::new(
+        IisIssueKind::IisUnavailable,
+        "discovery failed",
+      ))
+      .await;
+
+    let error = provider.discover().await.unwrap_err();
+
+    assert_eq!(error.kind, IisIssueKind::IisUnavailable);
+    assert!(error.message.contains("discovery failed"));
+  }
+
+  #[tokio::test]
   async fn fake_provider_reports_missing_remove_binding() {
     let binding =
       IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:app.localhost")
@@ -1154,6 +1304,57 @@ mod tests {
     assert_eq!(provider.discover().await.unwrap().len(), 1);
     provider.restore_binding(&binding).await.unwrap();
     assert_eq!(provider.discover().await.unwrap().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn fake_provider_privileged_batch_applies_all_mutation_variants() {
+    let original =
+      IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:app.localhost")
+        .unwrap();
+    let added =
+      IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:api.localhost")
+        .unwrap();
+    let provider = IisProvider::fake(vec![original.clone()]);
+
+    provider
+      .execute_privileged_batch(
+        "replace IIS bindings",
+        &[
+          IisMutation::remove(original.clone()),
+          IisMutation::add(added.clone()),
+          IisMutation::restore(original.clone()),
+        ],
+      )
+      .await
+      .unwrap();
+    let bindings = provider.discover().await.unwrap();
+
+    assert_eq!(bindings.len(), 2);
+    assert!(
+      bindings
+        .iter()
+        .any(|binding| binding.binding_id() == original.binding_id())
+    );
+    assert!(
+      bindings
+        .iter()
+        .any(|binding| binding.binding_id() == added.binding_id())
+    );
+    assert!(format!("{:?}", IisProvider::default()).contains("System"));
+    assert!(format!("{:?}", IisMutation::add(added.clone())).contains("Add"));
+
+    provider
+      .set_elevation_issue(IisIssue::new(IisIssueKind::ElevationDenied, "denied"))
+      .await;
+    let error = provider
+      .execute_privileged_batch(
+        "denied IIS bindings",
+        &[IisMutation::remove(original.clone())],
+      )
+      .await
+      .unwrap_err();
+
+    assert_eq!(error.kind, IisIssueKind::ElevationDenied);
   }
 
   #[cfg(windows)]
@@ -1193,6 +1394,13 @@ mod tests {
       IisIssueKind::InsufficientPrivileges
     );
     assert_eq!(
+      classify_powershell_error(
+        b"Import-Module WebAdministration failed: podwy\xBFszonymi uprawnieniami"
+      )
+      .kind,
+      IisIssueKind::InsufficientPrivileges
+    );
+    assert_eq!(
       classify_powershell_error(b"WebAdministration module missing").kind,
       IisIssueKind::IisUnavailable
     );
@@ -1200,5 +1408,182 @@ mod tests {
       classify_powershell_error(b"unexpected").kind,
       IisIssueKind::ProviderError
     );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn windows_system_iis_scripts_escape_binding_and_certificate_metadata() {
+    let binding = with_tls_certificate(
+      IisBindingRecord::from_binding_information("Bob's Site", "https", "*:443:secure.localhost")
+        .unwrap(),
+    );
+
+    let remove = system_remove_binding_script(&binding);
+    let add = system_add_binding_script(&binding);
+    let restore = system_restore_binding_script(&binding);
+
+    assert!(remove.contains("Remove-WebBinding"));
+    assert!(remove.contains("Bob''s Site"));
+    assert!(add.contains("New-WebBinding"));
+    assert!(add.contains("-SslFlags 1"));
+    assert!(add.contains("AddSslCertificate('aabbcc', 'My')"));
+    assert_eq!(restore, add);
+  }
+
+  #[cfg(windows)]
+  #[tokio::test]
+  // The guard serializes process-wide environment overrides while awaited fake PowerShell calls read them.
+  #[allow(clippy::await_holding_lock)]
+  async fn windows_powershell_boundaries_use_process_results_without_real_iis() {
+    let _lock = crate::TEST_ENV_LOCK.lock().unwrap();
+    let _snapshot = EnvSnapshot::capture(["CADDER_TEST_POWERSHELL", "FAKE_POWERSHELL_MODE"]);
+    let temp = tempfile::tempdir().unwrap();
+    write_fake_powershell(temp.path());
+    unsafe {
+      env::set_var("CADDER_TEST_POWERSHELL", temp.path().join("powershell.exe"));
+    }
+
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "discover-success");
+    }
+    let discovered = system_discover().await.unwrap();
+    assert_eq!(discovered[0].host_header, "app.localhost");
+
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "module-failure");
+    }
+    assert_eq!(
+      system_discover().await.unwrap_err().kind,
+      IisIssueKind::IisUnavailable
+    );
+
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "success");
+    }
+    run_powershell_mutation("$true".to_string()).await.unwrap();
+
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "denied");
+    }
+    assert_eq!(
+      run_powershell_mutation("$true".to_string())
+        .await
+        .unwrap_err()
+        .kind,
+      IisIssueKind::InsufficientPrivileges
+    );
+
+    let binding =
+      IisBindingRecord::from_binding_information("Default Web Site", "http", "*:80:app.localhost")
+        .unwrap();
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "success");
+    }
+    system_execute_privileged_batch(
+      "test elevated success",
+      &[
+        IisMutation::add(binding.clone()),
+        IisMutation::remove(binding.clone()),
+        IisMutation::restore(binding.clone()),
+      ],
+    )
+    .await
+    .unwrap();
+
+    unsafe {
+      env::set_var("FAKE_POWERSHELL_MODE", "cancel");
+    }
+    assert_eq!(
+      system_execute_privileged_batch("test elevated cancel", &[IisMutation::remove(binding)])
+        .await
+        .unwrap_err()
+        .kind,
+      IisIssueKind::ElevationDenied
+    );
+  }
+
+  #[cfg(windows)]
+  #[tokio::test]
+  async fn windows_empty_privileged_batch_short_circuits_without_powershell() {
+    system_execute_privileged_batch("nothing to do", &[])
+      .await
+      .unwrap();
+  }
+
+  #[cfg(windows)]
+  fn write_fake_powershell(dir: &Path) {
+    let source_path = dir.join("fake_powershell.rs");
+    let exe_path = dir.join("powershell.exe");
+    fs::write(
+      &source_path,
+      r##"
+fn main() {
+  let mode = std::env::var("FAKE_POWERSHELL_MODE").unwrap_or_default();
+  match mode.as_str() {
+    "discover-success" => {
+      println!(r#"{{"siteName":"Default Web Site","protocol":"http","bindingInformation":"*:80:app.localhost"}}"#);
+      std::process::exit(0);
+    }
+    "module-failure" => {
+      eprintln!("WebAdministration module missing");
+      std::process::exit(1);
+    }
+    "denied" => {
+      eprintln!("Access is denied");
+      std::process::exit(1);
+    }
+    "cancel" => {
+      eprintln!("Operation canceled");
+      std::process::exit(1);
+    }
+    "success" => std::process::exit(0),
+    _ => {
+      eprintln!("unknown fake powershell mode {mode}");
+      std::process::exit(1);
+    }
+  }
+}
+"##,
+    )
+    .unwrap();
+    let status = StdCommand::new("rustc")
+      .arg(&source_path)
+      .arg("-o")
+      .arg(&exe_path)
+      .status()
+      .unwrap();
+    assert!(status.success());
+  }
+
+  #[cfg(windows)]
+  struct EnvSnapshot {
+    values: Vec<(&'static str, Option<OsString>)>,
+  }
+
+  #[cfg(windows)]
+  impl EnvSnapshot {
+    fn capture<const N: usize>(names: [&'static str; N]) -> Self {
+      Self {
+        values: names
+          .into_iter()
+          .map(|name| (name, env::var_os(name)))
+          .collect(),
+      }
+    }
+  }
+
+  #[cfg(windows)]
+  impl Drop for EnvSnapshot {
+    fn drop(&mut self) {
+      for (name, value) in &self.values {
+        unsafe {
+          if let Some(value) = value {
+            env::set_var(name, value);
+          } else {
+            env::remove_var(name);
+          }
+        }
+      }
+    }
   }
 }

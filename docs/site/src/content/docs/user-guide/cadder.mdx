@@ -1,0 +1,76 @@
+---
+title: cadder
+description: Use the Cadder operator executable for CLI automation and TUI operation.
+---
+
+`cadder` is the v1 operator executable. It is designed for shell scripts, CI checks, agents, and operators who need daemon state, diagnostics, logs, IIS handoff, autostart, toggles, and interactive TUI operation.
+
+## Command Groups
+
+```sh
+cadder daemon status
+cadder daemon start
+cadder daemon shutdown
+cadder entrypoints list
+cadder entrypoints disable <registration-id>
+cadder domains list
+cadder domains disable <domain> --registration <registration-id>
+cadder diagnostics show
+cadder logs show --limit 20 domain <domain> --registration <registration-id>
+cadder logs tail --limit 20 --poll-interval-ms 750 domain <domain> --registration <registration-id>
+cadder logs export --limit 100 runtime --output-path runtime.log
+cadder history show --limit 50
+cadder iis bindings
+cadder iis handoff <binding-id> --route-host app.localhost
+cadder iis restore <binding-id>
+cadder autostart status
+cadder autostart set daemon
+cadder watch status
+cadder tui
+```
+
+`cadder` stays attach-only by default. Read-only commands, toggles, `watch`, `logs tail`, history, IIS, and autostart queries connect to an already running daemon. `cadder daemon start` is the explicit launch path.
+
+## Output Modes
+
+`cadder` supports:
+
+- `human` for operators running commands by hand.
+- `json` for one-shot scripting and machine parsing.
+- `jsonl` for streaming commands such as `watch` and `logs tail`.
+
+Examples:
+
+```sh
+cadder entrypoints list --output json
+cadder domains list --output json
+cadder watch diagnostics --output jsonl
+cadder logs tail --output jsonl --limit 50 domain app.localhost --registration shim-1
+cadder history show --output json
+```
+
+## TUI
+
+Run:
+
+```sh
+cadder tui
+```
+
+The TUI uses the same local daemon contracts and operator view models as the CLI. It covers daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, and settings.
+
+Remote pairing, authentication, and multi-host control are not part of v1.0.
+
+## Autostart
+
+```sh
+cadder autostart status
+cadder autostart set disabled
+cadder autostart set daemon
+```
+
+Autostart writes per-user startup entries. Configure it from the same normal user account that owns the Cadder runtime. v1.0 supports disabled and daemon autostart modes.
+
+## Agent Use
+
+CLI output modes are the stable v1 automation surface for agents. The TUI is the interactive operator surface.

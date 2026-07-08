@@ -1,22 +1,20 @@
 ---
 title: How to use
-description: Use Cadder releases, the caddy shim, and the TUI without changing Cadder itself.
+description: Use the Cadder runtime, caddy shim, CLI, and TUI.
 ---
 
-The release contains six files you normally care about:
+The runtime installer and portable runtime archive contain:
 
 - `caddy`
 - `cadderd`
-- `cadderctl`
-- `cadder-mcp`
-- `cadder-tui`
+- `cadder`
 - `cadder.toml`
 
 The `caddy` command is Cadder's shim. Use it for project `caddy run` workflows that should be coordinated by Cadder. The real Caddy binary stays separate and is configured through [cadder.toml](../cadder-toml/).
 
-## Basic flow
+## Basic Flow
 
-1. Get the release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases/latest).
+1. Get either the runtime installer or the portable runtime archive for your operating system from [GitHub Releases](https://github.com/MrMaxie/cadder/releases/latest).
 2. Point Cadder at the real Caddy binary with [cadder.toml](../cadder-toml/).
 3. Start the Cadder backend:
 
@@ -30,20 +28,21 @@ cadderd
 caddy run
 ```
 
-5. Inspect the daemon when needed:
+5. Inspect or operate the daemon:
 
 ```sh
-cadderctl daemon status
-cadderctl domains list --output json
-cadder-mcp --help
-cadder-tui
+cadder daemon status
+cadder domains list --output json
+cadder tui
 ```
 
-`caddy run` attaches to the running backend. If `cadderd` is unavailable, Cadder reports how to start it instead of starting it implicitly.
+Use `cadder` when you want stable machine-readable output, non-interactive toggles, log queries, IIS handoff, autostart, daemon lifecycle commands, or interactive TUI operation.
 
-Use `cadderctl` when you want stable machine-readable output, non-interactive toggles, or scriptable log queries. Use `cadder-mcp` when an MCP-capable host should drive Cadder through local stdio tools. Use `cadder-tui` when you want an interactive dashboard with navigation and live browsing.
+## Updates
 
-## Direct or PATH-based use
+Cadder v1.0 does not include an in-app updater or background update checks. To update, download a newer runtime installer or portable runtime archive from [GitHub Releases](https://github.com/MrMaxie/cadder/releases/latest), then install or replace the matching artifact manually.
+
+## Direct Or PATH-Based Use
 
 Both styles are valid.
 
@@ -55,7 +54,7 @@ The practical setup is:
 - configure its path in [cadder.toml](../cadder-toml/);
 - expose Cadder's `caddy` shim globally only if that matches your workflow.
 
-## Check the shim
+## Check The Shim
 
 This command confirms that `caddy` is Cadder's shim:
 

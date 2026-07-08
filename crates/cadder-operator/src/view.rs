@@ -149,6 +149,7 @@ pub struct DomainView {
   pub registration_id: String,
   pub domain: String,
   pub canonical_domain: String,
+  pub upstream: Option<String>,
   pub activation_state: ActivationState,
   pub entrypoint_activation_state: ActivationState,
   pub working_directory: String,
@@ -268,6 +269,7 @@ pub fn domains_view(
           registration_id: registration.registration_id.clone(),
           domain: domain.name.raw.clone(),
           canonical_domain: domain.name.canonical.clone(),
+          upstream: domain.upstream.clone(),
           activation_state: domain.activation_state,
           entrypoint_activation_state: registration.activation_state,
           working_directory: registration.source_working_directory.raw.clone(),
@@ -386,6 +388,7 @@ mod tests {
         .map(|domain| RegisteredDomain {
           name: DomainName::parse(*domain),
           activation_state: ActivationState::Active,
+          upstream: None,
           log_stream: LogStreamIdentity::domain(domain),
         })
         .collect(),
@@ -409,6 +412,7 @@ mod tests {
       registrations,
       runtime: RuntimeState::idle(),
       config: ConfigState::idle(),
+      storage: None,
     }
   }
 

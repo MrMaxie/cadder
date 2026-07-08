@@ -65,7 +65,44 @@ fn env_value(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::fs;
+  use std::{ffi::OsString, fs};
+
+  const ENV_KEYS: [&str; 2] = ["CADDER_CADDY__REAL_COMMAND", "CADDER_CADDY_REAL_COMMAND"];
+
+  struct EnvSnapshot {
+    values: Vec<(&'static str, Option<OsString>)>,
+  }
+
+  impl EnvSnapshot {
+    fn capture(keys: &[&'static str]) -> Self {
+      Self {
+        values: keys
+          .iter()
+          .copied()
+          .map(|key| (key, env::var_os(key)))
+          .collect(),
+      }
+    }
+  }
+
+  impl Drop for EnvSnapshot {
+    fn drop(&mut self) {
+      for (key, value) in &self.values {
+        unsafe {
+          match value {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+          }
+        }
+      }
+    }
+  }
+
+  fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    crate::TEST_ENV_LOCK
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
 
   #[test]
   fn reads_real_command_from_toml_file() {
@@ -104,6 +141,54 @@ mod tests {
       configured_real_caddy_command(&config).as_deref(),
       Some("caddy-custom")
     );
+  }
+
+  #[test]
+  fn from_environment_reads_split_caddy_real_command() {
+    let _lock = lock_env();
+    let _snapshot = EnvSnapshot::capture(&ENV_KEYS);
+    unsafe {
+      env::remove_var("CADDER_CADDY_REAL_COMMAND");
+      env::set_var("CADDER_CADDY__REAL_COMMAND", "env-caddy");
+    }
+
+    let config = CadderConfig::from_environment().unwrap();
+
+    assert_eq!(
+      configured_real_caddy_command(&config).as_deref(),
+      Some("env-caddy")
+    );
+  }
+
+  #[test]
+  fn from_environment_legacy_real_command_overrides_split_key() {
+    let _lock = lock_env();
+    let _snapshot = EnvSnapshot::capture(&ENV_KEYS);
+    unsafe {
+      env::set_var("CADDER_CADDY__REAL_COMMAND", "split-caddy");
+      env::set_var("CADDER_CADDY_REAL_COMMAND", "  legacy-caddy  ");
+    }
+
+    let config = CadderConfig::from_environment().unwrap();
+
+    assert_eq!(
+      configured_real_caddy_command(&config).as_deref(),
+      Some("legacy-caddy")
+    );
+  }
+
+  #[test]
+  fn from_environment_ignores_blank_real_command_overrides() {
+    let _lock = lock_env();
+    let _snapshot = EnvSnapshot::capture(&ENV_KEYS);
+    unsafe {
+      env::set_var("CADDER_CADDY__REAL_COMMAND", "   ");
+      env::set_var("CADDER_CADDY_REAL_COMMAND", "   ");
+    }
+
+    let config = CadderConfig::from_environment().unwrap();
+
+    assert_eq!(configured_real_caddy_command(&config), None);
   }
 
   #[test]

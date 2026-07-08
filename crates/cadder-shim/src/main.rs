@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, anyhow};
-use cadder_daemon::{CadderSession, RealCaddyResolver, RuntimePaths};
+use cadder_daemon::{
+  CadderSession, CaddyBackendMode, DaemonLaunchOptions, RealCaddyResolver, RuntimePaths,
+  RuntimeProfile, ensure_daemon_running_with_options, shim_privilege_diagnostic,
+};
 use cadder_protocol::{
   ActivationState, BasicResponse, EntrypointInstanceIdentity, EntrypointRegistration,
   HeartbeatEntrypointRequest, LogStreamIdentity, OwnerProcessIdentity, RegisterEntrypointRequest,
@@ -10,13 +13,15 @@ use chrono::Utc;
 use clap::Parser;
 use std::{
   env,
+  future::Future,
   path::PathBuf,
   process::{ExitCode, Stdio},
+  sync::Arc,
   time::Duration,
 };
 use tokio::{process::Command, sync::Mutex, time::interval};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
   name = "caddy",
   version,
@@ -27,11 +32,25 @@ struct ShimArgs {
   #[arg(long = "cadder-runtime-dir", hide = true)]
   runtime_dir: Option<PathBuf>,
 
+  #[arg(
+    long = "cadder-runtime-profile",
+    hide = true,
+    value_parser = RuntimeProfile::parse_cli
+  )]
+  runtime_profile: Option<RuntimeProfile>,
+
   #[arg(long = "cadder-daemon-path", hide = true)]
   daemon_path: Option<PathBuf>,
 
   #[arg(long = "cadder-real-caddy-command", hide = true)]
   real_caddy_command: Option<String>,
+
+  #[arg(
+    long = "cadder-caddy-backend",
+    hide = true,
+    value_parser = CaddyBackendMode::parse_cli
+  )]
+  caddy_backend: Option<CaddyBackendMode>,
 
   #[arg(
     value_name = "CADDY_ARGS",
@@ -61,21 +80,43 @@ async fn main() -> Result<ExitCode> {
     return Ok(ExitCode::SUCCESS);
   }
 
+  let caddy_backend = args
+    .caddy_backend
+    .map_or_else(CaddyBackendMode::from_env, Ok)?;
+
   if args.caddy_args.first().is_some_and(|arg| arg == "run") {
     run_managed(args).await
+  } else if caddy_backend == CaddyBackendMode::Mock {
+    run_mock_caddy_command(&args.caddy_args).await
   } else {
     delegate_to_real_caddy(args.real_caddy_command, &args.caddy_args).await
   }
 }
 
 async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
-  let paths = RuntimePaths::resolve(args.runtime_dir)?;
-  let session = match CadderSession::connect(&paths).await {
-    Ok(session) => std::sync::Arc::new(Mutex::new(session)),
-    Err(error) => {
-      eprintln!("{}", managed_backend_unavailable_message(&paths, &error));
-      return Ok(ExitCode::FAILURE);
-    }
+  write_shim_privilege_warning();
+  run_managed_until(args, tokio::signal::ctrl_c()).await
+}
+
+fn write_shim_privilege_warning() {
+  if let Some(message) = shim_privilege_warning_text() {
+    eprintln!("warning: {message}");
+  }
+}
+
+fn shim_privilege_warning_text() -> Option<String> {
+  shim_privilege_diagnostic("caddy shim")
+    .map(|diagnostic| format!("{} {}", diagnostic.message, diagnostic.guidance))
+}
+
+async fn run_managed_until<F>(args: ShimArgs, shutdown: F) -> Result<ExitCode>
+where
+  F: Future<Output = std::io::Result<()>>,
+{
+  let paths = RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)?;
+  let session = match open_managed_run_target(&args, &paths).await? {
+    ManagedRunTarget::Cadder(session) => session,
+    ManagedRunTarget::Exit(code) => return Ok(code),
   };
   let registration = build_registration(&args.caddy_args)?;
   let registration_id = registration.registration_id.clone();
@@ -120,9 +161,9 @@ async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
     }
   });
 
-  tokio::signal::ctrl_c()
+  shutdown
     .await
-    .context("wait for Ctrl+C while registered with Cadder")?;
+    .context("wait for shutdown signal while registered with Cadder")?;
   heartbeat.abort();
 
   let _response: BasicResponse = session
@@ -142,10 +183,161 @@ async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
   Ok(ExitCode::SUCCESS)
 }
 
+enum ManagedRunTarget {
+  Cadder(Arc<Mutex<CadderSession>>),
+  Exit(ExitCode),
+}
+
+async fn open_managed_run_target(
+  args: &ShimArgs,
+  paths: &RuntimePaths,
+) -> Result<ManagedRunTarget> {
+  open_managed_run_target_with_starter(args, paths, start_missing_daemon_owned).await
+}
+
+async fn open_managed_run_target_with_starter<F, Fut>(
+  args: &ShimArgs,
+  paths: &RuntimePaths,
+  start_daemon: F,
+) -> Result<ManagedRunTarget>
+where
+  F: FnOnce(ShimArgs, RuntimePaths) -> Fut,
+  Fut: Future<Output = Result<()>>,
+{
+  match CadderSession::connect(paths).await {
+    Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
+    Err(error) if !daemon_error_indicates_not_running(&error) => {
+      eprintln!("{}", managed_backend_unavailable_message(paths, &error));
+      Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
+    }
+    Err(error) => {
+      let attach_error = format_error_chain(&error);
+      let caddy_backend = args
+        .caddy_backend
+        .map_or_else(CaddyBackendMode::from_env, Ok)?;
+      let real_caddy_result = if caddy_backend == CaddyBackendMode::Real {
+        match run_real_caddy_fallback(args.real_caddy_command.clone(), &args.caddy_args).await {
+          Ok(code) => return Ok(ManagedRunTarget::Exit(code)),
+          Err(error) => RecoveryStepResult::Failed(format_error_chain(&error)),
+        }
+      } else {
+        RecoveryStepResult::Skipped(format!(
+          "Caddy backend mode is `{}`",
+          caddy_backend.as_str()
+        ))
+      };
+
+      match start_daemon(args.clone(), paths.clone()).await {
+        Ok(()) => match CadderSession::connect(paths).await {
+          Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
+          Err(error) => {
+            eprintln!(
+              "{}",
+              managed_recovery_failed_message(
+                paths,
+                &attach_error,
+                &real_caddy_result,
+                &RecoveryStepResult::Failed(format!(
+                  "started cadderd, but attach failed: {}",
+                  format_error_chain(&error)
+                )),
+              )
+            );
+            Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
+          }
+        },
+        Err(error) => {
+          eprintln!(
+            "{}",
+            managed_recovery_failed_message(
+              paths,
+              &attach_error,
+              &real_caddy_result,
+              &RecoveryStepResult::Failed(format_error_chain(&error)),
+            )
+          );
+          Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
+        }
+      }
+    }
+  }
+}
+
+async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> Result<()> {
+  ensure_daemon_running_with_options(
+    paths,
+    DaemonLaunchOptions {
+      explicit_daemon: args.daemon_path.clone(),
+      runtime_profile: args.runtime_profile,
+      real_caddy_command: args.real_caddy_command.clone(),
+      caddy_backend: args.caddy_backend,
+      shim_path: env::current_exe().ok(),
+      ..DaemonLaunchOptions::default()
+    },
+  )
+  .await
+}
+
+async fn start_missing_daemon_owned(args: ShimArgs, paths: RuntimePaths) -> Result<()> {
+  start_missing_daemon(&args, &paths).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoveryStepResult {
+  Failed(String),
+  Skipped(String),
+}
+
+async fn run_mock_caddy_command(args: &[String]) -> Result<ExitCode> {
+  match args.first().map(String::as_str) {
+    None | Some("--version" | "version") => {
+      println!("mock-caddy dev backend");
+      Ok(ExitCode::SUCCESS)
+    }
+    Some("adapt") => {
+      println!(
+        "{}",
+        serde_json::json!({ "apps": { "http": { "servers": {} } } })
+      );
+      Ok(ExitCode::SUCCESS)
+    }
+    Some(command) => {
+      eprintln!("Cadder mock Caddy backend does not execute external caddy command `{command}`.");
+      Ok(ExitCode::FAILURE)
+    }
+  }
+}
+
+fn managed_recovery_failed_message(
+  paths: &RuntimePaths,
+  attach_error: &str,
+  real_caddy_result: &RecoveryStepResult,
+  daemon_result: &RecoveryStepResult,
+) -> String {
+  format!(
+    "Cadder could not recover `caddy run` for backend runtime `{}`.\n\
+     Initial attach failed: {attach_error}.\n\
+     Real Caddy fallback: {}.\n\
+     Daemon startup: {}.\n\
+     Next: configure a safe real Caddy command, start `cadderd --background --runtime-dir \"{}\"`, or run `cadder daemon start` for the same runtime and retry.",
+    paths.runtime_dir().display(),
+    recovery_step_summary(real_caddy_result),
+    recovery_step_summary(daemon_result),
+    paths.runtime_dir().display(),
+  )
+}
+
+fn recovery_step_summary(result: &RecoveryStepResult) -> String {
+  match result {
+    RecoveryStepResult::Failed(message) => format!("failed: {message}"),
+    RecoveryStepResult::Skipped(message) => format!("skipped: {message}"),
+  }
+}
+
 fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &anyhow::Error) -> String {
   let runtime_dir = paths.runtime_dir().display();
   let retry = format!(
-    "Start `cadderd --runtime-dir \"{}\"` explicitly, or open `cadder-tui` and press s, then retry `caddy run`.",
+    "Start `cadderd --background --runtime-dir \"{}\"` explicitly, or run `cadder daemon start`, then retry `caddy run`.",
     runtime_dir
   );
 
@@ -237,14 +429,21 @@ async fn delegate_to_real_caddy(
   real_caddy_command: Option<String>,
   args: &[String],
 ) -> Result<ExitCode> {
-  let resolver = RealCaddyResolver::new(real_caddy_command);
-  let binary = match resolver.resolve() {
-    Ok(binary) => binary,
+  match run_real_caddy_fallback(real_caddy_command, args).await {
+    Ok(code) => Ok(code),
     Err(error) => {
       eprintln!("{}", RealCaddyResolver::resolution_help(&error));
-      return Ok(ExitCode::FAILURE);
+      Ok(ExitCode::FAILURE)
     }
-  };
+  }
+}
+
+async fn run_real_caddy_fallback(
+  real_caddy_command: Option<String>,
+  args: &[String],
+) -> Result<ExitCode> {
+  let resolver = RealCaddyResolver::new(real_caddy_command);
+  let binary = resolver.resolve()?;
   let status = Command::new(binary)
     .args(args)
     .stdin(Stdio::inherit())
@@ -259,7 +458,14 @@ async fn delegate_to_real_caddy(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use cadder_daemon::{
+    CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer, DaemonState, ProcessRuntime,
+  };
   use clap::CommandFactory;
+  use std::{fs, path::Path, sync::Mutex as StdMutex};
+  use tokio::{sync::watch, time::sleep};
+
+  static TEST_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
   #[test]
   fn command_metadata_matches_release_identity() {
@@ -295,6 +501,20 @@ mod tests {
       help.contains("delegated to real Caddy"),
       "long help output should describe delegation behavior: {help}"
     );
+  }
+
+  #[test]
+  fn shim_privilege_warning_text_is_available_for_elevated_managed_runs() {
+    let _guard = TEST_ENV_LOCK.lock().unwrap();
+    unsafe { env::set_var("CADDER_TEST_ELEVATED_CONTEXT", "elevated") };
+
+    let message = shim_privilege_warning_text().unwrap();
+
+    unsafe { env::remove_var("CADDER_TEST_ELEVATED_CONTEXT") };
+
+    assert!(message.contains("caddy shim is running with elevated privileges"));
+    assert!(message.contains("user that owns the Cadder runtime"));
+    assert!(message.contains("IIS handoff"));
   }
 
   #[test]
@@ -396,8 +616,33 @@ mod tests {
     let message = managed_backend_unavailable_message(&paths, &error);
 
     assert!(message.contains("Cadder backend `cadderd` is not running"));
-    assert!(message.contains("Start `cadderd --runtime-dir"));
+    assert!(message.contains("Start `cadderd --background --runtime-dir"));
     assert!(message.contains("retry `caddy run`"));
+  }
+
+  #[test]
+  fn backend_error_helpers_classify_transport_and_protocol_failures() {
+    let paths =
+      RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-shim-protocol-test"))).unwrap();
+    let protocol_error = anyhow!("protocol mismatch");
+    let message = managed_backend_unavailable_message(&paths, &protocol_error);
+
+    assert!(message.contains("could not attach `caddy run`"));
+    assert!(message.contains("protocol mismatch"));
+    for kind in [
+      std::io::ErrorKind::NotFound,
+      std::io::ErrorKind::ConnectionAborted,
+      std::io::ErrorKind::ConnectionReset,
+      std::io::ErrorKind::UnexpectedEof,
+    ] {
+      let error = anyhow::Error::from(std::io::Error::new(kind, "backend unavailable"));
+      assert!(daemon_error_indicates_not_running(&error));
+    }
+
+    let duplicated = Err::<(), _>(anyhow!("same")).context("same").unwrap_err();
+    assert_eq!(format_error_chain(&duplicated), "same");
+    let nested = Err::<(), _>(anyhow!("inner")).context("outer").unwrap_err();
+    assert_eq!(format_error_chain(&nested), "outer: inner");
   }
 
   #[tokio::test]
@@ -406,15 +651,255 @@ mod tests {
       "cadder-shim-missing-backend-{}",
       std::process::id()
     ));
+    let missing_daemon = runtime_dir.join(fake_daemon_name_for_test());
     let code = run_managed(ShimArgs {
       runtime_dir: Some(runtime_dir),
-      daemon_path: None,
+      runtime_profile: None,
+      daemon_path: Some(missing_daemon),
       real_caddy_command: None,
+      caddy_backend: Some(CaddyBackendMode::Mock),
       caddy_args: vec!["run".to_string()],
     })
     .await
     .unwrap();
 
     assert_eq!(code, ExitCode::FAILURE);
+  }
+
+  #[tokio::test]
+  async fn run_managed_uses_real_caddy_fallback_when_backend_is_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let fake_caddy = temp.path().join(fake_caddy_name_for_test());
+    write_fake_caddy(&fake_caddy);
+
+    let code = run_managed(ShimArgs {
+      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
+      runtime_profile: None,
+      daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
+      real_caddy_command: Some(fake_caddy.display().to_string()),
+      caddy_backend: None,
+      caddy_args: vec!["run".to_string()],
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(code, ExitCode::SUCCESS);
+  }
+
+  #[tokio::test]
+  async fn open_managed_run_target_starts_missing_daemon_when_fallback_is_skipped() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+    let server = DaemonServer::new(paths.clone(), state);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let args = ShimArgs {
+      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
+      runtime_profile: None,
+      daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
+      real_caddy_command: None,
+      caddy_backend: Some(CaddyBackendMode::Mock),
+      caddy_args: vec!["run".to_string()],
+    };
+    let starter = move |_args: ShimArgs, paths: RuntimePaths| async move {
+      tokio::spawn(async move {
+        let _ = server.run_until(shutdown_rx).await;
+      });
+      wait_for_backend(&paths).await;
+      Ok(())
+    };
+
+    let target = open_managed_run_target_with_starter(&args, &paths, starter)
+      .await
+      .unwrap();
+
+    match target {
+      ManagedRunTarget::Cadder(session) => {
+        let response: cadder_protocol::QueryStateResponse = session
+          .lock()
+          .await
+          .request(
+            message_types::QUERY_STATE_REQUEST,
+            message_types::QUERY_STATE_RESPONSE,
+            &cadder_protocol::QueryStateRequest {
+              request_id: new_request_id("test-query"),
+            },
+          )
+          .await
+          .unwrap();
+        assert!(response.accepted);
+      }
+      ManagedRunTarget::Exit(code) => panic!("expected Cadder session, got exit code {code:?}"),
+    }
+    let _ = shutdown_tx.send(true);
+  }
+
+  #[tokio::test]
+  async fn open_managed_run_target_reports_complete_recovery_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let args = ShimArgs {
+      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
+      runtime_profile: None,
+      daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
+      real_caddy_command: Some("definitely-missing-caddy-binary".to_string()),
+      caddy_backend: None,
+      caddy_args: vec!["run".to_string()],
+    };
+    let starter =
+      |_args: ShimArgs, _paths: RuntimePaths| async { Err(anyhow!("test daemon start failed")) };
+
+    let target = open_managed_run_target_with_starter(&args, &paths, starter)
+      .await
+      .unwrap();
+
+    match target {
+      ManagedRunTarget::Exit(code) => assert_eq!(code, ExitCode::FAILURE),
+      ManagedRunTarget::Cadder(_) => panic!("expected recovery failure"),
+    }
+  }
+
+  #[tokio::test]
+  async fn mock_caddy_command_handles_adapt_without_delegating_to_real_caddy() {
+    let code = run_mock_caddy_command(&["adapt".to_string()])
+      .await
+      .unwrap();
+
+    assert_eq!(code, ExitCode::SUCCESS);
+  }
+
+  #[tokio::test]
+  async fn run_managed_registers_heartbeats_and_unregisters_on_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("run"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let fake_caddy = temp.path().join(fake_caddy_name_for_test());
+    write_fake_caddy(&fake_caddy);
+    fs::write(
+      temp.path().join("Caddyfile"),
+      "app.localhost { respond ok }",
+    )
+    .unwrap();
+    let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
+    let state = DaemonState::new(CaddyConfigCoordinator::new(
+      CaddyConfigAdapter::new(resolver.clone()),
+      ProcessRuntime::new(resolver, paths.clone()),
+    ));
+    let server = DaemonServer::new(paths.clone(), state.clone());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+      let _ = server.run_until(shutdown_rx).await;
+    });
+    wait_for_backend(&paths).await;
+    let config_path = temp.path().join("Caddyfile");
+
+    let code = run_managed_until(
+      ShimArgs {
+        runtime_dir: Some(paths.runtime_dir().to_path_buf()),
+        runtime_profile: None,
+        daemon_path: None,
+        real_caddy_command: None,
+        caddy_backend: None,
+        caddy_args: vec![
+          "run".to_string(),
+          "--config".to_string(),
+          config_path.display().to_string(),
+          "--adapter".to_string(),
+          "caddyfile".to_string(),
+        ],
+      },
+      async { Ok(()) },
+    )
+    .await
+    .unwrap();
+    let snapshot = state.snapshot().await;
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(snapshot.registrations.is_empty());
+    assert_eq!(
+      snapshot.config.status,
+      cadder_protocol::ConfigApplyStatus::Idle
+    );
+    let _ = shutdown_tx.send(true);
+  }
+
+  async fn wait_for_backend(paths: &RuntimePaths) {
+    for _ in 0..50 {
+      if CadderSession::connect(paths).await.is_ok() {
+        return;
+      }
+      sleep(Duration::from_millis(20)).await;
+    }
+    panic!("backend did not become ready");
+  }
+
+  #[cfg(windows)]
+  fn fake_caddy_name_for_test() -> &'static str {
+    "fake-caddy.cmd"
+  }
+
+  #[cfg(not(windows))]
+  fn fake_caddy_name_for_test() -> &'static str {
+    "fake-caddy"
+  }
+
+  #[cfg(windows)]
+  fn fake_daemon_name_for_test() -> &'static str {
+    "missing-cadderd.exe"
+  }
+
+  #[cfg(not(windows))]
+  fn fake_daemon_name_for_test() -> &'static str {
+    "missing-cadderd"
+  }
+
+  fn write_fake_caddy(path: &Path) {
+    #[cfg(windows)]
+    fs::write(
+      path,
+      r#"@echo off
+if "%1"=="adapt" (
+  echo {"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["app.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}
+  exit /b 0
+)
+if "%1"=="run" (
+  ping -n 2 127.0.0.1 >nul
+  exit /b 0
+)
+if "%1"=="stop" (
+  exit /b 0
+)
+if "%1"=="reload" (
+  exit /b 0
+)
+exit /b 0
+"#,
+    )
+    .unwrap();
+
+    #[cfg(not(windows))]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      fs::write(
+        path,
+        r#"#!/usr/bin/env sh
+if [ "$1" = "adapt" ]; then
+  printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["app.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  sleep 1
+  exit 0
+fi
+exit 0
+"#,
+      )
+      .unwrap();
+      let mut permissions = fs::metadata(path).unwrap().permissions();
+      permissions.set_mode(0o755);
+      fs::set_permissions(path, permissions).unwrap();
+    }
   }
 }

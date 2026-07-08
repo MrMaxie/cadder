@@ -1,28 +1,44 @@
 # Cadder Architecture
 
-Cadder is a cross-platform Rust daemon, shim, non-TUI CLI, local MCP server, and terminal UI for routing project-local `caddy run` invocations into one persistent per-user Caddy runtime.
+Cadder v1.0 is scoped around a small, testable runtime topology:
+
+- `cadderd`: per-user daemon and runtime owner.
+- `caddy`: PATH-facing Caddy-compatible shim.
+- `cadder`: operator executable with CLI and TUI workflows.
+
+The target product contract is limited to the daemon, shim, operator CLI, and TUI. Future Web and Tauri GUI surfaces require a new OpenSpec change and must reuse the daemon protocol and shared operator view-model contracts. The active OpenSpec change `reset-cadder-architecture` is authoritative when this document and OpenSpec disagree.
 
 ## Process Roles
 
-- `cadderd`: per-user daemon. It owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, and bounded log storage.
-- `caddy`: PATH-facing shim. It intentionally shadows Caddy for managed `caddy run` commands, attaches to an already running `cadderd`, registers the caller's config, heartbeats while alive, and unregisters on exit.
-- `cadderctl`: non-TUI CLI. It attaches to the daemon for scriptable inspection, log queries, entrypoint and domain toggles, diagnostics, and explicit daemon lifecycle control.
-- `cadder-mcp`: local stdio MCP server. It attaches to the daemon through the same operator layer as `cadderctl`, exposes typed tools for state, diagnostics, logs, and toggles, and keeps daemon launch explicit through `cadder_start_daemon`.
-- `cadder-tui`: Ratatui/Crossterm UI. It attaches to the daemon and shows overview, entrypoints, grouped domains, per-domain logs, diagnostics, search/filtering, activation toggles, and explicit backend start or shutdown actions.
-- Real Caddy runtime: resolved external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
+- `cadderd` owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, durable history, native autostart state, IIS handoff metadata, and bounded log storage.
+- `caddy` intentionally shadows Caddy for managed `caddy run` commands. It attaches to an already running daemon, registers the caller's config, heartbeats while alive, and unregisters on exit. Non-`run` commands are delegated to the safely resolved real Caddy binary.
+- `cadder` is the only operator-facing v1 binary. Its CLI and TUI support daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, settings, and watch flows. Both surfaces attach through the daemon protocol and render from mockable operator view models.
+- Real Caddy is an external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
 
-All five Cadder binaries expose `--help` and `--version` through their Clap command definitions. The release-facing command names are `cadderd`, `cadderctl`, `cadder-mcp`, `caddy`, and `cadder-tui`.
+All release-facing Cadder binaries expose `--help` and `--version`. Runtime installers and portable archives contain only `cadderd`, `cadder`, `caddy`, and `cadder.toml`.
 
-## Cross-Platform Runtime Model
+## Runtime Model
 
-Cadder uses per-user runtime paths from `directories::ProjectDirs`, with `CADDER_RUNTIME_DIR` as an override for tests and custom deployments. The daemon owns:
+Cadder uses per-user runtime paths from `directories::ProjectDirs`, with `CADDER_RUNTIME_DIR` as the highest-priority override for tests and custom deployments. `CADDER_RUNTIME_PROFILE=dev` selects a repeatable development profile under the same per-user runtime base, using `CADDER_DEV_WORKSPACE` or `CADDER_DEV_ID` to derive an isolated runtime identity.
+
+The daemon owns:
 
 - a lockfile guarded by `fs4`, preventing multiple daemons for the same runtime directory;
 - a local IPC socket name derived from the runtime directory;
 - an effective generated Caddy JSON config file;
-- daemon metadata and bounded in-memory state.
+- daemon metadata, durable SQLite runtime storage, and bounded in-memory state.
 
-`cadderd` is a manually started per-user backend. The `caddy` shim is attach-only, while `cadder-tui`, `cadderctl`, and `cadder-mcp` are attach-only except for their explicit daemon start actions. They connect to an existing daemon when it is available, surface explicit unavailable guidance when it is not, and never spawn it as an implicit side effect of opening a dashboard, querying state, running `caddy run`, or serving an MCP tool call. Explicit backend start is limited to direct `cadderd` execution or deliberate client actions such as pressing `s` in `cadder-tui`, running `cadderctl daemon start`, or invoking the MCP `cadder_start_daemon` tool. Explicit launch attempts still use a per-runtime launch lock before spawning `cadderd`, so concurrent start requests wait for the daemon socket instead of spawning another child, while the daemon's own runtime lock remains the final ownership guard. OS services are intentionally deferred; v1 remains a user daemon model.
+Direct `cadderd` execution is the foreground diagnostic path. Explicit client-triggered starts use the detached background launch contract, redirect stdio away from the caller, and wait for the runtime socket before reporting success. Restart flows first request shutdown, then wait for the previous owner to release both the socket and runtime lock before launching the next daemon.
+
+Development workflows can select `CADDER_CADDY_BACKEND=mock` or `--caddy-backend mock`. The mock backend prepares registrations and effective config state without invoking `caddy adapt`, `caddy run`, `reload`, or `stop`, and it never binds HTTP or HTTPS ports.
+
+## Operator Surfaces
+
+The CLI is the stable automation surface for people, scripts, and agents. It supports `human`, `json`, and `jsonl` output modes where appropriate.
+
+The TUI is the interactive operator surface. It must render from mockable view models and cover the same daemon status, Caddy status, project/domain state, log access, IIS handoff, autostart, settings, and recovery actions as the CLI. The TUI must remain useful when `cadderd` is offline by showing daemon-unavailable status and a visible start action.
+
+Web and Tauri GUI are future surfaces. They may return only as clients of the same daemon protocol and shared view-model contracts. Remote pairing, authentication, multi-host management, and update channels are out of scope for the reset.
 
 ## IPC Boundary
 
@@ -32,7 +48,7 @@ IPC is versioned newline-delimited JSON over a per-user local socket via `interp
 { "protocolVersion": 1, "type": "query-state-request", "payload": { "requestId": "..." } }
 ```
 
-Supported public messages include:
+Supported v1.0 public messages include:
 
 - register, unregister, and heartbeat entrypoint;
 - query current state;
@@ -42,9 +58,9 @@ Supported public messages include:
 - query Windows IIS bindings;
 - set Windows IIS handoff enabled or disabled;
 - query Caddy logs;
+- query durable history;
+- query and set native autostart mode;
 - request daemon shutdown.
-
-Shim registrations are tied to the IPC session that created them. If the shim process exits without an unregister request, pipe disconnect cleanup removes only registrations owned by that session.
 
 ## Caddy Integration
 
@@ -63,7 +79,7 @@ The TOML schema is:
 real_command = "/absolute/path/to/caddy"
 ```
 
-Cadder no longer treats `caddy-real` as a built-in default. Users may still configure `caddy-real` explicitly through CLI, TOML, or environment variables. PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`, so Cadder does not resolve its own shim as real Caddy.
+PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`, so Cadder does not resolve its own shim as real Caddy.
 
 For each registration, Cadder runs:
 
@@ -71,74 +87,69 @@ For each registration, Cadder runs:
 caddy adapt --config <Caddyfile> --adapter <adapter>
 ```
 
-The adapted JSON is inspected for HTTP host matchers. The adapter resolves real Caddy against the registration's source working directory, so project-local `cadder.toml` files are honored for shim-driven `caddy run` registrations from arbitrary directories. Active domains are composed into a generated effective Caddy JSON document. Domain conflicts are reported before runtime reload. When no active domains remain, the daemon enters idle config/runtime state instead of reloading an empty active config.
+The adapted JSON is inspected for HTTP host matchers. Active domains are composed into a generated effective Caddy JSON document. Domain conflicts are reported before runtime reload. When no active domains remain, the daemon enters idle config/runtime state instead of reloading an empty active config.
 
 Runtime operations start the owned real Caddy process with the generated config and reload it on subsequent config changes. Captured stdout/stderr and control events are stored in a bounded log store with redaction for token-like values.
 
+## Durable Runtime Storage
+
+Cadder persists runtime history in `runtime.sqlite3` under the runtime directory. The daemon owns schema creation and migration for this database. The initial schema stores history records for registration lifecycle events, activation toggles, daemon shutdown, autostart changes, IIS handoff activity, and other runtime events. History retention keeps the most recent 10,000 records and prunes older rows after successful writes.
+
+The durable store complements, but does not replace, in-memory daemon state. Current registrations, active log buffers, process handles, subscriptions, and live Caddy runtime ownership remain in memory. If the database contains a schema version newer than the running daemon supports, Cadder reports storage as unavailable with a diagnostic instead of rewriting the file.
+
 ## Windows IIS Handoff
 
-On Windows, the daemon exposes a small IIS provider behind the `query-iis-bindings` and `set-iis-handoff` IPC messages. The provider is platform-gated: non-Windows builds do not expose the TUI view, and the daemon provider returns an IIS-unavailable issue instead of loading Windows-only dependencies.
+On Windows, the daemon exposes a small IIS provider behind `query-iis-bindings` and `set-iis-handoff`. The provider is platform-gated: non-Windows builds return an IIS-unavailable issue instead of loading Windows-only dependencies.
 
-IIS discovery is explicit and separate from `query-state`, so the TUI's periodic state refresh does not enumerate IIS bindings while holding daemon state. The Windows provider uses PowerShell `WebAdministration` commands to list, add, remove, and restore bindings. Discovery, route planning, restore metadata writes, Caddy config updates, and daemon/TUI operation stay in the normal user context. Only IIS binding mutations are classified as administrator steps. On Windows those mutations are executed as a short privileged batch through the OS elevation prompt; on non-Windows the same path returns typed unsupported/elevation-unavailable issues. Default automated tests use a fake provider and do not require a local IIS installation or elevated privileges.
+Discovery, route planning, restore metadata writes, Caddy config updates, and daemon/operator operation stay in the normal user context. Only IIS binding mutations are classified as administrator steps and are executed as a short privileged batch through the OS elevation prompt.
 
-Supported handoff shapes are IIS `http` port 80 and `https` port 443 bindings when Cadder can identify one route host. A concrete IIS host header is used directly. A wildcard or empty IIS host header requires an explicit route host from the caller; `cadder-tui` uses the `/` input for this, and full URLs are accepted by extracting only the DNS host. Unsupported protocols, unsupported ports, duplicate host bindings, active Cadder-domain conflicts, missing HTTPS certificate metadata, and provider privilege errors are returned as typed issues and shown inline by `cadder-tui`.
+Supported handoff shapes are IIS `http` port 80 and `https` port 443 bindings when Cadder can identify one route host. Cadder persists restore metadata before mutating IIS, creates deterministic loopback backend bindings, injects a Caddy reverse-proxy route, and supports restore/rollback follow-up actions.
 
-Cadder remains the front door during IIS handoff. Before removing an IIS-owned public binding, the daemon persists restore metadata in `daemon.json` under the runtime directory. The record includes the original site name, protocol, IP address, port, host header, binding information, route host, and loopback backend binding. Enabling HTTP handoff creates a deterministic `127.0.0.1:<port>` HTTP binding on the same IIS site, using a port below the default Windows dynamic TCP range. Enabling HTTPS handoff creates a deterministic `127.0.0.1:<port>` HTTPS binding on the same IIS site and copies the discovered IIS TLS certificate metadata to that backend binding. If the certificate metadata is unavailable, Cadder rejects the handoff before writing metadata or mutating IIS.
+Windows Sandbox remains the preferred smoke boundary for installer, autostart, shim, daemon lifecycle, IIS handoff, and cleanup tests because those checks intentionally touch OS-level state.
 
-Caddy routes HTTPS IIS backends with an HTTP transport that enables TLS. The route host is used as the upstream TLS server name. Caddy skips certificate verification for the loopback backend because IIS certificates commonly do not validate for `127.0.0.1`. This keeps IIS applications seeing an HTTPS backend request while limiting the trust tradeoff to the local loopback hop.
+## Packaging
 
-After planning the backend binding, Cadder removes the original public binding, injects a Caddy reverse-proxy route for the route host, and applies Caddy. The loopback binding creation and public binding removal are batched together because they are adjacent IIS mutations for the same requested handoff; Caddy route application, registration state, discovery, and metadata writes are not included in the privileged batch. Persisted IIS proxy routes are hydrated when the daemon starts so restart does not drop an active handoff route. If Cadder cannot apply the proxy route after changing IIS, the daemon attempts a privileged rollback batch that restores the original IIS binding and removes the loopback binding, then reports whether rollback succeeded or failed. If rollback fails, restore metadata and the loopback backend binding are kept so the operator can retry recovery. Restoring handoff removes the Caddy IIS proxy route in the user context, then runs one privileged batch to recreate the original IIS binding and remove the backend binding. Metadata is cleared only after restore succeeds. Restore is rejected while other active Cadder routes still need the front-door port, because IIS would reclaim raw `:80` or `:443`.
-
-`set-iis-handoff-response` includes typed operation steps, privilege level, approval outcome, step status, issue data, and available follow-up actions such as retry elevation, rollback handoff, retry restore, loopback cleanup, or metadata cleanup. User denial of the administrator prompt is a normal typed outcome. It leaves daemon, TUI, registration, log, and non-IIS operations usable and returns retry guidance instead of silently escalating or failing the daemon.
-
-## Domain Logs TUI
-
-`cadder-tui` exposes per-domain logs from the Domains view. Pressing `Enter` or `l` on a domain row opens a log-focused view bound to that domain's `LogStreamIdentity`; the view keeps the selected stream even if registrations change later, so it never silently falls back to an entrypoint or unrelated domain.
-
-The TUI attempts to attach without spawning the daemon, upgrades successful attaches into a durable `subscribe-state-request` stream, and keeps periodic `query-state-request` probes only for late daemon availability and recovery after backend loss. It also loads a bounded log page through `query-logs-request`, stores the returned cursor, and tails by issuing follow-up requests with that cursor. Auto-tail is enabled by default and can be paused with `p`; while paused, the TUI keeps keyboard handling responsive and avoids automatic log refreshes until the user resumes or manually refreshes with `Enter`. Log severity is primarily controlled from the Settings view; applying a new severity resets the cursor before reloading so entries from different filters are not mixed.
-
-`cadderctl` reuses the same contracts for non-interactive workflows. One-shot inspection commands use `query-state-request` or `query-logs-request`, `watch` uses `subscribe-state-request`, domain and entrypoint toggles use the existing activation messages, and `logs tail` advances the daemon log cursor through repeated `query-logs-request` calls instead of introducing a new streaming backend protocol.
-
-`cadder-mcp` reuses the same daemon IPC contracts through a shared operator layer, but serves them over local stdio for MCP-capable hosts. The server is intentionally local-only, returns structured tool payloads instead of terminal-oriented output, applies an extra redaction pass to paths and free-form text, and does not expose daemon event streaming in v1.
-
-On Windows, `cadder-tui` also exposes an IIS Handoff view. The view lists site, protocol, IP address, port, host header, handoff state, and safety details. Pressing `Enter` refreshes IIS discovery; pressing `Space` hands off an available binding or restores a handed-off binding. Before dispatching a mixed-elevation action, the TUI states why administrator approval may be requested. After the daemon responds, the status line summarizes succeeded, approved, denied, failed, and follow-up operation steps. For wildcard or empty-host IIS rows, press `/`, type the route host or URL, press `Enter` to keep the value, then press `Space`. The view is absent on non-Windows platforms rather than shown as a disabled placeholder.
-
-Log refresh, late-availability probes, IIS discovery, activation toggles, IIS handoff actions, and shutdown requests are dispatched as short background IPC tasks. The TUI accepts at most one active state probe, one active state subscription stream, and one active log refresh for the current stream, and surfaces IPC failures as a read-error state rather than blocking terminal input.
-
-When the daemon is unavailable, the Overview view shows the daemon state as not running, connection failed, starting, or start failed. Press `s` to explicitly start `cadderd` with the TUI's runtime directory, daemon path, and real Caddy command options. Press `r` to retry attach or refresh without spawning a daemon. Daemon-dependent actions such as activation toggles, log refreshes, IIS discovery/handoff, and shutdown are gated until a valid state snapshot marks the daemon connected; navigation, retry, explicit start, settings, existing log export, and quit remain responsive. `ShutdownDaemonRequest` stops the owned real Caddy runtime and then terminates the actual `cadderd` process after it replies to the caller.
-
-The log store reports stream status and retention metadata in `query-logs-response`, including active, empty, stale, removed, read-error, gap, more-before, and truncated-by-retention states. Diagnostic exports are timestamped text files in the caller's current working directory and contain only the daemon-redacted `LogEntry.raw_message` content plus stream metadata.
-
-## Portable Packaging
-
-`cargo run -p xtask -- dist --out <dir>` builds release binaries and copies the current platform's executable names into a portable layout:
+`cargo xtask dist --out <dir>` builds the v1.0 portable runtime layout:
 
 - `cadderd`
-- `cadderctl`
-- `cadder-mcp`
-- `cadder-tui`
+- `cadder`
 - `caddy`
 - `cadder.toml`
 
-On Windows the binaries include the `.exe` suffix. `cargo run -p xtask -- verify-dist --dir <dir>` checks the expected files, runs `caddy --cadder-shim-info`, and verifies both `cadderctl --help` and `cadder-mcp --help` from the layout. `cargo run -p xtask -- package --out <dir> --platform <platform> --target <triple>` builds the target-specific layout, wraps it in a versioned portable archive, and writes a neighboring `.sha256` checksum file. The package version defaults to the root `Cargo.toml` `[workspace.package]` version, while `--version <version>` remains available for explicit dry-run overrides. Windows artifacts are `.zip` archives; Linux and macOS artifacts are `.tar.gz` archives.
+`cargo xtask package --out <dir> --platform <platform> --target <triple>` wraps that layout in `cadder-<version>-<platform>` and writes a neighboring `.sha256` checksum file.
 
-The packaging workflow does not modify PATH, shell profiles, package-manager shims, OS services, or other system state.
+Native runtime installers are built with `cargo xtask runtime-installer --out <dir> --platform <platform> --target <triple>`. They install only the v1.0 runtime binaries and sample configuration, produce `cadder-runtime-<version>-<platform>` artifacts, and write manifest/checksum files that record expected install paths.
 
-Image assets under `assets/` are documentation and release artwork only. They are not copied into the runtime layout and are not required by the daemon, shim, TUI, or verification commands.
+`cargo xtask verify-release-assets` checks the cross-platform runtime installer and portable archive matrix before upload.
 
-The current runtime model is a single per-user daemon that owns the backend and serves zero-to-many independent dashboards or shim clients. Future UI surfaces, including a desktop `cadder` application, should attach to that same backend instead of changing ownership semantics.
+Cadder v1.0 has no in-app updater. Update surfaces route users to manual GitHub Releases downloads.
 
 ## Workspace Layout
 
-- `crates/cadder-protocol`: shared DTOs, activation/runtime/log states, IPC envelopes, and request/response contracts.
-- `crates/cadder-daemon`: runtime paths, daemon lock, local IPC server/client, registration state, Caddy integration, process runtime, and log store.
-- `crates/cadder-operator`: shared operator layer for daemon queries, daemon launch policy, state shaping, and view-building reused across CLIs and MCP surfaces.
-- `crates/cadderctl`: non-TUI CLI for daemon status, entrypoints, domains, diagnostics, and logs.
-- `crates/cadder-mcp`: stdio MCP server exposing Cadder inspection and control tools for local agents.
-- `crates/cadderd`: daemon binary.
-- `crates/cadder-shim`: package containing the PATH-facing `caddy` binary.
-- `crates/cadder-tui`: terminal UI.
-- `xtask`: repository validation task runner.
+The workspace topology is intentionally closed around documented product,
+library, and tooling responsibilities. `cargo xtask verify-workspace-topology`
+checks the Cargo workspace against this contract.
+
+| Workspace member | Classification | Responsibility | Release-facing package |
+| --- | --- | --- | --- |
+| `crates/cadder-daemon` | Daemon | Runtime state, daemon lock, local IPC, Caddy integration, process runtime, durable storage, platform providers, and logs. | No |
+| `crates/cadderd` | Daemon | Binary entrypoint for the Cadder daemon. | Yes |
+| `crates/cadder-shim` | Shim | Package containing the PATH-facing `caddy` binary. | Yes |
+| `crates/cadder` | Operator client | Package that builds the `cadder` operator executable for CLI and TUI workflows. | Yes |
+| `crates/cadder-operator` | Operator client | Internal operator service, daemon launch policy, state shaping, and reusable view-model boundary shared by CLI and TUI code. | No |
+| `crates/cadder-protocol` | Shared protocol/API | Shared DTOs, activation/runtime/log states, IPC envelopes, and request/response contracts. | No |
+| `xtask` | Docs/tooling | Repository validation task runner for checks that are Cadder-specific. | No |
+
+`crates/cadder-operator` remains a separate internal library for now because it
+keeps daemon access and view-model construction mockable across CLI and TUI
+tests. It may be merged into `crates/cadder` only through a future OpenSpec
+change if that boundary stops carrying a testable responsibility.
+
+Historical product crates such as `crates/cadderctl`, `crates/cadder-tui`, and
+`crates/cadder-mcp` are obsolete in this topology. Future Web, Tauri, MCP, or
+remote-management surfaces require their own OpenSpec change and must reuse the
+daemon protocol and shared operator view-model contracts rather than creating a
+second runtime control plane.
 
 ## Validation
 
@@ -148,30 +159,15 @@ Use Cargo from the repository root:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run -p xtask -- check
+cargo xtask check
+cargo xtask coverage
 ```
 
-Focused tests are appropriate while iterating. Full validation should pass before closeout.
-
-The Docker/Testcontainers end-to-end suite is intentionally separate from the default Cargo test
-path because it requires a running Docker daemon and the Docker CLI. It runs compiled host Cadder
-binaries while real Caddy runs in an official disposable Caddy container:
+The Docker/Testcontainers end-to-end suite is intentionally separate from the default Cargo test path because it requires a running Docker daemon and the Docker CLI:
 
 ```sh
 cargo build -p cadderd -p cadder-shim
 cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
 ```
 
-The suite uses a unique `CADDER_RUNTIME_DIR`, Testcontainers-managed container lifecycle, dynamic
-host port mappings, and a wrapper command that delegates Caddy operations into the container. It
-must not require a machine-global Caddy installation.
-
-Cadder uses `cargo-llvm-cov 0.8.7` as the canonical Rust workspace coverage tool. On Windows, the canonical gate uses `stable-x86_64-pc-windows-msvc` because GNU coverage can fail without the profiler runtime. The executable gate is:
-
-```sh
-cargo run -p xtask -- coverage
-```
-
-`xtask coverage` runs `cargo +stable-x86_64-pc-windows-msvc llvm-cov --workspace --json --summary-only --fail-under-lines 85 --output-path target/llvm-cov/coverage-summary.json` on Windows and `cargo llvm-cov --workspace --json --summary-only --fail-under-lines 85 --output-path target/llvm-cov/coverage-summary.json` elsewhere. The command fails when total line coverage is below 85% or when coverage cannot be measured. It does not require a machine-global real Caddy installation; tests use repository fixtures.
-
-No project-specific coverage exclusions are currently configured. Future exclusions must be limited to generated, platform-gated, or intentionally untestable code and documented next to the `xtask coverage` command definition.
+Focused tests are appropriate while iterating. Full validation should pass before release closeout.

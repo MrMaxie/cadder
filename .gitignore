@@ -43,5 +43,4 @@ $RECYCLE.BIN/
 
 # Local operational workspace
 .agents/
-.local/
 skills-lock.json

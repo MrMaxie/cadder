@@ -10,45 +10,67 @@ import { Icon } from '@astrojs/starlight/components';
 
 Cadder coordinates local Caddy projects that would otherwise fight for the same HTTP and HTTPS ports. Each project can still use a familiar `caddy run` workflow, but Cadder registers those projects with one per-user daemon and applies them through one real Caddy process.
 
-That makes local reverse-proxy setups easier to run side by side. Cadder can compose active project Caddyfiles, report domain conflicts before reload, and show the current state in a terminal dashboard.
+Repository: [github.com/MrMaxie/cadder](https://github.com/MrMaxie/cadder)
 
 ## Features
 
 - One local Caddy runtime can serve domains from many project Caddyfiles.
 - The `caddy` shim keeps `caddy run` usable for project workflows.
-- `cadderctl` gives scripts and agents a non-interactive way to inspect and operate Cadder.
-- `cadder-mcp` exposes the same local daemon through MCP tools for agent hosts.
+- `cadder` gives scripts and agents a non-interactive CLI.
+- `cadder` also provides the interactive TUI operator surface.
 - `cadder.toml` points Cadder at the real Caddy binary without replacing it.
-- `cadder-tui` shows entrypoints, domains, logs, diagnostics, and toggles.
 - Domains can be enabled or disabled without killing unrelated project sessions.
 - Cadder avoids owning Caddy processes it did not start.
 
 ## Binaries
 
-- `caddy` is the Caddy-compatible shim. For `caddy run`, it attaches to a running `cadderd`, registers the current project, and unregisters on exit. If the backend is unavailable, Cadder reports how to start it instead of spawning it implicitly. Other Caddy commands are delegated to the real Caddy binary.
-- `cadderd` is the daemon. It owns registrations, generated Caddy config, the real Caddy process it starts, diagnostics, and bounded logs.
-- `cadderctl` is the non-TUI CLI for state, domains, diagnostics, logs, and explicit daemon lifecycle commands.
-- `cadder-mcp` is the local stdio MCP server for agents that need state, diagnostics, logs, and explicit toggles without scraping terminal output.
-- `cadder-tui` is the terminal UI for inspecting domains, entrypoints, diagnostics, logs, filters, toggles, daemon shutdown, and explicit backend start when needed.
+- `caddy` is the Caddy-compatible shim.
+- `cadderd` is the daemon.
+- `cadder` is the CLI and TUI operator executable.
 
-Each binary supports `--help` and `--version`.
+Runtime installers and portable archives contain `caddy`, `cadderd`, `cadder`, and `cadder.toml`. Each binary supports `--help` and `--version`. See [Releases and downloads](reference/releases/) for artifact names and checksums.
 
-## Download
+## Runtime Installer
 
 <div class="cadder-downloads">
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="windows-x64">
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="windows-x64-msi">
+    <span class="cadder-windows-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+    <span>Windows x64 MSI</span>
+  </a>
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="macos-arm64-pkg">
+    <Icon name="apple" />
+    <span>macOS Apple Silicon PKG</span>
+  </a>
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="macos-x64-pkg">
+    <Icon name="apple" />
+    <span>macOS Intel PKG</span>
+  </a>
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="linux-x64-deb">
+    <Icon name="linux" />
+    <span>Linux x64 DEB</span>
+  </a>
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="linux-x64-rpm">
+    <Icon name="linux" />
+    <span>Linux x64 RPM</span>
+  </a>
+</div>
+
+## Portable Runtime Archive
+
+<div class="cadder-downloads">
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="windows-x64">
     <span class="cadder-windows-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
     <span>Windows x64</span>
   </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="macos-arm64">
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="macos-arm64">
     <Icon name="apple" />
     <span>macOS Apple Silicon</span>
   </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="macos-x64">
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="macos-x64">
     <Icon name="apple" />
     <span>macOS Intel</span>
   </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="linux-x64">
+  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="linux-x64">
     <Icon name="linux" />
     <span>Linux x64</span>
   </a>
@@ -56,8 +78,7 @@ Each binary supports `--help` and `--version`.
 
 <script src="cadder-downloads.js"></script>
 
-1. Download the release for your operating system.
-2. Create `cadder.toml` with the path to the real Caddy binary. See [cadder.toml](user-guide/cadder-toml/) for the supported forms.
+1. Download either the runtime installer or the portable runtime archive for your operating system.
+2. Create `cadder.toml` with the path to the real Caddy binary.
 3. Start `cadderd`, then run Cadder's `caddy` shim instead of the real `caddy` command.
-
-Use `cadderctl` for automation-friendly inspection and toggles, `cadder-mcp` when an MCP-capable host should drive Cadder locally, or `cadder-tui` when you want the interactive dashboard.
+4. Use `cadder` for CLI automation or TUI operation.

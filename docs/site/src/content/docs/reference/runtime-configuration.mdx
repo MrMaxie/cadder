@@ -5,36 +5,76 @@ description: Runtime directories, daemon state files, configuration sources, and
 
 Cadder keeps runtime state per user. Most users never need to choose the runtime directory manually.
 
-## Recommended configuration path
-
-For normal use, configure real Caddy in [cadder.toml](../../user-guide/cadder-toml/) next to the Cadder binaries. Use a project-local `cadder.toml` when one project needs a different real Caddy command.
-
-## Runtime override
+## Runtime Override
 
 Set `CADDER_RUNTIME_DIR` or pass `--runtime-dir` to use a specific directory:
 
 ```sh
 cadderd --runtime-dir <runtime-dir>
-cadderctl --runtime-dir <runtime-dir> daemon status
-cadder-tui --runtime-dir <runtime-dir>
+cadder --runtime-dir <runtime-dir> daemon status
+cadder --runtime-dir <runtime-dir> web
 caddy --cadder-runtime-dir <runtime-dir> run
 ```
 
-This is useful for tests, demos, and isolated sessions that should not share daemon state with the normal user runtime.
+Use the same runtime override when you start `cadderd`, attach with `cadder`, or run the shim.
 
-Use the same runtime override when you start `cadderd`, attach with `cadderctl` or `cadder-tui`, or run `caddy --cadder-runtime-dir <runtime-dir> run`. The shim and both client surfaces only attach to a backend that is already running for that exact runtime directory unless you explicitly run `cadderctl daemon start` or use the TUI start action.
+## Development Profile
 
-## Runtime files
+Use the development profile when you need live local Cadder tooling without touching your normal daemon or real Caddy process:
+
+```sh
+CADDER_RUNTIME_PROFILE=dev
+CADDER_DEV_WORKSPACE=/absolute/path/to/cadder-checkout
+CADDER_CADDY_BACKEND=mock
+```
+
+The repository `xtask` exposes repeatable helpers:
+
+```sh
+cargo xtask dev-env --format powershell
+cargo xtask dev-run -- cadder daemon status
+```
+
+## Privilege Model
+
+Run `cadderd`, `cadder`, and shim-driven `caddy run` from the normal user account that owns the runtime. If Cadder detects elevated operator execution where the platform exposes that state, it reports a privilege diagnostic through the CLI or web surface.
+
+Read-only inspection, diagnostics, log queries, domain and entrypoint toggles, normal daemon control, and non-IIS workflows do not require administrator privileges. On Windows, IIS handoff requests administrator approval only for the short IIS binding mutation batch.
+
+## Runtime Files
 
 The daemon runtime directory contains:
 
 - `cadder.lock`, the daemon ownership lock;
 - `daemon.json`, daemon metadata used by clients;
-- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process.
+- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process;
+- `runtime.sqlite3`, the durable SQLite store for selected runtime history and storage metadata.
 
 The IPC socket name is derived from the runtime directory, so separate runtime directories do not collide.
 
-## Configuration sources
+## Durable Storage
+
+SQLite is the default durable runtime store. Cadder records selected local history such as registration lifecycle events, activation toggles, daemon shutdown, autostart changes, IIS handoff activity, and other runtime events after daemon-side redaction.
+
+```sh
+cadder history show --limit 50
+```
+
+If the store cannot be opened, or if the database was created by a newer unsupported schema version, Cadder keeps the daemon usable with an in-memory unavailable state and reports storage diagnostics.
+
+## Autostart
+
+Per-user autostart is configured through Cadder:
+
+```sh
+cadder autostart status
+cadder autostart set disabled
+cadder autostart set daemon
+```
+
+Supported platforms use native startup mechanisms and remove Cadder daemon startup entries when the mode changes. Unsupported or partially configured platforms return explicit diagnostics.
+
+## Configuration Sources
 
 Cadder supports real Caddy resolution through:
 
@@ -46,7 +86,7 @@ Cadder supports real Caddy resolution through:
 
 The user-facing TOML format is documented in [cadder.toml](../../user-guide/cadder-toml/).
 
-## Environment aliases
+## Environment Aliases
 
 Cadder accepts both environment variable names below for the same value:
 

@@ -189,7 +189,7 @@ impl OperatorError {
       OperatorErrorKind::DaemonStartFailure,
       format!("Could not start cadderd: {}.", format_error_chain(error)),
       Some(format!(
-        "Retry `cadderctl daemon start --runtime-dir \"{}\"` after fixing the daemon path or startup problem.",
+        "Retry `cadder daemon start --runtime-dir \"{}\"` after fixing the daemon path or startup problem.",
         paths.display()
       )),
     )
@@ -240,7 +240,7 @@ pub fn error_indicates_permission(error: &Error) -> bool {
 
 pub fn start_guidance(paths: &Path) -> String {
   format!(
-    "Start `cadderd --runtime-dir \"{}\"` or run `cadderctl daemon start --runtime-dir \"{}\"`, then retry.",
+    "Start `cadderd --runtime-dir \"{}\"` or run `cadder daemon start --runtime-dir \"{}\"`, then retry.",
     paths.display(),
     paths.display()
   )
@@ -249,7 +249,7 @@ pub fn start_guidance(paths: &Path) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use anyhow::anyhow;
+  use anyhow::{Context, anyhow};
 
   #[test]
   fn exit_codes_remain_stable_for_all_error_kinds() {
@@ -280,7 +280,7 @@ mod tests {
 
     assert_eq!(mapped.kind, OperatorErrorKind::DaemonUnavailable);
     assert_eq!(mapped.exit_code().code(), 3);
-    assert!(mapped.guidance.unwrap().contains("cadderctl daemon start"));
+    assert!(mapped.guidance.unwrap().contains("cadder daemon start"));
   }
 
   #[test]
@@ -326,5 +326,91 @@ mod tests {
     assert_eq!(mapped.kind, OperatorErrorKind::DaemonStartFailure);
     assert_eq!(mapped.exit_code().code(), 4);
     assert!(mapped.message.contains("spawn failed"));
+  }
+
+  #[test]
+  fn operator_error_kinds_and_constructors_keep_stable_contracts() {
+    let cases = [
+      (
+        OperatorErrorKind::InvalidUsage,
+        OperatorExitCode::InvalidUsage,
+      ),
+      (
+        OperatorErrorKind::DaemonUnavailable,
+        OperatorExitCode::DaemonUnavailable,
+      ),
+      (
+        OperatorErrorKind::DaemonStartFailure,
+        OperatorExitCode::DaemonStartFailure,
+      ),
+      (
+        OperatorErrorKind::TargetNotFound,
+        OperatorExitCode::TargetNotFound,
+      ),
+      (
+        OperatorErrorKind::ConflictOrRejected,
+        OperatorExitCode::ConflictOrRejected,
+      ),
+      (
+        OperatorErrorKind::PermissionOrElevation,
+        OperatorExitCode::PermissionOrElevation,
+      ),
+      (
+        OperatorErrorKind::UnsupportedOperation,
+        OperatorExitCode::UnsupportedOperation,
+      ),
+      (OperatorErrorKind::IpcFailure, OperatorExitCode::IpcFailure),
+    ];
+
+    for (kind, exit_code) in cases {
+      assert_eq!(kind.exit_code(), exit_code);
+    }
+
+    let unsupported = OperatorError::unsupported(
+      "iis handoff",
+      "not supported",
+      Some("retry elsewhere".to_string()),
+    );
+    assert_eq!(unsupported.kind, OperatorErrorKind::UnsupportedOperation);
+    assert_eq!(unsupported.to_string(), "not supported");
+    assert_eq!(unsupported.exit_code().code(), 8);
+
+    let target = OperatorError::target_not_found("domains enable", "missing", None);
+    assert_eq!(target.kind, OperatorErrorKind::TargetNotFound);
+
+    let conflict = OperatorError::conflict_or_rejected("domains enable", "busy", None);
+    assert_eq!(conflict.kind, OperatorErrorKind::ConflictOrRejected);
+  }
+
+  #[test]
+  fn daemon_request_and_permission_detection_cover_permission_and_unavailable_kinds() {
+    let permission = Error::from(std::io::Error::new(
+      std::io::ErrorKind::PermissionDenied,
+      "access is denied",
+    ));
+    let mapped = OperatorError::daemon_request(
+      "history show",
+      Path::new("runtime"),
+      "query history",
+      &permission,
+    );
+    assert_eq!(mapped.kind, OperatorErrorKind::PermissionOrElevation);
+    assert!(error_indicates_permission(&permission));
+
+    for kind in [
+      std::io::ErrorKind::NotFound,
+      std::io::ErrorKind::ConnectionRefused,
+      std::io::ErrorKind::ConnectionAborted,
+      std::io::ErrorKind::ConnectionReset,
+      std::io::ErrorKind::UnexpectedEof,
+    ] {
+      let error = Error::from(std::io::Error::new(kind, "daemon unavailable"));
+      assert!(daemon_error_indicates_unavailable(&error), "{kind:?}");
+    }
+
+    let text_permission = anyhow!("Access is denied while opening pipe");
+    assert!(error_indicates_permission(&text_permission));
+    let chained = Err::<(), _>(anyhow!("outer")).context("outer").unwrap_err();
+    assert_eq!(format_error_chain(&chained), "outer");
   }
 }

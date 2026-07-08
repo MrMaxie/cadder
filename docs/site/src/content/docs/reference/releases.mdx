@@ -1,0 +1,37 @@
+---
+title: Releases and downloads
+description: Choose the right Cadder v1.0 release artifact and verify what it contains.
+---
+
+Cadder v1.0 release assets are intentionally small.
+
+## Runtime Artifacts
+
+Choose one of these:
+
+- `cadder-runtime-<version>-<platform>` native installer for OS-managed installs.
+- `cadder-<version>-<platform>` portable runtime archive for manual installs, scripts, or unpacked tool directories.
+
+Both forms provide:
+
+- `cadderd`, the per-user daemon;
+- `caddy`, the Caddy-compatible shim;
+- `cadder`, the CLI and TUI operator;
+- `cadder.toml`, the sample real Caddy configuration file.
+
+## v1.0 Release Notes
+
+- `cadderd` owns local IPC, registrations, generated Caddy config, the real Caddy process it starts, diagnostics, logs, and durable history.
+- `caddy run` goes through Cadder's shim.
+- `cadder` provides CLI automation and TUI operator workflows.
+- Updates are manual in v1.0. Download a newer matching artifact from GitHub Releases and install or replace it according to the artifact type.
+
+Per-release change notes live in the GitHub Release body. The docs and download buttons on this site point to [github.com/MrMaxie/cadder](https://github.com/MrMaxie/cadder/releases/latest).
+
+## Checksums
+
+Release archives and installers are published with neighboring `.sha256` files. Verify the checksum before replacing a working runtime, especially for portable installs copied into a shared tools directory.
+
+## Asset Checks
+
+Cadder's release workflow verifies the complete runtime installer and portable runtime matrix before upload. The docs workflow also runs repository asset and release identity checks so stale download metadata, product names, or checked-in docs assets fail before publication.

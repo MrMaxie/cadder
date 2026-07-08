@@ -1,12 +1,10 @@
 [workspace]
 members = [
-  "crates/cadder-mcp",
   "crates/cadder-operator",
-  "crates/cadderctl",
+  "crates/cadder",
   "crates/cadder-daemon",
   "crates/cadder-protocol",
   "crates/cadder-shim",
-  "crates/cadder-tui",
   "crates/cadderd",
   "xtask",
 ]
@@ -16,4 +14,17 @@ resolver = "3"
 version = "0.8.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/MrMaxie/Cadder"
+repository = "https://github.com/MrMaxie/cadder"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "unwind"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

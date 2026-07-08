@@ -41,13 +41,14 @@ impl OperatorContext {
     runtime_dir: Option<PathBuf>,
     launch_options: DaemonLaunchOptions,
   ) -> Result<Self, OperatorError> {
-    let paths = RuntimePaths::resolve(runtime_dir).map_err(|error| {
-      OperatorError::invalid_usage(
-        command,
-        format!("Could not resolve the Cadder runtime directory: {error}."),
-        None,
-      )
-    })?;
+    let paths = RuntimePaths::resolve_with_profile(runtime_dir, launch_options.runtime_profile)
+      .map_err(|error| {
+        OperatorError::invalid_usage(
+          command,
+          format!("Could not resolve the Cadder runtime directory: {error}."),
+          None,
+        )
+      })?;
     Ok(Self::from_paths(paths, launch_options))
   }
 
@@ -187,9 +188,7 @@ impl OperatorContext {
             OperatorError::target_not_found(
               command,
               format!("Entrypoint `{registration_id}` was not found."),
-              Some(
-                "Run `cadderctl entrypoints list` to inspect valid registration IDs.".to_string(),
-              ),
+              Some("Run `cadder entrypoints list` to inspect valid registration IDs.".to_string()),
             )
           })?;
         Ok(entrypoint.log_stream.clone())
@@ -238,7 +237,7 @@ impl OperatorContext {
       return Err(OperatorError::target_not_found(
         command,
         format!("Entrypoint `{registration_id}` was not found."),
-        Some("Run `cadderctl entrypoints list` to inspect valid registration IDs.".to_string()),
+        Some("Run `cadder entrypoints list` to inspect valid registration IDs.".to_string()),
       ));
     }
 
@@ -299,7 +298,7 @@ impl OperatorContext {
             None => format!("Domain `{canonical_domain}` was not found."),
           },
           Some(
-            "Run `cadderctl domains list` to inspect the current domain registrations.".to_string(),
+            "Run `cadder domains list` to inspect the current domain registrations.".to_string(),
           ),
         ),
         crate::DomainResolveError::Ambiguous {
@@ -369,4 +368,238 @@ pub fn connected_status(
   snapshot: &GuiStateSnapshot,
 ) -> crate::DaemonStatusView {
   daemon_status_connected(context.paths.runtime_dir(), snapshot)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use cadder_protocol::{
+    ActivationState, ConfigState, DomainName, EntrypointInstanceIdentity, EntrypointRegistration,
+    OwnerProcessIdentity, RegisteredDomain, RuntimeState, SourcePath,
+  };
+  use chrono::{TimeZone, Utc};
+
+  fn timestamp() -> chrono::DateTime<Utc> {
+    Utc
+      .with_ymd_and_hms(2026, 6, 17, 11, 30, 0)
+      .single()
+      .unwrap()
+  }
+
+  fn registration(id: &str, domains: &[&str]) -> EntrypointRegistration {
+    let now = timestamp();
+    let identity = EntrypointInstanceIdentity {
+      instance_id: id.to_string(),
+      started_at_utc: now,
+      shim_session_nonce: format!("{id}-nonce"),
+    };
+    EntrypointRegistration {
+      registration_id: id.to_string(),
+      entrypoint_instance: identity.clone(),
+      source_working_directory: SourcePath::new("D:/Projects/App", None),
+      source_config_path: SourcePath::new("D:/Projects/App/Caddyfile", None),
+      registered_domains: domains
+        .iter()
+        .map(|domain| RegisteredDomain {
+          name: DomainName::parse(*domain),
+          activation_state: ActivationState::Active,
+          upstream: None,
+          log_stream: LogStreamIdentity::domain(domain),
+        })
+        .collect(),
+      activation_state: ActivationState::Active,
+      owner_process: OwnerProcessIdentity {
+        process_id: 42,
+        process_start_time_utc: now,
+        shim_session_nonce: identity.shim_session_nonce.clone(),
+        executable_path: Some("caddy.exe".to_string()),
+      },
+      log_stream: LogStreamIdentity::entrypoint(id),
+      shim_run: None,
+      created_at_utc: now,
+      last_heartbeat_utc: now,
+    }
+  }
+
+  fn snapshot(registrations: Vec<EntrypointRegistration>) -> GuiStateSnapshot {
+    GuiStateSnapshot {
+      captured_at_utc: timestamp(),
+      registrations,
+      runtime: RuntimeState::idle(),
+      config: ConfigState::idle(),
+      storage: None,
+    }
+  }
+
+  fn context() -> (tempfile::TempDir, OperatorContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    (
+      temp,
+      OperatorContext::from_paths(paths, DaemonLaunchOptions::default()),
+    )
+  }
+
+  #[test]
+  fn context_preserves_runtime_paths_and_launch_options() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    let daemon_path = temp.path().join("cadderd.exe");
+    let context = OperatorContext::new(
+      "test",
+      Some(runtime_dir.clone()),
+      DaemonLaunchOptions {
+        explicit_daemon: Some(daemon_path.clone()),
+        real_caddy_command: Some("caddy-real".to_string()),
+        shim_path: Some(temp.path().join("caddy.exe")),
+        launch_mode: cadder_daemon::DaemonLaunchMode::ForegroundDiagnostic,
+        ..DaemonLaunchOptions::default()
+      },
+    )
+    .unwrap();
+
+    assert_eq!(context.paths().runtime_dir(), runtime_dir.as_path());
+    assert_eq!(
+      context.launch_options().explicit_daemon.as_deref(),
+      Some(daemon_path.as_path())
+    );
+    assert_eq!(
+      context.launch_options().real_caddy_command.as_deref(),
+      Some("caddy-real")
+    );
+    assert!(context.launch_options().shim_path.is_some());
+    assert_eq!(
+      context.launch_options().launch_mode,
+      cadder_daemon::DaemonLaunchMode::ForegroundDiagnostic
+    );
+  }
+
+  #[test]
+  fn select_domain_returns_precise_operator_errors() {
+    let (_temp, context) = context();
+    let snapshot = snapshot(vec![
+      registration("shim-1", &["app.localhost"]),
+      registration("shim-2", &["app.localhost", "api.localhost"]),
+    ]);
+
+    let selected = context
+      .select_domain(
+        "domains enable",
+        &snapshot,
+        &DomainSelector {
+          domain: "api.localhost".to_string(),
+          registration: None,
+        },
+      )
+      .unwrap();
+    assert_eq!(selected.registration_id, "shim-2");
+    assert_eq!(selected.canonical_domain, "api.localhost");
+
+    let missing = context
+      .select_domain(
+        "domains enable",
+        &snapshot,
+        &DomainSelector {
+          domain: "missing.localhost".to_string(),
+          registration: Some("shim-1".to_string()),
+        },
+      )
+      .unwrap_err();
+    assert_eq!(missing.kind, crate::OperatorErrorKind::TargetNotFound);
+    assert!(missing.message.contains("shim-1"));
+
+    let missing_any_entrypoint = context
+      .select_domain(
+        "domains enable",
+        &snapshot,
+        &DomainSelector {
+          domain: "missing.localhost".to_string(),
+          registration: None,
+        },
+      )
+      .unwrap_err();
+    assert_eq!(
+      missing_any_entrypoint.kind,
+      crate::OperatorErrorKind::TargetNotFound
+    );
+    assert_eq!(
+      missing_any_entrypoint.message,
+      "Domain `missing.localhost` was not found."
+    );
+
+    let ambiguous = context
+      .select_domain(
+        "domains enable",
+        &snapshot,
+        &DomainSelector {
+          domain: "app.localhost".to_string(),
+          registration: None,
+        },
+      )
+      .unwrap_err();
+    assert_eq!(ambiguous.kind, crate::OperatorErrorKind::ConflictOrRejected);
+    assert!(ambiguous.message.contains("shim-1, shim-2"));
+  }
+
+  #[test]
+  fn selector_and_logs_target_contracts_are_stable() {
+    let selector = DomainSelector {
+      domain: "App.Localhost".to_string(),
+      registration: Some("shim-1".to_string()),
+    };
+    let target = LogsTarget::Domain(selector.clone());
+
+    assert_eq!(selector.clone(), selector);
+    assert_eq!(target.clone(), LogsTarget::Domain(selector));
+    assert!(format!("{target:?}").contains("Domain"));
+    assert_eq!(LogsTarget::Runtime, LogsTarget::Runtime.clone());
+    assert_eq!(
+      LogsTarget::Entrypoint {
+        registration_id: "shim-1".to_string(),
+      },
+      LogsTarget::Entrypoint {
+        registration_id: "shim-1".to_string(),
+      }
+      .clone()
+    );
+  }
+
+  #[test]
+  fn connected_and_unavailable_statuses_include_operator_context() {
+    let (_temp, context) = context();
+    let status = connected_status(
+      &context,
+      &snapshot(vec![registration(
+        "shim-1",
+        &["app.localhost", "api.localhost"],
+      )]),
+    );
+
+    assert_eq!(status.connection_state, ConnectionStateView::Connected);
+    assert_eq!(status.counts.entrypoints, 1);
+    assert_eq!(status.counts.domains, 2);
+    assert_eq!(status.counts.active_domains, 2);
+
+    let not_running = anyhow::Error::from(std::io::Error::new(
+      std::io::ErrorKind::ConnectionRefused,
+      "connection refused",
+    ));
+    let status = unavailable_status(&context, &not_running);
+    assert_eq!(status.connection_state, ConnectionStateView::NotRunning);
+    assert!(status.message.contains("is not running"));
+    assert!(
+      status
+        .guidance
+        .as_deref()
+        .is_some_and(|guidance| guidance.contains("cadderd --runtime-dir"))
+    );
+
+    let failed = anyhow::Error::msg("protocol mismatch");
+    let status = unavailable_status(&context, &failed);
+    assert_eq!(
+      status.connection_state,
+      ConnectionStateView::ConnectionFailed
+    );
+    assert!(status.message.contains("protocol mismatch"));
+  }
 }

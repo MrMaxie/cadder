@@ -3,7 +3,7 @@ import starlight from '@astrojs/starlight';
 
 export default defineConfig({
   site: 'https://maxie.dev',
-  base: '/Cadder',
+  base: '/cadder',
   integrations: [
     starlight({
       title: 'Cadder',
@@ -27,11 +27,9 @@ export default defineConfig({
           label: 'User guide',
           items: [
             { label: 'How to use', slug: 'user-guide/how-to-use' },
-            { label: 'cadderctl', slug: 'user-guide/cadderctl' },
-            { label: 'cadder-mcp', slug: 'user-guide/cadder-mcp' },
+            { label: 'cadder', slug: 'user-guide/cadder' },
             { label: 'cadder.toml', slug: 'user-guide/cadder-toml' },
             { label: 'PATH and shim strategy', slug: 'user-guide/path-and-shim' },
-            { label: 'TUI and diagnostics', slug: 'user-guide/tui-diagnostics' },
           ],
         },
         {
@@ -51,6 +49,7 @@ export default defineConfig({
         {
           label: 'Reference',
           items: [
+            { label: 'Releases and downloads', slug: 'reference/releases' },
             { label: 'Runtime and configuration', slug: 'reference/runtime-configuration' },
             { label: 'Real Caddy resolution', slug: 'reference/real-caddy-resolution' },
           ],

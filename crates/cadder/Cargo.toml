@@ -1,0 +1,14 @@
+[package]
+name = "cadder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+color-eyre = "0.6.5"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = { version = "0.10.4", package = "yaml_serde" }
+tui-term = "0.3.4"

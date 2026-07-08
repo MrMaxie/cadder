@@ -9,14 +9,14 @@ From the directory that contains Cadder:
 
 ```sh
 ./caddy run
-./cadder-tui
+./cadder tui
 ```
 
 From any project directory where Cadder is on `PATH`:
 
 ```sh
 caddy run
-cadder-tui
+cadder tui
 ```
 
 ## cadder.toml
@@ -30,10 +30,10 @@ If you want `caddy run` to go through Cadder everywhere, put Cadder's shim befor
 ## TUI diagnostics
 
 ```sh
-cadder-tui
+cadder tui
 ```
 
-Use the dashboard for daemon state, domains, logs, diagnostics, and activation toggles.
+Use the TUI for daemon state, domains, logs, diagnostics, and activation toggles.
 
 ## Isolated runtime directory
 
@@ -42,7 +42,7 @@ Most users do not need to set a runtime directory. For demos, tests, or isolated
 ```sh
 CADDER_RUNTIME_DIR=/tmp/cadder-demo cadderd
 CADDER_RUNTIME_DIR=/tmp/cadder-demo caddy run
-CADDER_RUNTIME_DIR=/tmp/cadder-demo cadder-tui
+CADDER_RUNTIME_DIR=/tmp/cadder-demo cadder tui
 ```
 
 ## Recover from common failures
