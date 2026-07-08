@@ -234,6 +234,9 @@ async fn main() -> Result<ExitCode> {
   } else if caddy_backend == CaddyBackendMode::Mock {
     run_mock_caddy_command(&args.caddy_args).await
   } else {
+    if command_policy.kind == ShimCommandPolicyKind::ReadOnlyInspection {
+      write_read_only_real_caddy_inspection_notice(&args, command_policy).await;
+    }
     delegate_to_real_caddy(args.real_caddy_command, &args.caddy_args).await
   }
 }
@@ -272,6 +275,52 @@ fn reject_unsupported_caddy_command(command: ClassifiedShimCommand<'_>) -> ExitC
     command.command, command.rationale
   );
   ExitCode::FAILURE
+}
+
+async fn write_read_only_real_caddy_inspection_notice(
+  args: &ShimArgs,
+  command: ClassifiedShimCommand<'_>,
+) {
+  let Ok(paths) =
+    RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)
+  else {
+    return;
+  };
+
+  match CadderSession::connect(&paths).await {
+    Ok(_) => {}
+    Err(error) => eprintln!(
+      "{}",
+      read_only_real_caddy_inspection_message(
+        &paths,
+        command,
+        daemon_error_indicates_not_running(&error),
+        &format_error_chain(&error),
+      )
+    ),
+  }
+}
+
+fn read_only_real_caddy_inspection_message(
+  paths: &RuntimePaths,
+  command: ClassifiedShimCommand<'_>,
+  daemon_not_running: bool,
+  daemon_error: &str,
+) -> String {
+  let runtime_dir = paths.runtime_dir().display();
+  let daemon_status = if daemon_not_running {
+    "is not running".to_string()
+  } else {
+    format!("could not be contacted: {daemon_error}")
+  };
+
+  format!(
+    "Cadder backend `cadderd` {daemon_status} for runtime `{runtime_dir}`. \
+     Running read-only `caddy {}` against the safely resolved real Caddy binary. \
+     Output is real-Caddy inspection, not Cadder runtime state. \
+     To inspect Cadder runtime state, run `cadder daemon start` and retry.",
+    command.command
+  )
 }
 
 async fn run_managed(args: ShimArgs) -> Result<ExitCode> {
@@ -796,6 +845,26 @@ mod tests {
     assert!(message.contains("Cadder backend `cadderd` is not running"));
     assert!(message.contains("Start `cadderd --background --runtime-dir"));
     assert!(message.contains("retry `caddy run`"));
+  }
+
+  #[test]
+  fn read_only_real_caddy_inspection_message_labels_output_and_recovery() {
+    let paths =
+      RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-read-only-test"))).unwrap();
+    let args = ["version".to_string()];
+    let command = classify_caddy_command(&args);
+
+    let message = read_only_real_caddy_inspection_message(
+      &paths,
+      command,
+      true,
+      "connect to Cadder daemon socket failed",
+    );
+
+    assert!(message.contains("cadderd` is not running"));
+    assert!(message.contains("read-only `caddy version`"));
+    assert!(message.contains("real-Caddy inspection, not Cadder runtime state"));
+    assert!(message.contains("cadder daemon start"));
   }
 
   #[test]

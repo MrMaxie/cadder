@@ -45,6 +45,8 @@ The shim classifies the first Caddy command before it decides what may run:
 | `add-package`, `reload`, `remove-package`, `start`, `stop`, `trust`, `untrust`, `upgrade` | Unsupported | Fails before real Caddy runs because the command can mutate runtime, trust, or binary state outside Cadder ownership. |
 | Any unlisted command | Unsupported | Fails until the command has an explicit Cadder shim policy. |
 
+When a read-only inspection command delegates to real Caddy while `cadderd` is unavailable, the shim writes a stderr notice that the output is real-Caddy inspection, not Cadder runtime state.
+
 ## Keep a separate real Caddy path
 
 The practical idea is simple:

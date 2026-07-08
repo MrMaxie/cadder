@@ -207,3 +207,34 @@ fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
   let _ = fs::remove_dir_all(runtime_dir);
   let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }
+
+#[test]
+fn read_only_command_labels_real_caddy_inspection_when_daemon_is_missing() {
+  let runtime_dir = unique_runtime_dir("read-only-no-daemon");
+  let runtime_dir_arg = runtime_dir.display().to_string();
+  let fake_caddy = write_fake_real_caddy("read-only-no-daemon", 0);
+  let fake_caddy_arg = fake_caddy.display().to_string();
+
+  let output = run_shim(&[
+    "--cadder-runtime-dir",
+    &runtime_dir_arg,
+    "--cadder-real-caddy-command",
+    &fake_caddy_arg,
+    "version",
+  ]);
+
+  assert_eq!(output.status.code(), Some(0));
+  assert!(
+    String::from_utf8(output.stdout)
+      .unwrap()
+      .contains("delegated version")
+  );
+  let stderr = String::from_utf8(output.stderr).unwrap();
+  assert!(
+    stderr.contains("real-Caddy inspection, not Cadder runtime state"),
+    "{stderr}"
+  );
+  assert!(stderr.contains("cadder daemon start"), "{stderr}");
+  let _ = fs::remove_dir_all(runtime_dir);
+  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
+}

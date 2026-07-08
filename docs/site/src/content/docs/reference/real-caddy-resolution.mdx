@@ -27,6 +27,8 @@ When the PATH-facing shim handles `caddy run`, it first tries to attach to the c
 
 The shim does not run `caddy run` as an unmanaged real Caddy fallback. The resolver described above is used by `cadderd` to find the real Caddy execution target after the daemon accepts managed state.
 
+Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` may still delegate to the safely resolved real Caddy binary. If `cadderd` is unavailable, the shim labels stderr so the command output is understood as real-Caddy inspection, not Cadder runtime state.
+
 ## Mock backend for development
 
 Set `CADDER_CADDY_BACKEND=mock` or pass `--caddy-backend mock` to use Cadder's development mock backend. In this mode the daemon does not resolve or execute a real Caddy binary, does not run `caddy adapt`, and does not bind HTTP or HTTPS ports. It records deterministic runtime state and effective config for local UI and operator workflows.
