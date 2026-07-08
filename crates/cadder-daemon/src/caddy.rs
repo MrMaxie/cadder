@@ -1936,6 +1936,41 @@ app.localhost, http://api.localhost:8080 {
     assert_eq!(resolved, canonical(&real));
   }
 
+  #[test]
+  fn resolver_honors_caddy_shim_path_exclusion_when_searching_path() {
+    let _guard = lock_env();
+    let _snapshot = EnvSnapshot::capture(&[
+      "PATH",
+      "CADDER_CADDY_SHIM_PATH",
+      "CADDER_CADDY_REAL_COMMAND",
+      "CADDER_CADDY__REAL_COMMAND",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let shim_dir = dir.path().join("shim");
+    let real_dir = dir.path().join("real");
+    fs::create_dir_all(&shim_dir).unwrap();
+    fs::create_dir_all(&real_dir).unwrap();
+    let shim = shim_dir.join(exe_name_for_test("caddy"));
+    let real = real_dir.join(exe_name_for_test("caddy"));
+    write_file(&shim);
+    write_file(&real);
+    let path_var = env::join_paths([shim_dir.as_path(), real_dir.as_path()]).unwrap();
+    unsafe {
+      env::remove_var("CADDER_CADDY_REAL_COMMAND");
+      env::remove_var("CADDER_CADDY__REAL_COMMAND");
+      env::set_var("CADDER_CADDY_SHIM_PATH", shim.display().to_string());
+      env::set_var("PATH", path_var);
+    }
+    let resolver = RealCaddyResolver::with_executable_path(
+      None,
+      Some(dir.path().join(exe_name_for_test("cadderd"))),
+    );
+
+    let resolved = resolver.resolve_for_working_directory(dir.path()).unwrap();
+
+    assert_eq!(resolved, canonical(&real));
+  }
+
   #[cfg(windows)]
   fn exe_name_for_test(name: &str) -> String {
     format!("{name}.exe")

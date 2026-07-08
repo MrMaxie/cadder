@@ -28,7 +28,7 @@
 - [x] 4.1 Write the shim command policy table for managed, read-only, passthrough, and unsupported Caddy commands.
 - [x] 4.2 Implement managed shim commands as requests to `cadderd` without starting unmanaged Caddy.
 - [x] 4.3 Implement daemon-unavailable diagnostics and recovery guidance for shim commands.
-- [ ] 4.4 Harden real Caddy resolution against recursive shim execution.
+- [x] 4.4 Harden real Caddy resolution against recursive shim execution.
 - [ ] 4.5 Implement config composition and atomic apply behavior with last-known-good recovery.
 - [ ] 4.6 Add shim tests for command policy, no-daemon behavior, fallback behavior, and recursion prevention.
 
