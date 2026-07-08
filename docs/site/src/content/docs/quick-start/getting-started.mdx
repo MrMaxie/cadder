@@ -23,7 +23,7 @@ cadder daemon status
 caddy run
 ```
 
-The shim attaches to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running. If the backend is unavailable, Cadder first tries a safe real Caddy fallback, then tries to start the missing daemon, and finally prints recovery steps.
+The shim attaches to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running. If the backend is unavailable, Cadder tries to start the missing daemon and then prints recovery steps if startup or attach fails. It does not run `caddy run` as an unmanaged real Caddy fallback.
 
 Inspect Cadder with CLI or TUI:
 

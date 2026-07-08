@@ -393,49 +393,26 @@ where
     }
     Err(error) => {
       let attach_error = format_error_chain(&error);
-      let caddy_backend = args
-        .caddy_backend
-        .map_or_else(CaddyBackendMode::from_env, Ok)?;
-      let real_caddy_result = if caddy_backend == CaddyBackendMode::Real {
-        match run_real_caddy_fallback(args.real_caddy_command.clone(), &args.caddy_args).await {
-          Ok(code) => return Ok(ManagedRunTarget::Exit(code)),
-          Err(error) => RecoveryStepResult::Failed(format_error_chain(&error)),
-        }
-      } else {
-        RecoveryStepResult::Skipped(format!(
-          "Caddy backend mode is `{}`",
-          caddy_backend.as_str()
-        ))
-      };
-
       match start_daemon(args.clone(), paths.clone()).await {
         Ok(()) => match CadderSession::connect(paths).await {
           Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
           Err(error) => {
+            let daemon_error = format!(
+              "started cadderd, but attach failed: {}",
+              format_error_chain(&error)
+            );
             eprintln!(
               "{}",
-              managed_recovery_failed_message(
-                paths,
-                &attach_error,
-                &real_caddy_result,
-                &RecoveryStepResult::Failed(format!(
-                  "started cadderd, but attach failed: {}",
-                  format_error_chain(&error)
-                )),
-              )
+              managed_recovery_failed_message(paths, &attach_error, &daemon_error)
             );
             Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
           }
         },
         Err(error) => {
+          let daemon_error = format_error_chain(&error);
           eprintln!(
             "{}",
-            managed_recovery_failed_message(
-              paths,
-              &attach_error,
-              &real_caddy_result,
-              &RecoveryStepResult::Failed(format_error_chain(&error)),
-            )
+            managed_recovery_failed_message(paths, &attach_error, &daemon_error)
           );
           Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
         }
@@ -463,12 +440,6 @@ async fn start_missing_daemon_owned(args: ShimArgs, paths: RuntimePaths) -> Resu
   start_missing_daemon(&args, &paths).await
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RecoveryStepResult {
-  Failed(String),
-  Skipped(String),
-}
-
 async fn run_mock_caddy_command(args: &[String]) -> Result<ExitCode> {
   match args.first().map(String::as_str) {
     None | Some("--version" | "version") => {
@@ -492,27 +463,17 @@ async fn run_mock_caddy_command(args: &[String]) -> Result<ExitCode> {
 fn managed_recovery_failed_message(
   paths: &RuntimePaths,
   attach_error: &str,
-  real_caddy_result: &RecoveryStepResult,
-  daemon_result: &RecoveryStepResult,
+  daemon_error: &str,
 ) -> String {
   format!(
     "Cadder could not recover `caddy run` for backend runtime `{}`.\n\
      Initial attach failed: {attach_error}.\n\
-     Real Caddy fallback: {}.\n\
-     Daemon startup: {}.\n\
+     Daemon recovery failed: {daemon_error}.\n\
+     Managed `caddy run` was not delegated to real Caddy because Cadder must update runtime state through `cadderd`.\n\
      Next: configure a safe real Caddy command, start `cadderd --background --runtime-dir \"{}\"`, or run `cadder daemon start` for the same runtime and retry.",
     paths.runtime_dir().display(),
-    recovery_step_summary(real_caddy_result),
-    recovery_step_summary(daemon_result),
     paths.runtime_dir().display(),
   )
-}
-
-fn recovery_step_summary(result: &RecoveryStepResult) -> String {
-  match result {
-    RecoveryStepResult::Failed(message) => format!("failed: {message}"),
-    RecoveryStepResult::Skipped(message) => format!("skipped: {message}"),
-  }
 }
 
 fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &anyhow::Error) -> String {
@@ -884,7 +845,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn run_managed_uses_real_caddy_fallback_when_backend_is_missing() {
+  async fn run_managed_does_not_delegate_to_real_caddy_when_backend_is_missing() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let fake_caddy = temp.path().join(fake_caddy_name_for_test());
@@ -901,7 +862,7 @@ mod tests {
     .await
     .unwrap();
 
-    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(code, ExitCode::FAILURE);
   }
 
   #[tokio::test]

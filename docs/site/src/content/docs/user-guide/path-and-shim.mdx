@@ -25,13 +25,13 @@ If you want `caddy run` to go through Cadder, copy or symlink the Cadder shim in
 
 The real Caddy binary still needs to be resolvable by Cadder. The recommended place is [cadder.toml](../cadder-toml/).
 
-For `caddy run`, the shim is attach-first. If the Cadder daemon is missing, recovery uses this order:
+For `caddy run`, the shim is attach-first. If the Cadder daemon is missing, recovery stays inside Cadder's daemon ownership boundary:
 
-1. Run the safely resolved real Caddy command as a compatibility fallback.
-2. Start `cadderd` through Cadder's detached background launch contract.
-3. Return a terminal error that lists the attempted recovery steps and next actions.
+1. Start `cadderd` through Cadder's detached background launch contract.
+2. Attach to `cadderd` and register the project definition through the Cadder protocol.
+3. Return a terminal error with next actions if daemon startup or attach fails.
 
-When `CADDER_CADDY_BACKEND=mock` or `--cadder-caddy-backend mock` is active, real Caddy fallback is skipped and the shim tries the daemon path directly.
+The shim does not run `caddy run` as an unmanaged real Caddy fallback. Real Caddy is started only by `cadderd` as the managed execution target after the daemon accepts the registration.
 
 ## Command policy
 

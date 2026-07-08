@@ -17,15 +17,15 @@ The resolver uses this exact order:
 
 This differs from the recommended setup order because explicit per-command and per-project overrides must win at runtime.
 
-## Shim fallback for `caddy run`
+## Shim recovery for `caddy run`
 
-When the PATH-facing shim handles `caddy run`, it first tries to attach to the configured Cadder runtime. If no daemon is available, recovery uses this order:
+When the PATH-facing shim handles `caddy run`, it first tries to attach to the configured Cadder runtime. If no daemon is available, recovery stays inside Cadder's daemon ownership boundary:
 
-1. Delegate to the safely resolved real Caddy command when the backend mode is `real`.
-2. Start the missing daemon through Cadder's detached background launch contract.
-3. Print a terminal error that includes the original attach failure, real Caddy fallback result, daemon-start result, and concrete retry guidance.
+1. Start the missing daemon through Cadder's detached background launch contract.
+2. Attach to `cadderd` and register the project definition through the Cadder protocol.
+3. Print a terminal error that includes the original attach failure, daemon-start result, and concrete retry guidance.
 
-The fallback uses the same resolver described above, including recursion-safety exclusions for the current executable and `CADDER_CADDY_SHIM_PATH`. In mock backend mode, real Caddy fallback is skipped and the shim tries daemon startup directly.
+The shim does not run `caddy run` as an unmanaged real Caddy fallback. The resolver described above is used by `cadderd` to find the real Caddy execution target after the daemon accepts managed state.
 
 ## Mock backend for development
 

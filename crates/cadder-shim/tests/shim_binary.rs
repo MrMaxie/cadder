@@ -169,3 +169,41 @@ fn managed_run_reports_missing_backend_for_runtime_dir() {
   );
   let _ = fs::remove_dir_all(runtime_dir);
 }
+
+#[test]
+fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
+  let runtime_dir = unique_runtime_dir("managed-no-delegate");
+  let runtime_dir_arg = runtime_dir.display().to_string();
+  let missing_daemon = runtime_dir.join(if cfg!(windows) {
+    "missing-cadderd.exe"
+  } else {
+    "missing-cadderd"
+  });
+  let missing_daemon_arg = missing_daemon.display().to_string();
+  let fake_caddy = write_fake_real_caddy("managed-no-delegate", 0);
+  let fake_caddy_arg = fake_caddy.display().to_string();
+
+  let output = run_shim(&[
+    "--cadder-runtime-dir",
+    &runtime_dir_arg,
+    "--cadder-daemon-path",
+    &missing_daemon_arg,
+    "--cadder-real-caddy-command",
+    &fake_caddy_arg,
+    "run",
+  ]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(
+    !String::from_utf8(output.stdout)
+      .unwrap()
+      .contains("delegated run")
+  );
+  let stderr = String::from_utf8(output.stderr).unwrap();
+  assert!(
+    stderr.contains("Managed `caddy run` was not delegated to real Caddy"),
+    "{stderr}"
+  );
+  let _ = fs::remove_dir_all(runtime_dir);
+  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
+}
