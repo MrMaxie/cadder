@@ -156,6 +156,7 @@ pub(crate) fn spec_driven_change_names(root: &Path) -> Result<Vec<String>> {
 fn collect_repository_diagnostics(root: &Path) -> Vec<Diagnostic> {
   let openspec_root = root.join("openspec");
   let mut diagnostics = Vec::new();
+  validate_shared_artifact_rules(&openspec_root, &mut diagnostics);
   let main_requirements = load_main_requirements(&openspec_root, &mut diagnostics);
   let mut provided_capabilities = main_requirements
     .values()
@@ -198,6 +199,40 @@ fn collect_repository_diagnostics(root: &Path) -> Vec<Diagnostic> {
 
   diagnostics.sort();
   diagnostics
+}
+
+fn validate_shared_artifact_rules(openspec_root: &Path, diagnostics: &mut Vec<Diagnostic>) {
+  const SHARED_ARTIFACTS: [&str; 3] = ["proposal", "design", "tasks"];
+
+  let path = openspec_root.join("config.yaml");
+  let Ok(contents) = fs::read_to_string(&path) else {
+    return;
+  };
+  let mut in_rules = false;
+  for (index, line) in contents.lines().enumerate() {
+    if line == "rules:" {
+      in_rules = true;
+      continue;
+    }
+    if in_rules && !line.is_empty() && !line.starts_with(' ') {
+      in_rules = false;
+    }
+    if !in_rules || !line.starts_with("  ") || line.starts_with("    ") {
+      continue;
+    }
+    let Some(artifact) = line.trim().strip_suffix(':') else {
+      continue;
+    };
+    if !SHARED_ARTIFACTS.contains(&artifact) {
+      diagnostics.push(Diagnostic::new(
+        &path,
+        index + 1,
+        format!(
+          "global artifact rule `{artifact}` is not shared by the spec-driven and implementation schemas; put the instruction in project context or a schema template"
+        ),
+      ));
+    }
+  }
 }
 
 fn load_main_requirements(
@@ -1801,6 +1836,27 @@ mod tests {
       "Install to D:\\Apps\\Cadder.",
       root
     ));
+  }
+
+  #[test]
+  fn shared_config_rules_reject_schema_specific_artifacts() {
+    let dir = tempdir().unwrap();
+    write_file(
+      dir.path(),
+      "openspec/config.yaml",
+      "schema: spec-driven\n\nrules:\n  proposal:\n    - Shared rule.\n  specs:\n    - Contract-only rule.\n",
+    );
+    let mut diagnostics = Vec::new();
+
+    validate_shared_artifact_rules(&dir.path().join("openspec"), &mut diagnostics);
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].line, 6);
+    assert!(
+      diagnostics[0]
+        .message
+        .contains("not shared by the spec-driven and implementation schemas")
+    );
   }
 
   #[test]

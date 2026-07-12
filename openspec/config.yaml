@@ -17,6 +17,13 @@ context: |
   Project-facing text, docs, source comments, and commit messages must be in
   English.
 
+  Contract changes use the OpenSpec delta format with ADDED, MODIFIED, REMOVED,
+  or RENAMED requirements. A MODIFIED requirement includes its complete updated
+  block. Requirements use observable SHALL or MUST language and include at least
+  one correctly headed scenario. Specs describe required behavior; design
+  artifacts hold implementation choices unless those choices are part of the
+  user-facing contract.
+
 rules:
   proposal:
     - "Describe the problem, user value, scope, non-goals, and success criteria before proposing implementation details."
@@ -27,11 +34,6 @@ rules:
     - "Record ownership, permissions, failure modes, and trust boundaries for every integration or privilege boundary."
     - "Prefer mature external tools and libraries over custom orchestration when they fit the job."
     - "Define test seams, fakes, and verification strategy before describing implementation details."
-  specs:
-    - "Use the OpenSpec delta format correctly: ADDED, MODIFIED, REMOVED, or RENAMED Requirements as appropriate."
-    - "For MODIFIED requirements, include the full updated requirement block, not a partial patch."
-    - "Write normative SHALL/MUST requirements with observable behavior and at least one scenario using the required heading level."
-    - "Keep specs focused on what the system must do; put implementation choices in design unless they are part of the user-facing contract."
   tasks:
     - "Break work into independently verifiable slices."
     - "Keep cleanup and implementation tasks separate when cleanup has migration risk."

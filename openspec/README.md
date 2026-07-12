@@ -66,9 +66,10 @@ and main specs.
 Cadder requires OpenSpec 1.5.0 while the project-local schema contract remains
 at version 1. OpenSpec 1.5 does not apply strict delta validation correctly to a
 custom implementation change without `specs/`, so `openspec-check` validates
-those changes. The repository keeps `spec-driven` as the CLI default because
-OpenSpec otherwise ignores the configured `specs` rules; implementation changes
-therefore select their schema explicitly.
+those changes. The repository keeps `spec-driven` as the CLI default and puts
+contract-only writing rules in the shared project context because a `specs`
+artifact rule is invalid for the custom implementation schema. Implementation
+changes therefore select their schema explicitly.
 
 ## Content boundaries
 
