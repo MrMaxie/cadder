@@ -161,6 +161,16 @@ pub enum ResponseOutcome<T> {
   Failure(FailureOutcome),
 }
 
+impl<T> ResponseOutcome<T> {
+  /// Consumes the outcome without reducing a correlated daemon error to text.
+  pub fn into_result(self) -> ProtocolResult<T> {
+    match self {
+      Self::Success(success) => Ok(success.result),
+      Self::Failure(failure) => Err(failure.error),
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// A successful typed response value.
@@ -319,6 +329,16 @@ impl<T> ResponseEnvelope<T> {
     &self.outcome
   }
 
+  /// Consumes the envelope and returns its exactly-one typed outcome.
+  pub fn into_outcome(self) -> ResponseOutcome<T> {
+    self.outcome
+  }
+
+  /// Consumes the envelope while retaining a daemon [`ProtocolError`] as the error value.
+  pub fn into_result(self) -> ProtocolResult<T> {
+    self.outcome.into_result()
+  }
+
   /// Creates a correlated successful response.
   pub fn success(
     protocol_version: ProtocolVersion,
@@ -388,6 +408,14 @@ mod tests {
         .unwrap()
         .request_id(),
       &request_id
+    );
+    let decoded_failure =
+      serde_json::from_str::<ResponseEnvelope<serde_json::Value>>(&failure_json).unwrap();
+    let decoded_error = decoded_failure.into_result().unwrap_err();
+    assert_eq!(decoded_error.request_id.as_ref(), Some(&request_id));
+    assert_eq!(
+      success.clone().into_result().unwrap(),
+      json!({"state":"ready"})
     );
     assert!(
       serde_json::from_str::<ResponseEnvelope<serde_json::Value>>(

@@ -1,16 +1,19 @@
 use crate::{
-  CaddyBackendMode, DaemonState, IpcEndpointMetadata, IpcEndpointPublication, IpcOperation,
-  IpcPrincipal, IpcSecurityPolicy, RuntimePaths, RuntimeProfile,
+  CaddyBackendMode, DaemonState, IpcClientError, IpcClientPhase, IpcClientResult,
+  IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcPrincipal, IpcSecurityPolicy,
+  LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile,
+  ipc_client_error::LocalIpcErrorContext,
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use cadder_protocol::{
-  HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity, LogStreamIdentity,
-  OPERATION_REGISTRY, OperationAccess, ProtocolError, ProtocolErrorResponse, QueryAutostartRequest,
-  QueryIisBindingsRequest, QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest,
-  RequestId, SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
-  SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest,
-  UnregisterEntrypointRequest, message_types,
+  HeartbeatEntrypointRequest, IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind,
+  LogSeverity, LogStreamIdentity, OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass,
+  ProtocolError, ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest,
+  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
+  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
+  ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest, UnregisterEntrypointRequest,
+  ensure_compatible_protocol_version, message_types,
 };
 use fs4::{FileExt, TryLockError};
 use interprocess::local_socket::{
@@ -31,7 +34,7 @@ use tokio::{
   io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
   process::Command,
   sync::watch,
-  time::sleep,
+  time::{sleep, timeout},
 };
 
 #[derive(Debug)]
@@ -406,163 +409,896 @@ fn request_id_from_payload(envelope: &IpcEnvelope) -> Option<RequestId> {
     .and_then(|request_id| RequestId::parse(request_id).ok())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IpcClientDeadlines {
+  connect: Duration,
+  ordinary: Duration,
+  reload: Duration,
+  stream: Duration,
+  shutdown: Duration,
+}
+
+impl Default for IpcClientDeadlines {
+  fn default() -> Self {
+    Self {
+      connect: Duration::from_secs(5),
+      ordinary: Duration::from_secs(30),
+      reload: Duration::from_secs(120),
+      stream: Duration::from_secs(30),
+      shutdown: Duration::from_secs(30),
+    }
+  }
+}
+
+impl IpcClientDeadlines {
+  fn response_for(self, operation: &str) -> Duration {
+    match OPERATION_REGISTRY
+      .lookup(operation)
+      .map(|definition| definition.deadline())
+    {
+      Some(OperationDeadlineClass::Reload) => self.reload,
+      Some(OperationDeadlineClass::Stream) => self.stream,
+      Some(OperationDeadlineClass::Shutdown) => self.shutdown,
+      Some(OperationDeadlineClass::Ordinary) | None => self.ordinary,
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct CadderClient {
   paths: RuntimePaths,
+  deadlines: IpcClientDeadlines,
 }
 
 impl CadderClient {
   pub fn new(paths: RuntimePaths) -> Self {
-    Self { paths }
+    Self {
+      paths,
+      deadlines: IpcClientDeadlines::default(),
+    }
   }
 
-  pub fn from_env() -> Result<Self> {
-    Ok(Self::new(RuntimePaths::resolve(None)?))
+  pub fn from_env() -> IpcClientResult<Self> {
+    RuntimePaths::resolve(None).map(Self::new).map_err(|error| {
+      IpcClientError::local(LocalIpcErrorContext {
+        kind: LocalIpcErrorKind::Transport,
+        phase: IpcClientPhase::EndpointResolve,
+        code: LocalIpcErrorCode::InvalidRuntime,
+        message: "Cadder could not resolve the selected runtime; no request was sent.".into(),
+        guidance: Some("Select a valid Cadder profile or runtime directory, then retry.".into()),
+        retryable: false,
+        request_id: None,
+        operation: None,
+        source: Some(error.into_boxed_dyn_error()),
+      })
+    })
   }
 
-  pub async fn request<TRequest, TResponse>(
+  #[cfg(test)]
+  fn with_deadlines(mut self, deadlines: IpcClientDeadlines) -> Self {
+    self.deadlines = deadlines;
+    self
+  }
+
+  pub async fn request<TRequest>(
     &self,
     message_type: &str,
     response_type: &str,
     request: &TRequest,
-  ) -> Result<TResponse>
+  ) -> IpcClientResult<TRequest::Response>
   where
-    TRequest: Serialize,
-    TResponse: DeserializeOwned,
+    TRequest: LegacyCorrelatedRequest,
   {
-    let name = self.paths.socket_name().to_ns_name::<GenericNamespaced>()?;
-    let mut session =
-      CadderSession::connect_name(name, self.paths.socket_name().to_string()).await?;
-    session.request(message_type, response_type, request).await
+    let prepared = PreparedClientRequest::new(message_type, response_type, request)?;
+    let request_id = prepared.context.request_id.clone();
+    let operation = prepared.context.operation.clone();
+    let name = self
+      .paths
+      .socket_name()
+      .to_ns_name::<GenericNamespaced>()
+      .map_err(endpoint_resolution_error)
+      .map_err(|error| error.with_request_context(request_id.clone(), operation.clone()))?;
+    let mut session = CadderSession::connect_name(name, self.deadlines)
+      .await
+      .map_err(|error| error.with_request_context(request_id, operation))?;
+    session
+      .request_prepared::<TRequest::Response>(prepared)
+      .await
   }
 
-  pub async fn subscribe_state(&self, request_id: String) -> Result<StateSubscription> {
-    let name = self.paths.socket_name().to_ns_name::<GenericNamespaced>()?;
-    let session = CadderSession::connect_name(name, self.paths.socket_name().to_string()).await?;
-    session.subscribe_state(request_id).await
+  pub async fn subscribe_state(&self, request_id: String) -> IpcClientResult<StateSubscription> {
+    let prepared = PreparedClientRequest::new(
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      message_types::STATE_CHANGED_EVENT,
+      &SubscribeStateRequest { request_id },
+    )?;
+    let correlation = prepared.context.request_id.clone();
+    let operation = prepared.context.operation.clone();
+    let name = self
+      .paths
+      .socket_name()
+      .to_ns_name::<GenericNamespaced>()
+      .map_err(endpoint_resolution_error)
+      .map_err(|error| error.with_request_context(correlation.clone(), operation.clone()))?;
+    let session = CadderSession::connect_name(name, self.deadlines)
+      .await
+      .map_err(|error| error.with_request_context(correlation, operation))?;
+    session.subscribe_prepared(prepared).await
   }
 }
 
 #[derive(Debug)]
 pub struct CadderSession {
-  reader: BufReader<tokio::io::ReadHalf<Stream>>,
-  writer: tokio::io::WriteHalf<Stream>,
+  reader: Option<BufReader<tokio::io::ReadHalf<Stream>>>,
+  writer: Option<tokio::io::WriteHalf<Stream>>,
+  deadlines: IpcClientDeadlines,
+  usable: bool,
 }
 
 impl CadderSession {
-  pub async fn connect(paths: &RuntimePaths) -> Result<Self> {
-    let name = paths.socket_name().to_ns_name::<GenericNamespaced>()?;
-    Self::connect_name(name, paths.socket_name().to_string()).await
+  pub async fn connect(paths: &RuntimePaths) -> IpcClientResult<Self> {
+    let name = paths
+      .socket_name()
+      .to_ns_name::<GenericNamespaced>()
+      .map_err(endpoint_resolution_error)?;
+    Self::connect_name(name, IpcClientDeadlines::default()).await
   }
 
   async fn connect_name(
     name: interprocess::local_socket::Name<'_>,
-    display_name: String,
-  ) -> Result<Self> {
-    let conn = Stream::connect(name)
-      .await
-      .with_context(|| format!("connect to Cadder daemon socket {display_name}"))?;
+    deadlines: IpcClientDeadlines,
+  ) -> IpcClientResult<Self> {
+    let conn = match timeout(deadlines.connect, Stream::connect(name)).await {
+      Ok(Ok(conn)) => conn,
+      Ok(Err(error)) => return Err(connection_error(error)),
+      Err(_) => {
+        return Err(IpcClientError::local(LocalIpcErrorContext {
+          kind: LocalIpcErrorKind::Timeout,
+          phase: IpcClientPhase::Connect,
+          code: LocalIpcErrorCode::Timeout,
+          message: "The Cadder daemon connection did not complete before the local deadline; no request was sent."
+            .into(),
+          guidance: Some("Check the daemon status, then retry once it is ready.".into()),
+          retryable: true,
+          request_id: None,
+          operation: None,
+          source: None,
+        }));
+      }
+    };
     let (read_half, writer) = tokio::io::split(conn);
     Ok(Self {
-      reader: BufReader::new(read_half),
-      writer,
+      reader: Some(BufReader::new(read_half)),
+      writer: Some(writer),
+      deadlines,
+      usable: true,
     })
   }
 
-  pub async fn request<TRequest, TResponse>(
+  pub async fn request<TRequest>(
     &mut self,
     message_type: &str,
     response_type: &str,
     request: &TRequest,
-  ) -> Result<TResponse>
+  ) -> IpcClientResult<TRequest::Response>
   where
-    TRequest: Serialize,
-    TResponse: DeserializeOwned,
+    TRequest: LegacyCorrelatedRequest,
   {
-    write_envelope(&mut self.writer, message_type, request).await?;
-    let mut line = String::new();
-    self.reader.read_line(&mut line).await?;
-    if line.is_empty() {
-      return Err(
-        io::Error::new(
-          io::ErrorKind::UnexpectedEof,
-          "daemon closed the IPC connection without a response",
-        )
-        .into(),
-      );
-    }
-    let envelope: IpcEnvelope = serde_json::from_str(line.trim_end())?;
-    if envelope.message_type == message_types::PROTOCOL_ERROR_RESPONSE
-      && response_type != message_types::PROTOCOL_ERROR_RESPONSE
-    {
-      let response: ProtocolErrorResponse = envelope.decode()?;
-      return Err(anyhow!(
-        "daemon rejected IPC request `{}`: {}",
-        response.request_id,
-        response.error
-      ));
-    }
-    if envelope.message_type != response_type {
-      return Err(anyhow!(
-        "unexpected response type `{}`, expected `{response_type}`",
-        envelope.message_type
-      ));
-    }
-    Ok(envelope.decode()?)
+    let prepared = PreparedClientRequest::new(message_type, response_type, request)?;
+    self.request_prepared::<TRequest::Response>(prepared).await
   }
 
-  pub async fn subscribe_state(self, request_id: String) -> Result<StateSubscription> {
-    let mut subscription = StateSubscription {
-      reader: self.reader,
-      writer: self.writer,
-    };
-    write_envelope(
-      &mut subscription.writer,
-      message_types::SUBSCRIBE_STATE_REQUEST,
-      &SubscribeStateRequest { request_id },
+  async fn request_prepared<TResponse>(
+    &mut self,
+    prepared: PreparedClientRequest,
+  ) -> IpcClientResult<TResponse>
+  where
+    TResponse: DeserializeOwned,
+  {
+    if !self.usable {
+      return Err(connection_no_longer_usable(&prepared.context));
+    }
+
+    let deadline = self.deadlines.response_for(&prepared.context.operation);
+    let mut exchange = SessionExchangeGuard::new(self);
+    let result = exchange.session.exchange(&prepared, deadline).await;
+    if result.is_ok()
+      || result
+        .as_ref()
+        .is_err_and(|error| error.daemon_error().is_some())
+    {
+      exchange.restore();
+    }
+    result
+  }
+
+  fn retire(&mut self) {
+    self.usable = false;
+    self.reader.take();
+    self.writer.take();
+  }
+
+  async fn exchange<TResponse>(
+    &mut self,
+    prepared: &PreparedClientRequest,
+    deadline: Duration,
+  ) -> IpcClientResult<TResponse>
+  where
+    TResponse: DeserializeOwned,
+  {
+    let deadline = tokio::time::Instant::now() + deadline;
+    let writer = self
+      .writer
+      .as_mut()
+      .expect("usable Cadder session retains its writer");
+    write_prepared_request_until(writer, prepared, deadline).await?;
+    let reader = self
+      .reader
+      .as_mut()
+      .expect("usable Cadder session retains its reader");
+    let envelope = match tokio::time::timeout_at(
+      deadline,
+      read_client_envelope(reader, &prepared.context),
     )
-    .await?;
-    Ok(subscription)
+    .await
+    {
+      Ok(result) => result?,
+      Err(_) => {
+        return Err(response_timeout_error(
+          &prepared.context,
+          operation_retryable(&prepared.context.operation),
+        ));
+      }
+    };
+    decode_client_response(envelope, &prepared.context)
+  }
+
+  pub async fn subscribe_state(self, request_id: String) -> IpcClientResult<StateSubscription> {
+    let prepared = PreparedClientRequest::new(
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      message_types::STATE_CHANGED_EVENT,
+      &SubscribeStateRequest { request_id },
+    )?;
+    self.subscribe_prepared(prepared).await
+  }
+
+  async fn subscribe_prepared(
+    mut self,
+    prepared: PreparedClientRequest,
+  ) -> IpcClientResult<StateSubscription> {
+    let deadline = self.deadlines.response_for(&prepared.context.operation);
+    let deadline = tokio::time::Instant::now() + deadline;
+    let writer = self
+      .writer
+      .as_mut()
+      .expect("new Cadder session retains its writer");
+    write_prepared_request_until(writer, &prepared, deadline).await?;
+    Ok(StateSubscription {
+      reader: self.reader.take(),
+      writer: self.writer.take(),
+      context: prepared.context,
+      usable: true,
+    })
+  }
+}
+
+struct SessionExchangeGuard<'a> {
+  session: &'a mut CadderSession,
+  restored: bool,
+}
+
+impl<'a> SessionExchangeGuard<'a> {
+  fn new(session: &'a mut CadderSession) -> Self {
+    session.usable = false;
+    Self {
+      session,
+      restored: false,
+    }
+  }
+
+  fn restore(&mut self) {
+    self.session.usable = true;
+    self.restored = true;
+  }
+}
+
+impl Drop for SessionExchangeGuard<'_> {
+  fn drop(&mut self) {
+    if !self.restored {
+      self.session.retire();
+    }
   }
 }
 
 #[derive(Debug)]
 pub struct StateSubscription {
-  reader: BufReader<tokio::io::ReadHalf<Stream>>,
-  writer: tokio::io::WriteHalf<Stream>,
+  reader: Option<BufReader<tokio::io::ReadHalf<Stream>>>,
+  writer: Option<tokio::io::WriteHalf<Stream>>,
+  context: ClientRequestContext,
+  usable: bool,
 }
 
 impl StateSubscription {
-  pub async fn next_event(&mut self) -> Result<StateChangedEvent> {
-    let mut line = String::new();
-    self.reader.read_line(&mut line).await?;
-    if line.is_empty() {
-      return Err(
-        io::Error::new(
-          io::ErrorKind::UnexpectedEof,
-          "daemon closed the state subscription",
-        )
-        .into(),
-      );
+  pub async fn next_event(&mut self) -> IpcClientResult<StateChangedEvent> {
+    if !self.usable {
+      return Err(connection_no_longer_usable(&self.context));
     }
-    let envelope: IpcEnvelope = serde_json::from_str(line.trim_end())?;
-    if envelope.message_type == message_types::PROTOCOL_ERROR_RESPONSE {
-      let response: ProtocolErrorResponse = envelope.decode()?;
-      return Err(anyhow!(
-        "daemon rejected state subscription `{}`: {}",
-        response.request_id,
-        response.error
-      ));
+    let mut read = SubscriptionReadGuard::new(self);
+    let subscription = &mut *read.subscription;
+    let reader = subscription
+      .reader
+      .as_mut()
+      .expect("usable state subscription retains its reader");
+    let result = match read_client_envelope(reader, &subscription.context).await {
+      Ok(envelope) => decode_client_response(envelope, &subscription.context),
+      Err(error) => Err(error),
+    };
+    if result.is_ok() {
+      read.restore();
     }
-    if envelope.message_type != message_types::STATE_CHANGED_EVENT {
-      return Err(anyhow!(
-        "unexpected response type `{}`, expected `{}`",
-        envelope.message_type,
-        message_types::STATE_CHANGED_EVENT
-      ));
-    }
-    Ok(envelope.decode()?)
+    result
   }
+
+  fn retire(&mut self) {
+    self.usable = false;
+    self.reader.take();
+    self.writer.take();
+  }
+}
+
+struct SubscriptionReadGuard<'a> {
+  subscription: &'a mut StateSubscription,
+  restored: bool,
+}
+
+impl<'a> SubscriptionReadGuard<'a> {
+  fn new(subscription: &'a mut StateSubscription) -> Self {
+    subscription.usable = false;
+    Self {
+      subscription,
+      restored: false,
+    }
+  }
+
+  fn restore(&mut self) {
+    self.subscription.usable = true;
+    self.restored = true;
+  }
+}
+
+impl Drop for SubscriptionReadGuard<'_> {
+  fn drop(&mut self) {
+    if !self.restored {
+      self.subscription.retire();
+    }
+  }
+}
+
+#[derive(Debug)]
+struct PreparedClientRequest {
+  context: ClientRequestContext,
+  frame: Box<[u8]>,
+}
+
+#[derive(Debug)]
+struct ClientRequestContext {
+  operation: Box<str>,
+  expected_response: Box<str>,
+  request_id: RequestId,
+}
+
+impl PreparedClientRequest {
+  fn new<T>(operation: &str, response_type: &str, request: &T) -> IpcClientResult<Self>
+  where
+    T: LegacyCorrelatedRequest,
+  {
+    if operation != T::OPERATION {
+      return Err(IpcClientError::local(LocalIpcErrorContext {
+        kind: LocalIpcErrorKind::Transport,
+        phase: IpcClientPhase::RequestEncode,
+        code: LocalIpcErrorCode::InvalidRequest,
+        message: "Cadder rejected a request paired with the wrong operation before sending it."
+          .into(),
+        guidance: Some("Use the operation fixed by the request's protocol type.".into()),
+        retryable: false,
+        request_id: request.correlation_id().ok(),
+        operation: Some(operation.into()),
+        source: None,
+      }));
+    }
+    let request_id = request.correlation_id().map_err(|error| {
+      IpcClientError::local(LocalIpcErrorContext {
+        kind: LocalIpcErrorKind::Transport,
+        phase: IpcClientPhase::RequestEncode,
+        code: LocalIpcErrorCode::InvalidRequest,
+        message: "Cadder rejected an invalid local request before sending it.".into(),
+        guidance: Some("Correct the request ID and retry the operation.".into()),
+        retryable: false,
+        request_id: None,
+        operation: Some(operation.into()),
+        source: Some(Box::new(error)),
+      })
+    })?;
+    let context = ClientRequestContext {
+      operation: operation.into(),
+      expected_response: T::RESPONSE.into(),
+      request_id,
+    };
+    if response_type != context.expected_response.as_ref() {
+      return Err(response_contract_error(&context, response_type));
+    }
+    let envelope = IpcEnvelope::new(operation, request)
+      .map_err(|error| request_encoding_error(&context, error))?;
+    let mut frame =
+      serde_json::to_vec(&envelope).map_err(|error| request_encoding_error(&context, error))?;
+    frame.push(b'\n');
+    Ok(Self {
+      context,
+      frame: frame.into_boxed_slice(),
+    })
+  }
+}
+
+async fn write_prepared_request_until<W>(
+  writer: &mut W,
+  request: &PreparedClientRequest,
+  deadline: tokio::time::Instant,
+) -> IpcClientResult<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  match tokio::time::timeout_at(deadline, write_prepared_request(writer, request)).await {
+    Ok(result) => result,
+    Err(_) => Err(request_write_timeout_error(
+      &request.context,
+      operation_retryable(&request.context.operation),
+    )),
+  }
+}
+
+async fn write_prepared_request<W>(
+  writer: &mut W,
+  request: &PreparedClientRequest,
+) -> IpcClientResult<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  writer
+    .write_all(&request.frame)
+    .await
+    .map_err(|error| request_write_error(&request.context, error))?;
+  writer
+    .flush()
+    .await
+    .map_err(|error| request_write_error(&request.context, error))
+}
+
+async fn read_client_envelope<R>(
+  reader: &mut R,
+  request: &ClientRequestContext,
+) -> IpcClientResult<IpcEnvelope>
+where
+  R: tokio::io::AsyncBufRead + Unpin,
+{
+  let mut line = String::new();
+  reader
+    .read_line(&mut line)
+    .await
+    .map_err(|error| response_read_error(request, error))?;
+  if line.is_empty() {
+    return Err(response_eof_error(request));
+  }
+  serde_json::from_str(line.trim_end()).map_err(|error| response_decode_error(request, error))
+}
+
+fn decode_client_response<T>(
+  envelope: IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<T>
+where
+  T: DeserializeOwned,
+{
+  validate_client_response_version(&envelope, request)?;
+  if envelope.message_type == message_types::PROTOCOL_ERROR_RESPONSE {
+    validate_response_correlation(&envelope, request)?;
+    validate_nested_protocol_error_correlation(&envelope, request)?;
+    let response: ProtocolErrorResponse = decode_client_payload(envelope, request)?;
+    return Err(IpcClientError::daemon(response.error));
+  }
+  if envelope.message_type != request.expected_response.as_ref() {
+    return Err(response_validation_error(
+      request,
+      format!(
+        "The daemon returned `{}` instead of `{}`; the operation outcome is unknown.",
+        envelope.message_type, request.expected_response
+      ),
+    ));
+  }
+  validate_response_correlation(&envelope, request)?;
+  decode_client_payload(envelope, request)
+}
+
+fn validate_nested_protocol_error_correlation(
+  envelope: &IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<()> {
+  let Some(raw_request_id) = envelope
+    .payload
+    .get("error")
+    .and_then(|error| error.get("requestId"))
+  else {
+    return Ok(());
+  };
+  if raw_request_id.is_null() {
+    return Ok(());
+  }
+  let Some(raw_request_id) = raw_request_id.as_str() else {
+    return Err(response_validation_error(
+      request,
+      "The daemon error contained a non-string request ID; the operation outcome is unknown.",
+    ));
+  };
+  let nested_request_id = RequestId::parse(raw_request_id).map_err(|error| {
+    response_validation_error(
+      request,
+      "The daemon error contained an invalid request ID; the operation outcome is unknown.",
+    )
+    .with_source(Box::new(error))
+  })?;
+  if nested_request_id == request.request_id {
+    Ok(())
+  } else {
+    Err(response_validation_error(
+      request,
+      "The daemon response and nested error belong to different requests; the operation outcome is unknown.",
+    ))
+  }
+}
+
+fn decode_client_payload<T>(
+  envelope: IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<T>
+where
+  T: DeserializeOwned,
+{
+  serde_json::from_value(envelope.payload).map_err(|error| response_decode_error(request, error))
+}
+
+fn validate_client_response_version(
+  envelope: &IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<()> {
+  ensure_compatible_protocol_version(envelope.protocol_version).map_err(|error| {
+    IpcClientError::local(LocalIpcErrorContext {
+      kind: LocalIpcErrorKind::Transport,
+      phase: IpcClientPhase::ResponseValidate,
+      code: LocalIpcErrorCode::IncompatibleProtocol,
+      message: "The daemon response uses an incompatible protocol version; the operation outcome is unknown."
+        .into(),
+      guidance: error.guidance.clone(),
+      retryable: false,
+      request_id: Some(request.request_id.clone()),
+      operation: Some(request.operation.clone()),
+      source: Some(Box::new(error)),
+    })
+  })
+}
+
+fn validate_response_correlation(
+  envelope: &IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<()> {
+  let Some(raw_request_id) = envelope
+    .payload
+    .get("requestId")
+    .and_then(|value| value.as_str())
+  else {
+    return Err(response_validation_error(
+      request,
+      "The daemon response did not contain a request ID; the operation outcome is unknown.",
+    ));
+  };
+  let response_request_id = RequestId::parse(raw_request_id).map_err(|error| {
+    response_validation_error(
+      request,
+      "The daemon response contained an invalid request ID; the operation outcome is unknown.",
+    )
+    .with_source(Box::new(error))
+  })?;
+  if response_request_id == request.request_id {
+    Ok(())
+  } else {
+    Err(response_validation_error(
+      request,
+      "The daemon response belongs to a different request; the operation outcome is unknown.",
+    ))
+  }
+}
+
+fn endpoint_resolution_error(error: io::Error) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::EndpointResolve,
+    code: LocalIpcErrorCode::InvalidEndpoint,
+    message: "Cadder could not resolve the local daemon endpoint; no request was sent.".into(),
+    guidance: Some("Select a valid Cadder runtime directory, then retry.".into()),
+    retryable: false,
+    request_id: None,
+    operation: None,
+    source: Some(Box::new(error)),
+  })
+}
+
+fn connection_error(error: io::Error) -> IpcClientError {
+  let (kind, code, message, guidance, retryable) = match error.kind() {
+    io::ErrorKind::PermissionDenied => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::PermissionDenied,
+      "Cadder cannot access the selected daemon endpoint; no request was sent.",
+      "Use the account that owns this Cadder runtime or select an accessible profile.",
+      false,
+    ),
+    io::ErrorKind::TimedOut => (
+      LocalIpcErrorKind::Timeout,
+      LocalIpcErrorCode::Timeout,
+      "The Cadder daemon connection did not complete before the local deadline; no request was sent.",
+      "Check the daemon status, then retry once it is ready.",
+      true,
+    ),
+    kind if daemon_not_ready_error(kind) => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::DaemonUnavailable,
+      "The Cadder daemon is unavailable; no request was sent.",
+      "Start the Cadder daemon for this runtime, then retry.",
+      true,
+    ),
+    _ => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::TransportConnect,
+      "Cadder could not connect to the selected daemon endpoint; no request was sent.",
+      "Inspect the local IPC endpoint and runtime diagnostics before retrying.",
+      false,
+    ),
+  };
+  IpcClientError::local(LocalIpcErrorContext {
+    kind,
+    phase: IpcClientPhase::Connect,
+    code,
+    message: message.into(),
+    guidance: Some(guidance.into()),
+    retryable,
+    request_id: None,
+    operation: None,
+    source: Some(Box::new(error)),
+  })
+}
+
+fn daemon_not_ready_error(kind: io::ErrorKind) -> bool {
+  matches!(
+    kind,
+    io::ErrorKind::NotFound
+      | io::ErrorKind::ConnectionRefused
+      | io::ErrorKind::ConnectionReset
+      | io::ErrorKind::ConnectionAborted
+      | io::ErrorKind::NotConnected
+      | io::ErrorKind::AddrNotAvailable
+  )
+}
+
+fn request_encoding_error(
+  request: &ClientRequestContext,
+  error: serde_json::Error,
+) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::RequestEncode,
+    code: LocalIpcErrorCode::Frame,
+    message: "Cadder could not encode the local request; nothing was sent.".into(),
+    guidance: Some("Report this Cadder client serialization error.".into()),
+    retryable: false,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn response_contract_error(request: &ClientRequestContext, response_type: &str) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::RequestEncode,
+    code: LocalIpcErrorCode::InvalidRequest,
+    message: format!(
+      "Cadder rejected `{response_type}` as the response contract for `{}` before sending the request.",
+      request.operation
+    )
+    .into_boxed_str(),
+    guidance: Some(
+      format!(
+        "Use the `{}` response fixed by the request's protocol type.",
+        request.expected_response
+      )
+      .into_boxed_str(),
+    ),
+    retryable: false,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: None,
+  })
+}
+
+fn request_write_error(request: &ClientRequestContext, error: io::Error) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::RequestWrite,
+    code: LocalIpcErrorCode::TransportWrite,
+    message: "Cadder lost the daemon connection while sending the request; the operation outcome is unknown."
+      .into(),
+    guidance: Some("Check the current daemon state before retrying the operation.".into()),
+    retryable: operation_retryable(&request.operation),
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn response_read_error(request: &ClientRequestContext, error: io::Error) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::ResponseRead,
+    code: LocalIpcErrorCode::TransportRead,
+    message: "Cadder lost the daemon connection before receiving a complete response; the operation outcome is unknown."
+      .into(),
+    guidance: Some("Check the current daemon state before retrying the operation.".into()),
+    retryable: operation_retryable(&request.operation),
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn response_eof_error(request: &ClientRequestContext) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::ResponseRead,
+    code: LocalIpcErrorCode::UnexpectedEof,
+    message: "The daemon closed the connection before returning a response; the operation outcome is unknown."
+      .into(),
+    guidance: Some("Check the current daemon state before retrying the operation.".into()),
+    retryable: operation_retryable(&request.operation),
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(io::Error::new(
+      io::ErrorKind::UnexpectedEof,
+      "daemon closed the IPC connection before returning a response",
+    ))),
+  })
+}
+
+fn response_decode_error(
+  request: &ClientRequestContext,
+  error: serde_json::Error,
+) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::ResponseDecode,
+    code: LocalIpcErrorCode::Frame,
+    message: "Cadder could not decode the daemon response; the operation outcome is unknown."
+      .into(),
+    guidance: Some(
+      "Verify that the Cadder client and daemon versions are compatible, then inspect daemon diagnostics."
+        .into(),
+    ),
+    retryable: false,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn response_validation_error(
+  request: &ClientRequestContext,
+  message: impl Into<Box<str>>,
+) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::ResponseValidate,
+    code: LocalIpcErrorCode::ProtocolViolation,
+    message: message.into(),
+    guidance: Some(
+      "Verify that the Cadder client and daemon versions are compatible, then inspect daemon diagnostics."
+        .into(),
+    ),
+    retryable: false,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: None,
+  })
+}
+
+fn request_write_timeout_error(request: &ClientRequestContext, retryable: bool) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Timeout,
+    phase: IpcClientPhase::RequestWrite,
+    code: LocalIpcErrorCode::Timeout,
+    message: "Cadder could not send the complete request before the local deadline; the operation outcome is unknown."
+      .into(),
+    guidance: Some("Check the current daemon state before retrying the operation.".into()),
+    retryable,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: None,
+  })
+}
+
+fn response_timeout_error(request: &ClientRequestContext, retryable: bool) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Timeout,
+    phase: IpcClientPhase::ResponseRead,
+    code: LocalIpcErrorCode::Timeout,
+    message: "The daemon did not return a complete response before the local deadline; the operation outcome is unknown."
+      .into(),
+    guidance: Some("Check the current daemon state before retrying the operation.".into()),
+    retryable,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: None,
+  })
+}
+
+fn connection_no_longer_usable(request: &ClientRequestContext) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::Connect,
+    code: LocalIpcErrorCode::ConnectionClosed,
+    message: "This Cadder client session is closed; no new request was sent.".into(),
+    guidance: Some("Open a new Cadder client session, then retry if the operation is safe.".into()),
+    retryable: true,
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: None,
+  })
+}
+
+fn operation_retryable(operation: &str) -> bool {
+  OPERATION_REGISTRY
+    .lookup(operation)
+    .is_some_and(|definition| definition.timeout_retryable())
+}
+
+fn daemon_launch_error(
+  code: LocalIpcErrorCode,
+  message: &'static str,
+  guidance: &'static str,
+  source: Option<crate::ipc_client_error::BoxError>,
+) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::DaemonLaunch,
+    code,
+    message: message.into(),
+    guidance: Some(guidance.into()),
+    retryable: false,
+    request_id: None,
+    operation: Some("start-daemon".into()),
+    source,
+  })
+}
+
+fn daemon_readiness_timeout(message: &'static str) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Timeout,
+    phase: IpcClientPhase::DaemonReadiness,
+    code: LocalIpcErrorCode::Timeout,
+    message: message.into(),
+    guidance: Some(
+      "Run cadderd in foreground diagnostic mode, correct any startup error, then retry.".into(),
+    ),
+    retryable: true,
+    request_id: None,
+    operation: Some("start-daemon".into()),
+    source: None,
+  })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -676,7 +1412,7 @@ fn start_new_unix_session() -> io::Result<()> {
 pub async fn ensure_daemon_running(
   paths: &RuntimePaths,
   explicit_daemon: Option<PathBuf>,
-) -> Result<()> {
+) -> IpcClientResult<()> {
   ensure_daemon_running_with_options(
     paths,
     DaemonLaunchOptions {
@@ -690,8 +1426,8 @@ pub async fn ensure_daemon_running(
 pub async fn ensure_daemon_running_with_options(
   paths: &RuntimePaths,
   options: DaemonLaunchOptions,
-) -> Result<()> {
-  if can_connect(paths).await {
+) -> IpcClientResult<()> {
+  if daemon_is_ready(paths).await? {
     return Ok(());
   }
 
@@ -699,7 +1435,7 @@ pub async fn ensure_daemon_running_with_options(
     return Ok(());
   };
 
-  if can_connect(paths).await {
+  if daemon_is_ready(paths).await? {
     return Ok(());
   }
 
@@ -707,15 +1443,33 @@ pub async fn ensure_daemon_running_with_options(
     .explicit_daemon
     .or_else(|| sibling_binary("cadderd"))
     .or_else(|| find_on_path("cadderd"))
-    .ok_or_else(|| anyhow!("could not find `cadderd`; pass --daemon-path or add it to PATH"))?;
+    .ok_or_else(|| {
+      daemon_launch_error(
+        LocalIpcErrorCode::DaemonNotFound,
+        "Cadder could not find the daemon executable; no daemon was started.",
+        "Install Cadder or provide a trusted cadderd path, then retry.",
+        None,
+      )
+    })?;
 
   let process_config = DaemonProcessConfig::for_launch_mode(options.launch_mode);
   let caddy_backend = options
     .caddy_backend
-    .map_or_else(CaddyBackendMode::from_env, Ok)?;
+    .map_or_else(CaddyBackendMode::from_env, Ok)
+    .map_err(|error| {
+      daemon_launch_error(
+        LocalIpcErrorCode::InvalidInput,
+        "Cadder rejected the daemon launch configuration; no daemon was started.",
+        "Correct the daemon launch options, then retry.",
+        Some(error.into_boxed_dyn_error()),
+      )
+    })?;
   if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_command.is_some() {
-    return Err(anyhow!(
-      "--real-caddy-command cannot be combined with --caddy-backend mock"
+    return Err(daemon_launch_error(
+      LocalIpcErrorCode::InvalidInput,
+      "Cadder rejected incompatible daemon launch options; no daemon was started.",
+      "Remove either the real-Caddy command or the mock backend option, then retry.",
+      None,
     ));
   }
   let daemon_dir = daemon.parent().map(PathBuf::from);
@@ -740,61 +1494,114 @@ pub async fn ensure_daemon_running_with_options(
     command.env("CADDER_CADDY_SHIM_PATH", shim_path);
   }
   command.env("CADDER_RUNTIME_DIR", paths.runtime_dir());
-  let mut child = command.spawn().context("start cadderd")?;
+  let mut child = command.spawn().map_err(|error| {
+    let code = launch_code_for_io(error.kind());
+    daemon_launch_error(
+      code,
+      "Cadder could not start the daemon; no request was sent.",
+      "Check the daemon executable and runtime permissions, then retry.",
+      Some(Box::new(error)),
+    )
+  })?;
 
   wait_for_daemon_ready(paths, &mut child).await
 }
 
 async fn acquire_launch_lock_or_wait_for_ready(
   paths: &RuntimePaths,
-) -> Result<Option<DaemonLaunchLock>> {
-  for _ in 0..DAEMON_READY_ATTEMPTS {
-    if can_connect(paths).await {
+) -> IpcClientResult<Option<DaemonLaunchLock>> {
+  acquire_launch_lock_or_wait_for_ready_with_policy(
+    paths,
+    DAEMON_READY_ATTEMPTS,
+    DAEMON_READY_POLL_INTERVAL,
+  )
+  .await
+}
+
+async fn acquire_launch_lock_or_wait_for_ready_with_policy(
+  paths: &RuntimePaths,
+  attempts: usize,
+  poll_interval: Duration,
+) -> IpcClientResult<Option<DaemonLaunchLock>> {
+  for _ in 0..attempts {
+    if daemon_is_ready(paths).await? {
       return Ok(None);
     }
-    if let Some(lock) = DaemonLaunchLock::try_acquire(paths)? {
+    if let Some(lock) = DaemonLaunchLock::try_acquire(paths).map_err(|error| {
+      let code = if error.chain().any(|cause| {
+        cause
+          .downcast_ref::<io::Error>()
+          .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+      }) {
+        LocalIpcErrorCode::PermissionDenied
+      } else {
+        LocalIpcErrorCode::DaemonStartFailed
+      };
+      daemon_launch_error(
+        code,
+        "Cadder could not coordinate daemon startup; no daemon was started.",
+        "Check runtime-directory permissions and retry.",
+        Some(error.into_boxed_dyn_error()),
+      )
+    })? {
       return Ok(Some(lock));
     }
-    sleep(DAEMON_READY_POLL_INTERVAL).await;
+    sleep(poll_interval).await;
   }
 
-  if can_connect(paths).await {
+  if daemon_is_ready(paths).await? {
     return Ok(None);
   }
 
-  Err(anyhow!(
-    "another cadderd launch still holds {} but no healthy daemon socket became available for runtime {}; wait for that launch to finish, then retry `cadder daemon start --runtime-dir \"{}\"`",
-    paths.runtime_dir().join("cadder-launch.lock").display(),
-    paths.runtime_dir().display(),
-    paths.runtime_dir().display()
+  Err(daemon_readiness_timeout(
+    "Another Cadder daemon launch did not become ready before the local deadline; no request was sent.",
   ))
 }
 
 async fn wait_for_daemon_ready(
   paths: &RuntimePaths,
   child: &mut tokio::process::Child,
-) -> Result<()> {
+) -> IpcClientResult<()> {
   for _ in 0..DAEMON_READY_ATTEMPTS {
-    if can_connect(paths).await {
+    if daemon_is_ready(paths).await? {
       return Ok(());
     }
-    if let Some(status) = child.try_wait().context("inspect cadderd launch process")? {
-      return Err(anyhow!(
-        "cadderd exited before opening IPC for runtime {}; exit status: {status}",
-        paths.runtime_dir().display()
+    if let Some(status) = child.try_wait().map_err(|error| {
+      let code = launch_code_for_io(error.kind());
+      daemon_launch_error(
+        code,
+        "Cadder could not inspect the daemon launch; no request was sent.",
+        "Check the daemon process and runtime permissions, then retry.",
+        Some(Box::new(error)),
+      )
+    })? {
+      return Err(daemon_launch_error(
+        LocalIpcErrorCode::DaemonStartFailed,
+        "The Cadder daemon exited before it became ready; no request was sent.",
+        "Run cadderd in foreground diagnostic mode, correct the reported startup error, then retry.",
+        Some(Box::new(io::Error::other(format!(
+          "cadderd exited with status {status}"
+        )))),
       ));
     }
     sleep(DAEMON_READY_POLL_INTERVAL).await;
   }
 
-  Err(anyhow!(
-    "cadderd did not become ready within 30 seconds for runtime {}; the launch process is still running or left stale runtime residue",
-    paths.runtime_dir().display()
+  Err(daemon_readiness_timeout(
+    "The Cadder daemon did not become ready before the local deadline; no request was sent.",
   ))
 }
 
-pub(crate) async fn is_daemon_ready(paths: &RuntimePaths) -> bool {
-  can_connect(paths).await
+fn launch_code_for_io(kind: io::ErrorKind) -> LocalIpcErrorCode {
+  if kind == io::ErrorKind::PermissionDenied {
+    LocalIpcErrorCode::PermissionDenied
+  } else {
+    LocalIpcErrorCode::DaemonStartFailed
+  }
+}
+
+pub(crate) async fn is_daemon_ready(paths: &RuntimePaths) -> IpcClientResult<bool> {
+  daemon_is_ready(paths).await
 }
 
 #[derive(Debug)]
@@ -827,11 +1634,19 @@ impl DaemonLaunchLock {
   }
 }
 
-async fn can_connect(paths: &RuntimePaths) -> bool {
-  let Ok(name) = paths.socket_name().to_ns_name::<GenericNamespaced>() else {
-    return false;
-  };
-  Stream::connect(name).await.is_ok()
+async fn daemon_is_ready(paths: &RuntimePaths) -> IpcClientResult<bool> {
+  let name = paths
+    .socket_name()
+    .to_ns_name::<GenericNamespaced>()
+    .map_err(endpoint_resolution_error)?;
+  match timeout(IpcClientDeadlines::default().connect, Stream::connect(name)).await {
+    Ok(Ok(_)) => Ok(true),
+    Ok(Err(error)) if daemon_not_ready_error(error.kind()) => Ok(false),
+    Ok(Err(error)) => Err(connection_error(error)),
+    Err(_) => Err(daemon_readiness_timeout(
+      "Cadder could not finish probing daemon readiness before the local deadline; no daemon was started.",
+    )),
+  }
 }
 
 fn sibling_binary(name: &str) -> Option<PathBuf> {
@@ -884,14 +1699,14 @@ mod tests {
     logs::LogQuery,
   };
   use cadder_protocol::{
-    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorKind,
-    ProtocolErrorResponse, QueryIisBindingsRequest, QueryIisBindingsResponse, QueryStateRequest,
-    QueryStateResponse, message_types, new_request_id,
+    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorCode,
+    ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest, QueryIisBindingsResponse,
+    QueryStateRequest, message_types, new_request_id,
   };
-  use std::{env, ffi::OsString, fs, future::Future};
+  use std::{env, ffi::OsString, fs, future::Future, future::pending};
   use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::watch,
+    sync::{oneshot, watch},
     task::JoinHandle,
     time::{Duration, sleep, timeout},
   };
@@ -993,64 +1808,404 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn cadder_session_request_reports_eof_without_response() {
-    let server = ScriptedIpcServer::start(|conn| async move {
-      let (read_half, write_half) = tokio::io::split(conn);
-      let mut reader = BufReader::new(read_half);
-      let mut line = String::new();
-      reader.read_line(&mut line).await.unwrap();
-      drop(write_half);
-    });
-    let mut session = CadderSession::connect(&server.paths).await.unwrap();
-
-    let error = session
-      .request::<_, QueryStateResponse>(
-        message_types::QUERY_STATE_REQUEST,
-        message_types::QUERY_STATE_RESPONSE,
-        &QueryStateRequest {
-          request_id: new_request_id("test-query-state"),
-        },
-      )
-      .await
-      .unwrap_err();
-
-    assert!(
-      error.to_string().contains("without a response"),
-      "{error:?}"
-    );
-    server.finish().await;
-  }
-
-  #[tokio::test]
-  async fn cadder_session_request_rejects_unexpected_response_type() {
+  async fn typed_error_session_preserves_daemon_error_fields() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
-      write_basic_response(&mut writer, message_types::QUERY_LOGS_RESPONSE).await;
+      write_protocol_error(
+        &mut writer,
+        "typed-session-1",
+        ProtocolError::new(
+          ProtocolErrorKind::Conflict,
+          ProtocolErrorCode::parse("registration_conflict").unwrap(),
+          "The registration conflicts with an active owner.",
+          Some("Refresh registration state before retrying.".into()),
+          false,
+        ),
+      )
+      .await;
     });
     let mut session = CadderSession::connect(&server.paths).await.unwrap();
 
     let error = session
-      .request::<_, QueryStateResponse>(
+      .request::<_>(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
-          request_id: new_request_id("test-query-state"),
+          request_id: "typed-session-1".to_string(),
         },
       )
       .await
       .unwrap_err();
 
-    assert!(
-      error
-        .to_string()
-        .contains("unexpected response type `query-logs-response`"),
-      "{error:?}"
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Conflict,
+      "registration_conflict",
+      "typed-session-1",
+      "The registration conflicts with an active owner.",
+      Some("Refresh registration state before retrying."),
+      false,
     );
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn cadder_session_request_rejects_malformed_response_json() {
+  async fn typed_error_client_preserves_daemon_error_fields() {
+    let expected = ProtocolError::access_denied(
+      message_types::QUERY_STATE_REQUEST,
+      "The runtime belongs to another account.",
+      Some("Use the account that owns this runtime.".to_string()),
+    )
+    .with_request_id(RequestId::parse("typed-client-1").unwrap());
+    let wire_error = expected.clone();
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_protocol_error(&mut writer, "typed-client-1", wire_error).await;
+    });
+    let client = CadderClient::new(server.paths.clone());
+
+    let error = client
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-client-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::AccessDenied,
+      "permission_denied",
+      "typed-client-1",
+      "The runtime belongs to another account.",
+      Some("Use the account that owns this runtime."),
+      false,
+    );
+    assert_eq!(error.daemon_error(), Some(&expected));
+    assert_eq!(
+      error
+        .daemon_error()
+        .and_then(|error| error.denied_operation.as_deref()),
+      Some(message_types::QUERY_STATE_REQUEST)
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_subscription_preserves_daemon_error_fields() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_protocol_error(
+        &mut writer,
+        "typed-subscription-1",
+        ProtocolError::new(
+          ProtocolErrorKind::ShuttingDown,
+          ProtocolErrorCode::parse("shutting_down").unwrap(),
+          "The daemon is shutting down.",
+          Some("Start the daemon again, then retry.".into()),
+          true,
+        ),
+      )
+      .await;
+    });
+    let session = CadderSession::connect(&server.paths).await.unwrap();
+    let mut subscription = session
+      .subscribe_state("typed-subscription-1".to_string())
+      .await
+      .unwrap();
+
+    let error = subscription.next_event().await.unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::ShuttingDown,
+      "shutting_down",
+      "typed-subscription-1",
+      "The daemon is shutting down.",
+      Some("Start the daemon again, then retry."),
+      true,
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_session_connect_is_uncorrelated_transport_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+
+    let error = CadderSession::connect(&paths).await.unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "daemon_unavailable",
+      None,
+    );
+  }
+
+  #[test]
+  fn typed_error_connect_classification_distinguishes_unavailable_permission_and_transport() {
+    let cases = [
+      (
+        io::ErrorKind::NotFound,
+        LocalIpcErrorKind::Transport,
+        LocalIpcErrorCode::DaemonUnavailable,
+        true,
+      ),
+      (
+        io::ErrorKind::PermissionDenied,
+        LocalIpcErrorKind::Transport,
+        LocalIpcErrorCode::PermissionDenied,
+        false,
+      ),
+      (
+        io::ErrorKind::InvalidData,
+        LocalIpcErrorKind::Transport,
+        LocalIpcErrorCode::TransportConnect,
+        false,
+      ),
+      (
+        io::ErrorKind::TimedOut,
+        LocalIpcErrorKind::Timeout,
+        LocalIpcErrorCode::Timeout,
+        true,
+      ),
+    ];
+
+    for (kind, expected_kind, code, retryable) in cases {
+      let error = connection_error(io::Error::new(kind, "test connection failure"));
+      let local = error.local_error().expect("expected a local connect error");
+      assert_eq!(local.kind(), expected_kind);
+      assert_eq!(local.phase(), IpcClientPhase::Connect);
+      assert_eq!(local.code(), code);
+      assert_eq!(local.retryable(), retryable);
+      assert!(std::error::Error::source(local).is_some());
+    }
+
+    assert_eq!(
+      launch_code_for_io(io::ErrorKind::PermissionDenied),
+      LocalIpcErrorCode::PermissionDenied
+    );
+    assert_eq!(
+      launch_code_for_io(io::ErrorKind::NotFound),
+      LocalIpcErrorCode::DaemonStartFailed
+    );
+  }
+
+  #[tokio::test]
+  async fn typed_error_client_connect_failure_keeps_request_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let client = CadderClient::new(paths);
+
+    let error = client
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-connect-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "daemon_unavailable",
+      Some("typed-connect-1"),
+    );
+  }
+
+  #[tokio::test]
+  async fn typed_error_client_subscription_connect_failure_keeps_request_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let client = CadderClient::new(paths);
+
+    let error = client
+      .subscribe_state("typed-connect-subscription-1".to_string())
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "daemon_unavailable",
+      Some("typed-connect-subscription-1"),
+    );
+  }
+
+  #[tokio::test]
+  async fn typed_error_request_write_io_failure_keeps_context_and_source() {
+    let prepared = PreparedClientRequest::new(
+      message_types::QUERY_STATE_REQUEST,
+      message_types::QUERY_STATE_RESPONSE,
+      &QueryStateRequest {
+        request_id: "typed-write-io-1".to_string(),
+      },
+    )
+    .unwrap();
+    let (mut writer, peer) = tokio::io::duplex(64);
+    drop(peer);
+
+    let error = write_prepared_request(&mut writer, &prepared)
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::RequestWrite,
+      "transport_write",
+      Some("typed-write-io-1"),
+    );
+    assert_eq!(error.operation(), Some(message_types::QUERY_STATE_REQUEST));
+    assert!(error.retryable());
+    let source = std::error::Error::source(
+      error
+        .local_error()
+        .expect("write failure should be a local IPC error"),
+    )
+    .and_then(|source| source.downcast_ref::<io::Error>())
+    .expect("write failure should retain its I/O source");
+    assert_eq!(source.kind(), io::ErrorKind::BrokenPipe);
+  }
+
+  #[tokio::test]
+  async fn typed_error_request_write_timeout_has_request_write_phase() {
+    let prepared = PreparedClientRequest::new(
+      message_types::QUERY_STATE_REQUEST,
+      message_types::QUERY_STATE_RESPONSE,
+      &QueryStateRequest {
+        request_id: "typed-write-timeout-1".to_string(),
+      },
+    )
+    .unwrap();
+    let (mut writer, _peer) = tokio::io::duplex(1);
+
+    let error = write_prepared_request_until(
+      &mut writer,
+      &prepared,
+      tokio::time::Instant::now() + Duration::from_millis(25),
+    )
+    .await
+    .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Timeout,
+      IpcClientPhase::RequestWrite,
+      "timeout",
+      Some("typed-write-timeout-1"),
+    );
+    assert_eq!(error.operation(), Some(message_types::QUERY_STATE_REQUEST));
+    assert!(error.retryable());
+  }
+
+  #[test]
+  fn typed_error_response_read_io_failure_keeps_context_and_source() {
+    let prepared = PreparedClientRequest::new(
+      message_types::QUERY_STATE_REQUEST,
+      message_types::QUERY_STATE_RESPONSE,
+      &QueryStateRequest {
+        request_id: "typed-read-io-1".to_string(),
+      },
+    )
+    .unwrap();
+
+    let error = response_read_error(
+      &prepared.context,
+      io::Error::new(io::ErrorKind::ConnectionReset, "test read reset"),
+    );
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseRead,
+      "transport_read",
+      Some("typed-read-io-1"),
+    );
+    assert!(error.retryable());
+    assert!(
+      std::error::Error::source(
+        error
+          .local_error()
+          .expect("read failure should be a local IPC error")
+      )
+      .is_some_and(|source| source.downcast_ref::<io::Error>().is_some())
+    );
+  }
+
+  #[tokio::test]
+  async fn typed_error_request_timeout_is_local_and_correlated() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, _writer) = read_one_request(conn).await;
+      pending::<()>().await;
+    });
+    let client = CadderClient::new(server.paths.clone()).with_deadlines(short_client_deadlines());
+
+    let error = client
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-timeout-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Timeout,
+      IpcClientPhase::ResponseRead,
+      "timeout",
+      Some("typed-timeout-1"),
+    );
+    assert!(error.retryable());
+    server.abort().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_mutation_timeout_is_not_retryable() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, _writer) = read_one_request(conn).await;
+      pending::<()>().await;
+    });
+    let client = CadderClient::new(server.paths.clone()).with_deadlines(short_client_deadlines());
+
+    let error = client
+      .request::<_>(
+        message_types::SET_AUTOSTART_REQUEST,
+        message_types::SET_AUTOSTART_RESPONSE,
+        &SetAutostartRequest {
+          request_id: "typed-mutation-timeout-1".to_string(),
+          mode: AutostartMode::Daemon,
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Timeout,
+      IpcClientPhase::ResponseRead,
+      "timeout",
+      Some("typed-mutation-timeout-1"),
+    );
+    assert!(!error.retryable());
+    server.abort().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_closed_session_marks_unsent_mutation_retryable() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       writer.write_all(b"{not-json}\n").await.unwrap();
@@ -1058,32 +2213,354 @@ mod tests {
     });
     let mut session = CadderSession::connect(&server.paths).await.unwrap();
 
-    let error = session
-      .request::<_, QueryStateResponse>(
+    let first_error = session
+      .request::<_>(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
-          request_id: new_request_id("test-query-state"),
+          request_id: "typed-poison-session-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &first_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseDecode,
+      "frame",
+      Some("typed-poison-session-1"),
+    );
+
+    let retry_error = session
+      .request::<_>(
+        message_types::SET_AUTOSTART_REQUEST,
+        message_types::SET_AUTOSTART_RESPONSE,
+        &SetAutostartRequest {
+          request_id: "typed-unsent-mutation-1".to_string(),
+          mode: AutostartMode::Daemon,
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &retry_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some("typed-unsent-mutation-1"),
+    );
+    assert!(retry_error.retryable());
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_daemon_timeout_remains_remote() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_protocol_error(
+        &mut writer,
+        "typed-remote-timeout-1",
+        ProtocolError::new(
+          ProtocolErrorKind::Timeout,
+          ProtocolErrorCode::parse("timeout").unwrap(),
+          "The daemon operation exceeded its deadline.",
+          Some("Check current state before retrying.".into()),
+          false,
+        ),
+      )
+      .await;
+    });
+    let client = CadderClient::new(server.paths.clone());
+
+    let error = client
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-remote-timeout-1".to_string(),
         },
       )
       .await
       .unwrap_err();
 
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Timeout,
+      "timeout",
+      "typed-remote-timeout-1",
+      "The daemon operation exceeded its deadline.",
+      Some("Check current state before retrying."),
+      false,
+    );
+    server.finish().await;
+  }
+
+  #[test]
+  fn typed_error_missing_and_malformed_discovery_are_distinct() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+
+    let missing = discover_ipc_endpoint(&paths).unwrap_err();
+    assert_local_error(
+      &missing,
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryRead,
+      "discovery_unavailable",
+      None,
+    );
+
+    let missing_source = std::error::Error::source(
+      missing
+        .local_error()
+        .expect("missing discovery should be a local error"),
+    )
+    .and_then(|source| source.downcast_ref::<io::Error>())
+    .expect("missing discovery should retain its I/O source");
+    assert_eq!(missing_source.kind(), io::ErrorKind::NotFound);
+
+    paths.ensure_dirs().unwrap();
+    fs::write(paths.ipc_endpoint_path(), b"{not-json}").unwrap();
+    let malformed = discover_ipc_endpoint(&paths).unwrap_err();
+    assert_local_error(
+      &malformed,
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryDecode,
+      "invalid_discovery",
+      None,
+    );
+    let malformed_source = std::error::Error::source(
+      malformed
+        .local_error()
+        .expect("malformed discovery should be a local error"),
+    )
+    .expect("malformed discovery should retain its decode source");
     assert!(
-      error.to_string().contains("key must be a string"),
-      "{error:?}"
+      malformed_source
+        .downcast_ref::<serde_json::Error>()
+        .is_some()
+    );
+
+    fs::write(paths.ipc_endpoint_path(), [0xff]).unwrap();
+    let invalid_utf8 = discover_ipc_endpoint(&paths).unwrap_err();
+    assert_local_error(
+      &invalid_utf8,
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryDecode,
+      "invalid_discovery",
+      None,
+    );
+    let invalid_utf8_source = std::error::Error::source(
+      invalid_utf8
+        .local_error()
+        .expect("invalid UTF-8 discovery should be a local error"),
+    )
+    .expect("invalid UTF-8 discovery should retain its decode source");
+    assert!(
+      invalid_utf8_source
+        .downcast_ref::<serde_json::Error>()
+        .is_some()
+    );
+  }
+
+  #[tokio::test]
+  async fn typed_error_legacy_adapter_defaults_fields_and_preserves_outer_correlation() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      let envelope = serde_json::json!({
+        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "type": message_types::PROTOCOL_ERROR_RESPONSE,
+        "payload": {
+          "requestId": "typed-legacy-1",
+          "accepted": false,
+          "error": {
+            "kind": "conflict",
+            "message": "Legacy conflict."
+          }
+        }
+      });
+      writer
+        .write_all(format!("{envelope}\n").as_bytes())
+        .await
+        .unwrap();
+      writer.flush().await.unwrap();
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-legacy-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Conflict,
+      "conflict",
+      "typed-legacy-1",
+      "Legacy conflict.",
+      None,
+      false,
     );
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn cadder_session_request_rejects_response_payload_shape() {
+  async fn typed_error_rejects_daemon_error_for_another_request() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_protocol_error(
+        &mut writer,
+        "typed-other-1",
+        ProtocolError::new(
+          ProtocolErrorKind::Conflict,
+          ProtocolErrorCode::parse("conflict").unwrap(),
+          "Other request failed.",
+          None,
+          false,
+        ),
+      )
+      .await;
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-original-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some("typed-original-1"),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_rejects_mismatched_nested_daemon_error_correlation() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      let envelope = serde_json::json!({
+        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "type": message_types::PROTOCOL_ERROR_RESPONSE,
+        "payload": {
+          "requestId": "typed-nested-original-1",
+          "accepted": false,
+          "error": {
+            "kind": "conflict",
+            "code": "conflict",
+            "message": "Another request failed.",
+            "guidance": null,
+            "retryable": false,
+            "requestId": "typed-nested-other-1"
+          }
+        }
+      });
+      writer
+        .write_all(format!("{envelope}\n").as_bytes())
+        .await
+        .unwrap();
+      writer.flush().await.unwrap();
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-nested-original-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some("typed-nested-original-1"),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_accepts_null_nested_request_id_as_legacy_outer_correlation() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      let envelope = serde_json::json!({
+        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "type": message_types::PROTOCOL_ERROR_RESPONSE,
+        "payload": {
+          "requestId": "typed-null-nested-1",
+          "accepted": false,
+          "error": {
+            "kind": "conflict",
+            "code": "conflict",
+            "message": "Legacy daemon conflict.",
+            "guidance": "Resolve the conflicting operation, then retry.",
+            "retryable": false,
+            "requestId": null
+          }
+        }
+      });
+      writer
+        .write_all(format!("{envelope}\n").as_bytes())
+        .await
+        .unwrap();
+      writer.flush().await.unwrap();
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-null-nested-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Conflict,
+      "conflict",
+      "typed-null-nested-1",
+      "Legacy daemon conflict.",
+      Some("Resolve the conflicting operation, then retry."),
+      false,
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_rejects_success_for_another_request() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       write_envelope(
         &mut writer,
         message_types::QUERY_STATE_RESPONSE,
-        &serde_json::json!({ "accepted": true }),
+        &BasicResponse {
+          request_id: "typed-other-success-1".to_string(),
+          accepted: true,
+          message: "Completed.".to_string(),
+        },
       )
       .await
       .unwrap();
@@ -1091,22 +2568,28 @@ mod tests {
     let mut session = CadderSession::connect(&server.paths).await.unwrap();
 
     let error = session
-      .request::<_, QueryStateResponse>(
+      .request::<_>(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
-          request_id: new_request_id("test-query-state"),
+          request_id: "typed-original-success-1".to_string(),
         },
       )
       .await
       .unwrap_err();
 
-    assert!(error.to_string().contains("missing field"), "{error:?}");
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some("typed-original-success-1"),
+    );
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn state_subscription_reports_eof_without_event() {
+  async fn typed_error_request_eof_keeps_request_id() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (read_half, write_half) = tokio::io::split(conn);
       let mut reader = BufReader::new(read_half);
@@ -1114,83 +2597,410 @@ mod tests {
       reader.read_line(&mut line).await.unwrap();
       drop(write_half);
     });
-    let session = CadderSession::connect(&server.paths).await.unwrap();
-    let mut subscription = session
-      .subscribe_state(new_request_id("test-subscribe"))
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let request_id = "typed-eof-1";
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: request_id.to_string(),
+        },
+      )
       .await
-      .unwrap();
+      .unwrap_err();
 
-    let error = subscription.next_event().await.unwrap_err();
-
-    assert!(
-      error
-        .to_string()
-        .contains("daemon closed the state subscription"),
-      "{error:?}"
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseRead,
+      "unexpected_eof",
+      Some(request_id),
     );
+    let terminal_error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-eof-retry-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &terminal_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some("typed-eof-retry-1"),
+    );
+    assert!(terminal_error.retryable());
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn state_subscription_rejects_unexpected_event_type() {
+  async fn typed_error_cancelled_request_retires_session_and_closes_transport() {
+    let (request_received_tx, request_received_rx) = oneshot::channel();
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (read_half, _writer) = tokio::io::split(conn);
+      let mut reader = BufReader::new(read_half);
+      let mut line = String::new();
+      reader.read_line(&mut line).await.unwrap();
+      assert!(!line.is_empty());
+      request_received_tx.send(()).unwrap();
+      let mut trailing = Vec::new();
+      reader.read_to_end(&mut trailing).await.unwrap();
+      assert!(trailing.is_empty());
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+    let request = QueryStateRequest {
+      request_id: "typed-cancelled-request-1".to_string(),
+    };
+    let mut in_flight = Box::pin(session.request::<_>(
+      message_types::QUERY_STATE_REQUEST,
+      message_types::QUERY_STATE_RESPONSE,
+      &request,
+    ));
+
+    tokio::select! {
+      result = &mut in_flight => panic!("request unexpectedly completed: {result:?}"),
+      received = request_received_rx => received.expect("server should receive the request"),
+    }
+    drop(in_flight);
+
+    let terminal_error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-after-cancel-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &terminal_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some("typed-after-cancel-1"),
+    );
+    timeout(Duration::from_secs(1), server.finish())
+      .await
+      .expect("cancelled request should close the transport");
+  }
+
+  #[tokio::test]
+  async fn typed_error_session_rejects_unexpected_response_type() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
-      write_basic_response(&mut writer, message_types::QUERY_STATE_RESPONSE).await;
+      write_basic_response(&mut writer, message_types::QUERY_LOGS_RESPONSE).await;
     });
-    let session = CadderSession::connect(&server.paths).await.unwrap();
-    let mut subscription = session
-      .subscribe_state(new_request_id("test-subscribe"))
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+    let request_id = "unexpected-response-type-1";
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: request_id.to_string(),
+        },
+      )
       .await
-      .unwrap();
+      .unwrap_err();
 
-    let error = subscription.next_event().await.unwrap_err();
-
-    assert!(
-      error
-        .to_string()
-        .contains("unexpected response type `query-state-response`"),
-      "{error:?}"
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some(request_id),
     );
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn state_subscription_rejects_malformed_event_json() {
+  async fn typed_error_incompatible_response_precedes_payload_interpretation() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      let envelope = serde_json::json!({
+        "protocolVersion": cadder_protocol::MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1),
+        "type": "unexpected-response",
+        "payload": {}
+      });
+      writer
+        .write_all(format!("{envelope}\n").as_bytes())
+        .await
+        .unwrap();
+      writer.flush().await.unwrap();
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "typed-incompatible-response-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "incompatible_protocol",
+      Some("typed-incompatible-response-1"),
+    );
+    assert!(!error.retryable());
+    assert!(error.is_protocol_incompatible());
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_session_rejects_malformed_response_json() {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       writer.write_all(b"{not-json}\n").await.unwrap();
       writer.flush().await.unwrap();
     });
-    let session = CadderSession::connect(&server.paths).await.unwrap();
-    let mut subscription = session
-      .subscribe_state(new_request_id("test-subscribe"))
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+    let request_id = "malformed-response-1";
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: request_id.to_string(),
+        },
+      )
       .await
-      .unwrap();
+      .unwrap_err();
 
-    let error = subscription.next_event().await.unwrap_err();
-
-    assert!(
-      error.to_string().contains("key must be a string"),
-      "{error:?}"
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseDecode,
+      "frame",
+      Some(request_id),
     );
     server.finish().await;
   }
 
   #[tokio::test]
-  async fn state_subscription_rejects_event_payload_shape() {
+  async fn typed_error_session_rejects_response_payload_shape() {
+    let request_id = "invalid-response-payload-1";
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
-      write_basic_response(&mut writer, message_types::STATE_CHANGED_EVENT).await;
+      write_envelope(
+        &mut writer,
+        message_types::QUERY_STATE_RESPONSE,
+        &serde_json::json!({
+          "requestId": "invalid-response-payload-1",
+          "accepted": true
+        }),
+      )
+      .await
+      .unwrap();
     });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: request_id.to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseDecode,
+      "frame",
+      Some(request_id),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_subscription_eof_keeps_request_id() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (read_half, write_half) = tokio::io::split(conn);
+      let mut reader = BufReader::new(read_half);
+      let mut line = String::new();
+      reader.read_line(&mut line).await.unwrap();
+      drop(write_half);
+    });
+    let request_id = "typed-subscription-eof-1";
     let session = CadderSession::connect(&server.paths).await.unwrap();
     let mut subscription = session
-      .subscribe_state(new_request_id("test-subscribe"))
+      .subscribe_state(request_id.to_string())
       .await
       .unwrap();
 
     let error = subscription.next_event().await.unwrap_err();
 
-    assert!(error.to_string().contains("missing field"), "{error:?}");
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseRead,
+      "unexpected_eof",
+      Some(request_id),
+    );
+    let terminal_error = subscription.next_event().await.unwrap_err();
+    assert_local_error(
+      &terminal_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some(request_id),
+    );
+    assert!(terminal_error.retryable());
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_cancelled_subscription_read_retires_transport() {
+    let (subscription_received_tx, subscription_received_rx) = oneshot::channel();
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (read_half, _writer) = tokio::io::split(conn);
+      let mut reader = BufReader::new(read_half);
+      let mut line = String::new();
+      reader.read_line(&mut line).await.unwrap();
+      assert!(!line.is_empty());
+      subscription_received_tx.send(()).unwrap();
+      let mut trailing = Vec::new();
+      reader.read_to_end(&mut trailing).await.unwrap();
+      assert!(trailing.is_empty());
+    });
+    let request_id = "typed-cancelled-subscription-1";
+    let session = CadderSession::connect(&server.paths).await.unwrap();
+    let mut subscription = session
+      .subscribe_state(request_id.to_string())
+      .await
+      .unwrap();
+    subscription_received_rx
+      .await
+      .expect("server should receive the subscription request");
+    let mut in_flight = Box::pin(subscription.next_event());
+
+    tokio::select! {
+      result = &mut in_flight => panic!("subscription unexpectedly completed: {result:?}"),
+      _ = sleep(Duration::from_millis(10)) => {},
+    }
+    drop(in_flight);
+
+    let terminal_error = subscription.next_event().await.unwrap_err();
+    assert_local_error(
+      &terminal_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some(request_id),
+    );
+    timeout(Duration::from_secs(1), server.finish())
+      .await
+      .expect("cancelled subscription read should close the transport");
+  }
+
+  #[tokio::test]
+  async fn typed_error_subscription_rejects_unexpected_event_type() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_basic_response(&mut writer, message_types::QUERY_STATE_RESPONSE).await;
+    });
+    let request_id = "unexpected-subscription-type-1";
+    let session = CadderSession::connect(&server.paths).await.unwrap();
+    let mut subscription = session
+      .subscribe_state(request_id.to_string())
+      .await
+      .unwrap();
+
+    let error = subscription.next_event().await.unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some(request_id),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_subscription_rejects_malformed_event_json() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (read_half, mut writer) = tokio::io::split(conn);
+      let mut reader = BufReader::new(read_half);
+      let mut line = String::new();
+      reader.read_line(&mut line).await.unwrap();
+      writer.write_all(b"{not-json}\n").await.unwrap();
+      writer.flush().await.unwrap();
+      let mut trailing = Vec::new();
+      reader.read_to_end(&mut trailing).await.unwrap();
+      assert!(trailing.is_empty());
+    });
+    let request_id = "malformed-subscription-event-1";
+    let session = CadderSession::connect(&server.paths).await.unwrap();
+    let mut subscription = session
+      .subscribe_state(request_id.to_string())
+      .await
+      .unwrap();
+
+    let error = subscription.next_event().await.unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseDecode,
+      "frame",
+      Some(request_id),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn typed_error_subscription_rejects_event_payload_shape() {
+    let request_id = "invalid-subscription-event-1";
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_envelope(
+        &mut writer,
+        message_types::STATE_CHANGED_EVENT,
+        &BasicResponse {
+          request_id: "invalid-subscription-event-1".to_string(),
+          accepted: true,
+          message: "Not an event.".to_string(),
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let session = CadderSession::connect(&server.paths).await.unwrap();
+    let mut subscription = session
+      .subscribe_state(request_id.to_string())
+      .await
+      .unwrap();
+
+    let error = subscription.next_event().await.unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseDecode,
+      "frame",
+      Some(request_id),
+    );
     server.finish().await;
   }
 
@@ -1222,17 +3032,20 @@ mod tests {
 
     let endpoint = discover_ipc_endpoint(&paths).unwrap();
     let mut session = CadderSession::connect(&paths).await.unwrap();
-    let response: ProtocolErrorResponse = session
-      .request(
+    let error = session
+      .request::<_>(
         message_types::SET_AUTOSTART_REQUEST,
-        message_types::PROTOCOL_ERROR_RESPONSE,
+        message_types::SET_AUTOSTART_RESPONSE,
         &SetAutostartRequest {
           request_id: new_request_id("deny-autostart"),
           mode: AutostartMode::Daemon,
         },
       )
       .await
-      .unwrap();
+      .unwrap_err();
+    let response = error
+      .daemon_error()
+      .expect("access denial should remain a daemon protocol error");
     let denial_log = logs.query(
       LogQuery {
         stream: LogStreamIdentity::runtime_control(),
@@ -1244,9 +3057,9 @@ mod tests {
     );
 
     assert_eq!(endpoint.socket_name, paths.socket_name());
-    assert_eq!(response.error.kind, ProtocolErrorKind::AccessDenied);
+    assert_eq!(response.kind, ProtocolErrorKind::AccessDenied);
     assert_eq!(
-      response.error.denied_operation.as_deref(),
+      response.denied_operation.as_deref(),
       Some(message_types::SET_AUTOSTART_REQUEST)
     );
     assert!(denial_log.entries.iter().any(|entry| {
@@ -1368,7 +3181,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn ensure_daemon_running_takes_over_after_failed_concurrent_launch_owner() {
+  async fn typed_error_ensure_daemon_running_takes_over_after_failed_concurrent_launch_owner() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let launch_lock = DaemonLaunchLock::try_acquire(&paths).unwrap().unwrap();
@@ -1394,12 +3207,39 @@ mod tests {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("start cadderd"), "{error:?}");
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::DaemonLaunch,
+      "daemon_start_failed",
+      None,
+    );
+    assert!(!error.retryable());
     release_lock.await.unwrap();
   }
 
   #[tokio::test]
-  async fn ensure_daemon_running_reports_missing_explicit_daemon_start_failure() {
+  async fn typed_error_concurrent_daemon_launch_readiness_timeout_is_distinct() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let _launch_lock = DaemonLaunchLock::try_acquire(&paths).unwrap().unwrap();
+
+    let error = acquire_launch_lock_or_wait_for_ready_with_policy(&paths, 1, Duration::ZERO)
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Timeout,
+      IpcClientPhase::DaemonReadiness,
+      "timeout",
+      None,
+    );
+    assert!(error.retryable());
+  }
+
+  #[tokio::test]
+  async fn typed_error_ensure_daemon_running_reports_missing_explicit_daemon_start_failure() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let missing_daemon = temp.path().join(if cfg!(windows) {
@@ -1412,11 +3252,26 @@ mod tests {
       .await
       .unwrap_err();
 
-    assert!(error.to_string().contains("start cadderd"), "{error:?}");
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::DaemonLaunch,
+      "daemon_start_failed",
+      None,
+    );
+    let source = std::error::Error::source(
+      error
+        .local_error()
+        .expect("spawn failure should be a local IPC error"),
+    )
+    .and_then(|source| source.downcast_ref::<io::Error>())
+    .expect("spawn failure should retain its I/O source");
+    assert_eq!(source.kind(), io::ErrorKind::NotFound);
+    assert!(!error.retryable());
   }
 
   #[tokio::test]
-  async fn ensure_daemon_running_applies_launch_options_before_spawn_failure() {
+  async fn typed_error_ensure_daemon_running_applies_launch_options_before_spawn_failure() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let missing_daemon = temp.path().join(if cfg!(windows) {
@@ -1437,11 +3292,18 @@ mod tests {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("start cadderd"), "{error:?}");
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::DaemonLaunch,
+      "daemon_start_failed",
+      None,
+    );
+    assert!(!error.retryable());
   }
 
   #[tokio::test]
-  async fn ensure_daemon_running_rejects_mock_backend_with_real_command_before_spawn() {
+  async fn typed_error_ensure_daemon_running_rejects_mock_backend_with_real_command_before_spawn() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let missing_daemon = temp.path().join(if cfg!(windows) {
@@ -1462,12 +3324,14 @@ mod tests {
     .await
     .unwrap_err();
 
-    assert!(
-      error
-        .to_string()
-        .contains("--real-caddy-command cannot be combined"),
-      "{error:?}"
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::DaemonLaunch,
+      "invalid_input",
+      None,
     );
+    assert!(!error.retryable());
   }
 
   #[test]
@@ -1577,6 +3441,57 @@ mod tests {
     async fn finish(self) {
       self.task.await.unwrap();
     }
+
+    async fn abort(self) {
+      self.task.abort();
+      let _ = self.task.await;
+    }
+  }
+
+  fn short_client_deadlines() -> IpcClientDeadlines {
+    IpcClientDeadlines {
+      connect: Duration::from_secs(1),
+      ordinary: Duration::from_millis(25),
+      reload: Duration::from_millis(25),
+      stream: Duration::from_millis(25),
+      shutdown: Duration::from_millis(25),
+    }
+  }
+
+  fn assert_daemon_error(
+    error: &IpcClientError,
+    kind: ProtocolErrorKind,
+    code: &str,
+    request_id: &str,
+    message: &str,
+    guidance: Option<&str>,
+    retryable: bool,
+  ) {
+    let daemon = error
+      .daemon_error()
+      .unwrap_or_else(|| panic!("expected a daemon protocol error, got {error:?}"));
+    assert_eq!(daemon.kind, kind);
+    assert_eq!(error.code(), code);
+    assert_eq!(error.request_id().map(RequestId::as_str), Some(request_id));
+    assert_eq!(error.message(), message);
+    assert_eq!(error.guidance(), guidance);
+    assert_eq!(error.retryable(), retryable);
+    assert!(error.local_error().is_none());
+  }
+
+  fn assert_local_error(
+    error: &IpcClientError,
+    kind: LocalIpcErrorKind,
+    phase: IpcClientPhase,
+    code: &str,
+    request_id: Option<&str>,
+  ) {
+    let local = error.local_error().expect("expected a local IPC error");
+    assert_eq!(local.kind(), kind);
+    assert_eq!(local.phase(), phase);
+    assert_eq!(local.code().as_str(), code);
+    assert_eq!(local.request_id().map(RequestId::as_str), request_id);
+    assert!(error.daemon_error().is_none());
   }
 
   async fn read_one_request(conn: Stream) -> (String, tokio::io::WriteHalf<Stream>) {
@@ -1588,9 +3503,21 @@ mod tests {
     (line, writer)
   }
 
+  async fn write_protocol_error(
+    writer: &mut tokio::io::WriteHalf<Stream>,
+    request_id: &str,
+    error: ProtocolError,
+  ) {
+    let response =
+      ProtocolErrorResponse::rejected(Some(RequestId::parse(request_id).unwrap()), error);
+    write_envelope(writer, message_types::PROTOCOL_ERROR_RESPONSE, &response)
+      .await
+      .unwrap();
+  }
+
   async fn wait_for_ready(paths: &RuntimePaths) {
     for _ in 0..50 {
-      if can_connect(paths).await {
+      if daemon_is_ready(paths).await.unwrap_or(false) {
         return;
       }
       sleep(Duration::from_millis(20)).await;

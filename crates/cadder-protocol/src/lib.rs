@@ -116,14 +116,14 @@ mod tests {
   }
 
   #[test]
-  fn decode_typed_reports_protocol_floor_compatibility_error() {
+  fn envelope_decode_reports_protocol_floor_compatibility_error() {
     let request = QueryStateRequest {
       request_id: "request-1".to_string(),
     };
     let mut envelope = IpcEnvelope::new(message_types::QUERY_STATE_REQUEST, &request).unwrap();
     envelope.protocol_version = MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1);
 
-    let error = envelope.decode_typed::<QueryStateRequest>().unwrap_err();
+    let error = envelope.decode::<QueryStateRequest>().unwrap_err();
 
     assert_eq!(error.kind, ProtocolErrorKind::IncompatibleProtocolVersion);
     assert_eq!(

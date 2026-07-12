@@ -33,7 +33,7 @@ fn spawn_cadderd(runtime_dir: &PathBuf) -> Child {
 async fn wait_for_state(client: &CadderClient) -> QueryStateResponse {
   for _ in 0..100 {
     let response = client
-      .request::<_, QueryStateResponse>(
+      .request::<_>(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {

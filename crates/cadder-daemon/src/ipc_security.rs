@@ -10,7 +10,10 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use crate::{PrivilegeStatus, RuntimePaths, current_privilege_status};
+use crate::{
+  IpcClientError, IpcClientPhase, IpcClientResult, LocalIpcErrorCode, LocalIpcErrorKind,
+  PrivilegeStatus, RuntimePaths, current_privilege_status, ipc_client_error::LocalIpcErrorContext,
+};
 
 const IPC_ENDPOINT_METADATA_VERSION: u16 = 1;
 const IPC_SECURITY_POLICY_VERSION: u16 = 1;
@@ -262,12 +265,65 @@ impl Drop for IpcEndpointPublication {
   }
 }
 
-pub fn discover_ipc_endpoint(paths: &RuntimePaths) -> Result<IpcEndpointMetadata> {
+pub fn discover_ipc_endpoint(paths: &RuntimePaths) -> IpcClientResult<IpcEndpointMetadata> {
   let path = paths.ipc_endpoint_path();
-  let content = fs::read_to_string(&path)
-    .with_context(|| format!("read IPC endpoint metadata {}", path.display()))?;
-  serde_json::from_str(content.trim())
-    .with_context(|| format!("parse IPC endpoint metadata {}", path.display()))
+  let content = fs::read(&path).map_err(discovery_read_error)?;
+  serde_json::from_slice(&content).map_err(|error| {
+    IpcClientError::local(LocalIpcErrorContext {
+      kind: LocalIpcErrorKind::Discovery,
+      phase: IpcClientPhase::DiscoveryDecode,
+      code: LocalIpcErrorCode::InvalidDiscovery,
+      message: "Cadder IPC discovery is invalid; no request was sent.".into(),
+      guidance: Some(
+        "Restart the Cadder daemon for this runtime. If the error remains, inspect the discovery diagnostics."
+          .into(),
+      ),
+      retryable: false,
+      request_id: None,
+      operation: Some("discover-ipc-endpoint".into()),
+      source: Some(Box::new(error)),
+    })
+  })
+}
+
+fn discovery_read_error(error: std::io::Error) -> IpcClientError {
+  let (code, message, guidance, retryable) = match error.kind() {
+    std::io::ErrorKind::PermissionDenied => (
+      LocalIpcErrorCode::PermissionDenied,
+      "Cadder cannot read IPC discovery for this runtime; no request was sent.",
+      "Use the account that owns this Cadder runtime or select an accessible profile.",
+      false,
+    ),
+    std::io::ErrorKind::NotFound => (
+      LocalIpcErrorCode::DiscoveryUnavailable,
+      "Cadder IPC discovery is unavailable; no request was sent.",
+      "Start the Cadder daemon for this runtime, then retry.",
+      true,
+    ),
+    std::io::ErrorKind::Interrupted => (
+      LocalIpcErrorCode::DiscoveryReadFailed,
+      "Cadder could not finish reading IPC discovery; no request was sent.",
+      "Retry once. If the error remains, inspect the runtime-directory diagnostics.",
+      true,
+    ),
+    _ => (
+      LocalIpcErrorCode::DiscoveryReadFailed,
+      "Cadder could not read IPC discovery; no request was sent.",
+      "Inspect the runtime directory and local filesystem diagnostics before retrying.",
+      false,
+    ),
+  };
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Discovery,
+    phase: IpcClientPhase::DiscoveryRead,
+    code,
+    message: message.into(),
+    guidance: Some(guidance.into()),
+    retryable,
+    request_id: None,
+    operation: Some("discover-ipc-endpoint".into()),
+    source: Some(Box::new(error)),
+  })
 }
 
 fn write_ipc_endpoint_metadata(path: &Path, metadata: &IpcEndpointMetadata) -> Result<()> {
@@ -511,6 +567,44 @@ fn normalize_account(account: String) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn typed_error_discovery_reads_distinguish_absent_permission_and_io_failures() {
+    let cases = [
+      (
+        std::io::ErrorKind::NotFound,
+        LocalIpcErrorCode::DiscoveryUnavailable,
+        true,
+      ),
+      (
+        std::io::ErrorKind::PermissionDenied,
+        LocalIpcErrorCode::PermissionDenied,
+        false,
+      ),
+      (
+        std::io::ErrorKind::Other,
+        LocalIpcErrorCode::DiscoveryReadFailed,
+        false,
+      ),
+      (
+        std::io::ErrorKind::Interrupted,
+        LocalIpcErrorCode::DiscoveryReadFailed,
+        true,
+      ),
+    ];
+
+    for (kind, code, retryable) in cases {
+      let error = discovery_read_error(std::io::Error::new(kind, "test discovery failure"));
+      let local = error
+        .local_error()
+        .expect("expected a local discovery error");
+      assert_eq!(local.kind(), LocalIpcErrorKind::Discovery);
+      assert_eq!(local.phase(), IpcClientPhase::DiscoveryRead);
+      assert_eq!(local.code(), code);
+      assert_eq!(local.retryable(), retryable);
+      assert!(std::error::Error::source(local).is_some());
+    }
+  }
 
   #[test]
   fn policy_allows_same_user_non_elevated_client_to_elevated_endpoint() {

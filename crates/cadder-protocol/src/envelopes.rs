@@ -1,5 +1,3 @@
-use std::io;
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -32,16 +30,8 @@ impl IpcEnvelope {
     })
   }
 
-  pub fn decode<T: DeserializeOwned>(&self) -> serde_json::Result<T> {
-    self.decode_typed().map_err(|error| {
-      serde_json::Error::io(io::Error::new(
-        io::ErrorKind::InvalidData,
-        error.to_string(),
-      ))
-    })
-  }
-
-  pub fn decode_typed<T: DeserializeOwned>(&self) -> ProtocolResult<T> {
+  /// Decodes a legacy flat-envelope payload without reducing compatibility failures to text.
+  pub fn decode<T: DeserializeOwned>(&self) -> ProtocolResult<T> {
     ensure_compatible_protocol_version(self.protocol_version)?;
     serde_json::from_value(self.payload.clone()).map_err(ProtocolError::payload_decode_failed)
   }

@@ -431,6 +431,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "testcontainers",
+ "thiserror 2.0.17",
  "tokio",
  "windows",
  "windows-sys 0.61.2",
@@ -445,7 +446,9 @@ dependencies = [
  "cadder-protocol",
  "chrono",
  "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

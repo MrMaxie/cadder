@@ -3,8 +3,9 @@ mod service;
 mod view;
 
 pub use error::{
-  OperatorError, OperatorErrorKind, OperatorExitCode, daemon_error_indicates_unavailable,
-  error_indicates_permission, format_error_chain, start_guidance,
+  OperatorError, OperatorErrorKind, OperatorExitCode, OperatorLocalIpcError,
+  daemon_error_indicates_unavailable, error_indicates_permission, format_error_chain,
+  start_guidance,
 };
 pub use service::{
   DomainSelector, LogsTarget, OperatorContext, connected_status, connection_state_from_error,

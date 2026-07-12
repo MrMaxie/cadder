@@ -3,6 +3,7 @@ mod caddy;
 mod config;
 mod iis;
 mod ipc;
+mod ipc_client_error;
 mod ipc_security;
 mod logs;
 mod operation_registry;
@@ -23,6 +24,10 @@ pub use iis::{IisBindingRecord, IisMetadataStore, IisProvider};
 pub use ipc::{
   CadderClient, CadderSession, DaemonLaunchMode, DaemonLaunchOptions, DaemonServer,
   StateSubscription, ensure_daemon_running, ensure_daemon_running_with_options,
+};
+pub use ipc_client_error::{
+  IpcClientError, IpcClientPhase, IpcClientResult, LocalIpcError, LocalIpcErrorCode,
+  LocalIpcErrorKind,
 };
 pub use ipc_security::{
   IpcAccessDecision, IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcOperationKind,
@@ -115,7 +120,7 @@ async fn wait_for_daemon_runtime_released_with_limits(
   poll_interval: Duration,
 ) -> Result<()> {
   for _ in 0..attempts {
-    if !ipc::is_daemon_ready(paths).await
+    if !ipc::is_daemon_ready(paths).await?
       && let Some(lock) = DaemonLock::try_acquire(paths.lock_path())?
     {
       drop(lock);
@@ -146,7 +151,7 @@ async fn acquire_daemon_lock_or_wait_for_ready_with_limits(
   poll_interval: Duration,
 ) -> Result<Option<DaemonLock>> {
   for _ in 0..attempts {
-    if ipc::is_daemon_ready(paths).await {
+    if ipc::is_daemon_ready(paths).await? {
       return Ok(None);
     }
     if let Some(lock) = DaemonLock::try_acquire_for_runtime(paths)? {
@@ -155,7 +160,7 @@ async fn acquire_daemon_lock_or_wait_for_ready_with_limits(
     sleep(poll_interval).await;
   }
 
-  if ipc::is_daemon_ready(paths).await {
+  if ipc::is_daemon_ready(paths).await? {
     return Ok(None);
   }
 
@@ -389,7 +394,7 @@ mod tests {
   async fn wait_for_query_state(client: &CadderClient) -> QueryStateResponse {
     for _ in 0..50 {
       let result = client
-        .request::<_, QueryStateResponse>(
+        .request::<_>(
           message_types::QUERY_STATE_REQUEST,
           message_types::QUERY_STATE_RESPONSE,
           &QueryStateRequest {
@@ -409,7 +414,7 @@ mod tests {
   async fn wait_for_recovery_log(client: &CadderClient) -> QueryLogsResponse {
     for _ in 0..50 {
       let result = client
-        .request::<_, QueryLogsResponse>(
+        .request::<_>(
           message_types::QUERY_LOGS_REQUEST,
           message_types::QUERY_LOGS_RESPONSE,
           &QueryLogsRequest {

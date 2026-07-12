@@ -1,7 +1,7 @@
 use cadder_daemon::{
   CadderClient, CadderSession, CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer,
-  DaemonState, ProcessRuntime, RealCaddyResolver, RuntimePaths, RuntimeTimeouts,
-  ensure_daemon_running,
+  DaemonState, IpcClientError, IpcClientPhase, LocalIpcErrorKind, ProcessRuntime,
+  RealCaddyResolver, RuntimePaths, RuntimeTimeouts, ensure_daemon_running,
 };
 use cadder_protocol::{
   ActivationState, BasicResponse, ConfigApplyStatus, EntrypointInstanceIdentity,
@@ -10,9 +10,9 @@ use cadder_protocol::{
   ProtocolErrorKind, ProtocolErrorResponse, QueryAutostartRequest, QueryAutostartResponse,
   QueryIisBindingsRequest, QueryIisBindingsResponse, QueryLogsRequest, QueryLogsResponse,
   QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse,
-  RuntimeStatus, SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
-  SetIisHandoffRequest, SetIisHandoffResponse, ShimRunMetadata, SourcePath, StateChangeKind,
-  UnregisterEntrypointRequest, message_types, new_request_id,
+  RequestId, RuntimeStatus, SetAutostartRequest, SetDomainEnabledRequest,
+  SetEntrypointEnabledRequest, SetIisHandoffRequest, SetIisHandoffResponse, ShimRunMetadata,
+  SourcePath, StateChangeKind, UnregisterEntrypointRequest, message_types, new_request_id,
 };
 use chrono::Utc;
 use interprocess::local_socket::{
@@ -300,7 +300,7 @@ async fn shutdown_daemon_request_stops_server_and_rejects_new_clients() {
   for _ in 0..50 {
     let result = harness
       .client
-      .request::<_, QueryStateResponse>(
+      .request::<_>(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
@@ -951,7 +951,7 @@ async fn slow_stop_does_not_block_state_queries_and_logs_timeout() {
   let client = harness.client.clone();
   let toggle_task = tokio::spawn(async move {
     client
-      .request::<_, BasicResponse>(
+      .request::<_>(
         message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
         message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
         &SetEntrypointEnabledRequest {
@@ -1254,18 +1254,22 @@ async fn ipc_heartbeat_and_entrypoint_toggle_update_registered_state() {
 async fn ipc_reports_unsupported_message_type() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
-  let mut session = CadderSession::connect(&harness.paths).await.unwrap();
+  let (mut reader, mut writer) = raw_ipc_session(&harness.paths).await;
 
-  let response: ProtocolErrorResponse = session
-    .request(
-      "unknown-message",
-      message_types::PROTOCOL_ERROR_RESPONSE,
-      &QueryStateRequest {
-        request_id: "unsupported".to_string(),
-      },
-    )
-    .await
-    .unwrap();
+  write_raw_envelope(
+    &mut writer,
+    "unknown-message",
+    &QueryStateRequest {
+      request_id: "unsupported".to_string(),
+    },
+  )
+  .await;
+  let envelope = read_raw_envelope(&mut reader).await;
+  assert_eq!(
+    envelope.message_type,
+    message_types::PROTOCOL_ERROR_RESPONSE
+  );
+  let response: ProtocolErrorResponse = envelope.decode().unwrap();
 
   assert!(!response.accepted);
   assert_eq!(response.request_id, "unsupported");
@@ -1413,13 +1417,13 @@ async fn ipc_rejects_protocol_version_below_compatibility_floor_with_typed_guida
 }
 
 #[tokio::test]
-async fn session_reports_protocol_error_response_as_request_error() {
+async fn typed_error_session_rejects_request_operation_mismatch_before_send() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
 
   let error = session
-    .request::<_, QueryStateResponse>(
+    .request::<_>(
       "unknown-message",
       message_types::QUERY_STATE_RESPONSE,
       &QueryStateRequest {
@@ -1429,23 +1433,24 @@ async fn session_reports_protocol_error_response_as_request_error() {
     .await
     .unwrap_err();
 
-  assert!(
-    error
-      .to_string()
-      .contains("daemon rejected IPC request `unsupported`"),
-    "{error:?}"
+  assert_local_error(
+    &error,
+    IpcClientPhase::RequestEncode,
+    "invalid_request",
+    "unsupported",
   );
+  drop(session);
   harness.shutdown().await;
 }
 
 #[tokio::test]
-async fn session_rejects_unexpected_response_type() {
+async fn typed_error_session_rejects_unexpected_response_type() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
 
   let error = session
-    .request::<_, QueryStateResponse>(
+    .request::<_>(
       message_types::QUERY_STATE_REQUEST,
       message_types::QUERY_LOGS_RESPONSE,
       &QueryStateRequest {
@@ -1455,11 +1460,13 @@ async fn session_rejects_unexpected_response_type() {
     .await
     .unwrap_err();
 
-  assert!(
-    error
-      .to_string()
-      .contains("unexpected response type `query-state-response`")
+  assert_local_error(
+    &error,
+    IpcClientPhase::RequestEncode,
+    "invalid_request",
+    "wrong-response",
   );
+  drop(session);
   harness.shutdown().await;
 }
 
@@ -1505,7 +1512,7 @@ async fn ipc_rejects_invalid_payload_shapes_for_supported_messages() {
 }
 
 #[tokio::test]
-async fn session_reports_eof_when_peer_closes_without_response() {
+async fn typed_error_session_reports_eof_when_peer_closes_without_response() {
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (read_half, write_half) = tokio::io::split(conn);
     let mut reader = BufReader::new(read_half);
@@ -1514,81 +1521,86 @@ async fn session_reports_eof_when_peer_closes_without_response() {
     drop(write_half);
   });
   let mut session = CadderSession::connect(&peer.paths).await.unwrap();
+  let request_id = "eof-query-state-1";
 
   let error = session
-    .request::<_, QueryStateResponse>(
+    .request::<_>(
       message_types::QUERY_STATE_REQUEST,
       message_types::QUERY_STATE_RESPONSE,
       &QueryStateRequest {
-        request_id: new_request_id("eof-query-state"),
+        request_id: request_id.to_string(),
       },
     )
     .await
     .unwrap_err();
 
-  assert!(
-    error.to_string().contains("without a response"),
-    "{error:?}"
+  assert_local_error(
+    &error,
+    IpcClientPhase::ResponseRead,
+    "unexpected_eof",
+    request_id,
   );
   peer.finish().await;
 }
 
 #[tokio::test]
-async fn session_rejects_malformed_response_json() {
+async fn typed_error_session_rejects_malformed_response_json() {
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (_line, mut writer) = read_peer_request(conn).await;
     write_raw_line(&mut writer, "{not-json}\n").await;
   });
   let mut session = CadderSession::connect(&peer.paths).await.unwrap();
+  let request_id = "bad-json-query-state-1";
 
   let error = session
-    .request::<_, QueryStateResponse>(
+    .request::<_>(
       message_types::QUERY_STATE_REQUEST,
       message_types::QUERY_STATE_RESPONSE,
       &QueryStateRequest {
-        request_id: new_request_id("bad-json-query-state"),
+        request_id: request_id.to_string(),
       },
     )
     .await
     .unwrap_err();
 
-  assert!(
-    error.to_string().contains("key must be a string"),
-    "{error:?}"
-  );
+  assert_local_error(&error, IpcClientPhase::ResponseDecode, "frame", request_id);
   peer.finish().await;
 }
 
 #[tokio::test]
-async fn session_rejects_invalid_response_payload() {
+async fn typed_error_session_rejects_invalid_response_payload() {
+  let request_id = "bad-payload-query-state-1";
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (_line, mut writer) = read_peer_request(conn).await;
     write_raw_envelope(
       &mut writer,
       message_types::QUERY_STATE_RESPONSE,
-      &serde_json::json!({ "accepted": true }),
+      &serde_json::json!({
+        "requestId": "bad-payload-query-state-1",
+        "accepted": true
+      }),
     )
     .await;
   });
   let mut session = CadderSession::connect(&peer.paths).await.unwrap();
 
   let error = session
-    .request::<_, QueryStateResponse>(
+    .request::<_>(
       message_types::QUERY_STATE_REQUEST,
       message_types::QUERY_STATE_RESPONSE,
       &QueryStateRequest {
-        request_id: new_request_id("bad-payload-query-state"),
+        request_id: request_id.to_string(),
       },
     )
     .await
     .unwrap_err();
 
-  assert!(error.to_string().contains("missing field"), "{error:?}");
+  assert_local_error(&error, IpcClientPhase::ResponseDecode, "frame", request_id);
   peer.finish().await;
 }
 
 #[tokio::test]
-async fn state_subscription_reports_eof_when_peer_closes_before_event() {
+async fn typed_error_state_subscription_reports_eof_when_peer_closes_before_event() {
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (read_half, write_half) = tokio::io::split(conn);
     let mut reader = BufReader::new(read_half);
@@ -1596,25 +1608,26 @@ async fn state_subscription_reports_eof_when_peer_closes_before_event() {
     reader.read_line(&mut line).await.unwrap();
     drop(write_half);
   });
+  let request_id = "eof-subscribe-1";
   let session = CadderSession::connect(&peer.paths).await.unwrap();
   let mut subscription = session
-    .subscribe_state(new_request_id("eof-subscribe"))
+    .subscribe_state(request_id.to_string())
     .await
     .unwrap();
 
   let error = subscription.next_event().await.unwrap_err();
 
-  assert!(
-    error
-      .to_string()
-      .contains("daemon closed the state subscription"),
-    "{error:?}"
+  assert_local_error(
+    &error,
+    IpcClientPhase::ResponseRead,
+    "unexpected_eof",
+    request_id,
   );
   peer.finish().await;
 }
 
 #[tokio::test]
-async fn state_subscription_rejects_non_event_message_type() {
+async fn typed_error_state_subscription_rejects_non_event_message_type() {
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (_line, mut writer) = read_peer_request(conn).await;
     write_raw_envelope(
@@ -1628,25 +1641,26 @@ async fn state_subscription_rejects_non_event_message_type() {
     )
     .await;
   });
+  let request_id = "wrong-event-type";
   let session = CadderSession::connect(&peer.paths).await.unwrap();
   let mut subscription = session
-    .subscribe_state(new_request_id("wrong-event-type"))
+    .subscribe_state(request_id.to_string())
     .await
     .unwrap();
 
   let error = subscription.next_event().await.unwrap_err();
 
-  assert!(
-    error
-      .to_string()
-      .contains("unexpected response type `query-state-response`"),
-    "{error:?}"
+  assert_local_error(
+    &error,
+    IpcClientPhase::ResponseValidate,
+    "protocol_violation",
+    request_id,
   );
   peer.finish().await;
 }
 
 #[tokio::test]
-async fn state_subscription_rejects_invalid_event_payload() {
+async fn typed_error_state_subscription_rejects_invalid_event_payload() {
   let peer = ScriptedIpcPeer::start(|conn| async move {
     let (_line, mut writer) = read_peer_request(conn).await;
     write_raw_envelope(
@@ -1660,16 +1674,26 @@ async fn state_subscription_rejects_invalid_event_payload() {
     )
     .await;
   });
+  let request_id = "invalid-event-payload";
   let session = CadderSession::connect(&peer.paths).await.unwrap();
   let mut subscription = session
-    .subscribe_state(new_request_id("invalid-event-payload"))
+    .subscribe_state(request_id.to_string())
     .await
     .unwrap();
 
   let error = subscription.next_event().await.unwrap_err();
 
-  assert!(error.to_string().contains("missing field"), "{error:?}");
+  assert_local_error(&error, IpcClientPhase::ResponseDecode, "frame", request_id);
   peer.finish().await;
+}
+
+fn assert_local_error(error: &IpcClientError, phase: IpcClientPhase, code: &str, request_id: &str) {
+  let local = error.local_error().expect("expected local IPC error");
+  assert_eq!(local.kind(), LocalIpcErrorKind::Transport);
+  assert_eq!(local.phase(), phase);
+  assert_eq!(local.code().as_str(), code);
+  assert_eq!(local.request_id().map(RequestId::as_str), Some(request_id));
+  assert!(error.daemon_error().is_none());
 }
 
 #[tokio::test]
@@ -1974,7 +1998,7 @@ impl Harness {
     let client = CadderClient::new(paths.clone());
     for _ in 0..50 {
       if client
-        .request::<_, QueryStateResponse>(
+        .request::<_>(
           message_types::QUERY_STATE_REQUEST,
           message_types::QUERY_STATE_RESPONSE,
           &QueryStateRequest {

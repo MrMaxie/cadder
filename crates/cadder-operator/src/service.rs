@@ -1,18 +1,18 @@
 use crate::{
-  OperatorError, daemon_status_connected, domains_view, format_error_chain, resolve_domain,
+  OperatorError, daemon_error_indicates_unavailable, daemon_status_connected, domains_view,
+  error::sentence,
+  resolve_domain,
   view::{ConnectionStateView, LogsView, SelectedDomain},
 };
-use anyhow::Result as AnyResult;
 use cadder_daemon::{
-  CadderClient, DaemonLaunchOptions, RuntimePaths, StateSubscription,
-  ensure_daemon_running_with_options,
+  CadderClient, DaemonLaunchOptions, IpcClientError, IpcClientResult, RuntimePaths,
+  StateSubscription, ensure_daemon_running_with_options,
 };
 use cadder_protocol::{
-  BasicResponse, GuiStateSnapshot, LogSeverity, LogStreamIdentity, QueryLogsRequest,
-  QueryStateRequest, QueryStateResponse, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
-  message_types, new_request_id,
+  BasicResponse, GuiStateSnapshot, LegacyCorrelatedRequest, LogSeverity, LogStreamIdentity,
+  QueryLogsRequest, QueryStateRequest, QueryStateResponse, SetDomainEnabledRequest,
+  SetEntrypointEnabledRequest, message_types, new_request_id,
 };
-use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl OperatorContext {
     &self.launch_options
   }
 
-  pub async fn query_state_response(&self) -> AnyResult<QueryStateResponse> {
+  pub async fn query_state_response(&self) -> IpcClientResult<QueryStateResponse> {
     self
       .client
       .request(
@@ -91,7 +91,7 @@ impl OperatorContext {
     action: &str,
   ) -> Result<GuiStateSnapshot, OperatorError> {
     let response = self.query_state_response().await.map_err(|error| {
-      OperatorError::daemon_request(command, self.paths.runtime_dir(), action, &error)
+      OperatorError::daemon_request(command, self.paths.runtime_dir(), action, error)
     })?;
     response.snapshot.ok_or_else(|| {
       OperatorError::new(
@@ -105,20 +105,23 @@ impl OperatorContext {
     })
   }
 
-  pub async fn request_basic(
+  pub async fn request_basic<TRequest>(
     &self,
     command: &'static str,
     action: &str,
     message_type: &str,
     response_type: &str,
-    request: &impl Serialize,
-  ) -> Result<BasicResponse, OperatorError> {
+    request: &TRequest,
+  ) -> Result<BasicResponse, OperatorError>
+  where
+    TRequest: LegacyCorrelatedRequest<Response = BasicResponse>,
+  {
     self
       .client
       .request(message_type, response_type, request)
       .await
       .map_err(|error| {
-        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, &error)
+        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, error)
       })
   }
 
@@ -133,7 +136,7 @@ impl OperatorContext {
   ) -> Result<LogsView, OperatorError> {
     let response = self
       .client
-      .request::<_, cadder_protocol::QueryLogsResponse>(
+      .request::<_>(
         message_types::QUERY_LOGS_REQUEST,
         message_types::QUERY_LOGS_RESPONSE,
         &QueryLogsRequest {
@@ -146,7 +149,7 @@ impl OperatorContext {
       )
       .await
       .map_err(|error| {
-        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, &error)
+        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, error)
       })?;
     Ok(LogsView::from(response))
   }
@@ -161,14 +164,14 @@ impl OperatorContext {
       .subscribe_state(new_request_id("ctl-watch"))
       .await
       .map_err(|error| {
-        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, &error)
+        OperatorError::daemon_request(command, self.paths.runtime_dir(), action, error)
       })
   }
 
   pub async fn ensure_daemon_running(&self, command: &'static str) -> Result<(), OperatorError> {
     ensure_daemon_running_with_options(&self.paths, self.launch_options.clone())
       .await
-      .map_err(|error| OperatorError::daemon_start(command, self.paths.runtime_dir(), &error))
+      .map_err(|error| OperatorError::daemon_start(command, self.paths.runtime_dir(), error))
   }
 
   pub async fn resolve_logs_target(
@@ -320,17 +323,8 @@ impl OperatorContext {
   }
 }
 
-pub fn connection_state_from_error(error: &anyhow::Error) -> ConnectionStateView {
-  if error.chain().any(|cause| {
-    cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-      matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound
-          | std::io::ErrorKind::ConnectionRefused
-          | std::io::ErrorKind::ConnectionAborted
-      )
-    })
-  }) {
+pub fn connection_state_from_error(error: &IpcClientError) -> ConnectionStateView {
+  if daemon_error_indicates_unavailable(error) {
     ConnectionStateView::NotRunning
   } else {
     ConnectionStateView::ConnectionFailed
@@ -339,27 +333,35 @@ pub fn connection_state_from_error(error: &anyhow::Error) -> ConnectionStateView
 
 pub fn unavailable_status(
   context: &OperatorContext,
-  error: &anyhow::Error,
+  error: &IpcClientError,
 ) -> crate::DaemonStatusView {
   let runtime_dir = context.paths.runtime_dir();
-  let message = match connection_state_from_error(error) {
+  let connection_state = connection_state_from_error(error);
+  let message = match connection_state {
     ConnectionStateView::NotRunning => format!(
       "Cadder daemon is not running for runtime `{}`.",
       runtime_dir.display()
     ),
     ConnectionStateView::ConnectionFailed => format!(
-      "Could not attach to Cadder daemon for runtime `{}`: {}.",
+      "Could not attach to Cadder daemon for runtime `{}`: {}",
       runtime_dir.display(),
-      format_error_chain(error)
+      sentence(error.message())
     ),
     ConnectionStateView::Connected => "Attached to cadderd.".to_string(),
   };
 
   crate::daemon_status_unavailable(
     runtime_dir,
-    connection_state_from_error(error),
+    connection_state,
     message,
-    Some(crate::start_guidance(runtime_dir)),
+    Some(if connection_state == ConnectionStateView::NotRunning {
+      crate::start_guidance(runtime_dir)
+    } else {
+      error.guidance().map(ToOwned::to_owned).unwrap_or_else(|| {
+        "Inspect the daemon diagnostics for this runtime, correct the reported error, then retry."
+          .to_string()
+      })
+    }),
   )
 }
 
@@ -375,7 +377,8 @@ mod tests {
   use super::*;
   use cadder_protocol::{
     ActivationState, ConfigState, DomainName, EntrypointInstanceIdentity, EntrypointRegistration,
-    OwnerProcessIdentity, RegisteredDomain, RuntimeState, SourcePath,
+    OwnerProcessIdentity, ProtocolError, ProtocolErrorCode, ProtocolErrorKind, RegisteredDomain,
+    RuntimeState, SourcePath,
   };
   use chrono::{TimeZone, Utc};
 
@@ -474,6 +477,36 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn typed_error_operator_preserves_local_ipc_source_and_machine_fields() {
+    let (_temp, context) = context();
+
+    let error = context
+      .query_snapshot("status", "query state")
+      .await
+      .unwrap_err();
+
+    let ipc_error = std::error::Error::source(&error)
+      .and_then(|source| source.downcast_ref::<IpcClientError>())
+      .expect("operator error should retain the typed IPC error");
+    let local = ipc_error
+      .local_error()
+      .expect("missing daemon should remain a local IPC error");
+    assert_eq!(local.phase(), cadder_daemon::IpcClientPhase::Connect);
+    assert!(std::error::Error::source(local).is_some());
+
+    let json = serde_json::to_value(&error).unwrap();
+    assert_eq!(json["local_error"]["code"], local.code().as_str());
+    assert_eq!(json["local_error"]["message"], local.message());
+    assert_eq!(
+      json["local_error"]["guidance"],
+      local
+        .guidance()
+        .expect("connect error should include guidance")
+    );
+    assert_eq!(json["local_error"]["retryable"], local.retryable());
+  }
+
   #[test]
   fn select_domain_returns_precise_operator_errors() {
     let (_temp, context) = context();
@@ -564,8 +597,8 @@ mod tests {
     );
   }
 
-  #[test]
-  fn connected_and_unavailable_statuses_include_operator_context() {
+  #[tokio::test]
+  async fn connected_and_unavailable_statuses_include_operator_context() {
     let (_temp, context) = context();
     let status = connected_status(
       &context,
@@ -580,10 +613,7 @@ mod tests {
     assert_eq!(status.counts.domains, 2);
     assert_eq!(status.counts.active_domains, 2);
 
-    let not_running = anyhow::Error::from(std::io::Error::new(
-      std::io::ErrorKind::ConnectionRefused,
-      "connection refused",
-    ));
+    let not_running = context.query_state_response().await.unwrap_err();
     let status = unavailable_status(&context, &not_running);
     assert_eq!(status.connection_state, ConnectionStateView::NotRunning);
     assert!(status.message.contains("is not running"));
@@ -594,12 +624,23 @@ mod tests {
         .is_some_and(|guidance| guidance.contains("cadderd --runtime-dir"))
     );
 
-    let failed = anyhow::Error::msg("protocol mismatch");
+    let failed = IpcClientError::Daemon(ProtocolError::new(
+      ProtocolErrorKind::IncompatibleProtocolVersion,
+      ProtocolErrorCode::parse("incompatible_protocol").unwrap(),
+      "protocol mismatch",
+      Some("Upgrade the older Cadder component.".into()),
+      false,
+    ));
     let status = unavailable_status(&context, &failed);
     assert_eq!(
       status.connection_state,
       ConnectionStateView::ConnectionFailed
     );
     assert!(status.message.contains("protocol mismatch"));
+    assert_eq!(
+      status.guidance.as_deref(),
+      Some("Upgrade the older Cadder component.")
+    );
+    assert!(!status.guidance.unwrap().contains("daemon start"));
   }
 }

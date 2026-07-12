@@ -93,7 +93,8 @@ async fn launch_background_daemon(args: Args) -> Result<()> {
       launch_mode: DaemonLaunchMode::Background,
     },
   )
-  .await
+  .await?;
+  Ok(())
 }
 
 #[cfg(test)]

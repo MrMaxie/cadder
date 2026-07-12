@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use cadder_daemon::{
-  CadderSession, CaddyBackendMode, DaemonLaunchOptions, RealCaddyResolver, RuntimePaths,
-  RuntimeProfile, ensure_daemon_running_with_options, shim_privilege_diagnostic,
+  CadderSession, CaddyBackendMode, DaemonLaunchOptions, IpcClientError, IpcClientResult,
+  RealCaddyResolver, RuntimePaths, RuntimeProfile, ensure_daemon_running_with_options,
+  shim_privilege_diagnostic,
 };
 use cadder_protocol::{
   ActivationState, BasicResponse, EntrypointInstanceIdentity, EntrypointRegistration,
@@ -19,7 +20,11 @@ use std::{
   sync::Arc,
   time::Duration,
 };
-use tokio::{process::Command, sync::Mutex, time::interval};
+use tokio::{
+  process::Command,
+  sync::{Mutex, oneshot},
+  time::interval,
+};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -291,12 +296,7 @@ async fn write_read_only_real_caddy_inspection_notice(
     Ok(_) => {}
     Err(error) => eprintln!(
       "{}",
-      read_only_real_caddy_inspection_message(
-        &paths,
-        command,
-        daemon_error_indicates_not_running(&error),
-        &format_error_chain(&error),
-      )
+      read_only_real_caddy_inspection_message(&paths, command, &error)
     ),
   }
 }
@@ -304,22 +304,37 @@ async fn write_read_only_real_caddy_inspection_notice(
 fn read_only_real_caddy_inspection_message(
   paths: &RuntimePaths,
   command: ClassifiedShimCommand<'_>,
-  daemon_not_running: bool,
-  daemon_error: &str,
+  error: &IpcClientError,
 ) -> String {
   let runtime_dir = paths.runtime_dir().display();
-  let daemon_status = if daemon_not_running {
-    "is not running".to_string()
+  let unavailable = daemon_error_indicates_not_running(error);
+  let outcome = if unavailable {
+    format!("Cadder backend `cadderd` is not running for runtime `{runtime_dir}`.")
   } else {
-    format!("could not be contacted: {daemon_error}")
+    format!(
+      "Cadder runtime inspection is unavailable for runtime `{runtime_dir}`: {}",
+      terminal_sentence(error.message())
+    )
   };
+  let recovery = if unavailable {
+    format!(
+      "Run `cadder daemon start --runtime-dir \"{}\"`, then retry Cadder runtime inspection.",
+      paths.runtime_dir().display()
+    )
+  } else {
+    error.guidance().map(ToOwned::to_owned).unwrap_or_else(|| {
+      "Inspect the Cadder daemon diagnostics, correct the reported error, then retry runtime inspection."
+        .to_string()
+    })
+  };
+  let details = format_ipc_diagnostic_details(error);
 
   format!(
-    "Cadder backend `cadderd` {daemon_status} for runtime `{runtime_dir}`. \
-     Running read-only `caddy {}` against the safely resolved real Caddy binary. \
-     Output is real-Caddy inspection, not Cadder runtime state. \
-     To inspect Cadder runtime state, run `cadder daemon start` and retry.",
-    command.command
+    "{outcome}\n\
+     Running read-only `caddy {}` against the safely resolved real Caddy binary.\n\
+     Output is real-Caddy inspection, not Cadder runtime state.\n\
+     Next: {recovery}{details}",
+    command.command,
   )
 }
 
@@ -371,11 +386,13 @@ where
   let heartbeat_session = session.clone();
   let heartbeat_registration = registration_id.clone();
   let heartbeat_nonce = shim_session_nonce.clone();
-  let heartbeat = tokio::spawn(async move {
-    let mut interval = interval(Duration::from_secs(5));
-    loop {
-      interval.tick().await;
-      let _response: Result<BasicResponse> = heartbeat_session
+  let (heartbeat_stop_tx, heartbeat_stop_rx) = oneshot::channel();
+  let heartbeat = tokio::spawn(run_heartbeat_loop(heartbeat_stop_rx, move || {
+    let heartbeat_session = heartbeat_session.clone();
+    let heartbeat_registration = heartbeat_registration.clone();
+    let heartbeat_nonce = heartbeat_nonce.clone();
+    async move {
+      let _response: IpcClientResult<BasicResponse> = heartbeat_session
         .lock()
         .await
         .request(
@@ -389,12 +406,13 @@ where
         )
         .await;
     }
-  });
+  }));
 
-  shutdown
+  let shutdown_result = shutdown
     .await
-    .context("wait for shutdown signal while registered with Cadder")?;
-  heartbeat.abort();
+    .context("wait for shutdown signal while registered with Cadder");
+  stop_heartbeat(heartbeat_stop_tx, heartbeat).await?;
+  shutdown_result?;
 
   let _response: BasicResponse = session
     .lock()
@@ -411,6 +429,31 @@ where
     .await?;
 
   Ok(ExitCode::SUCCESS)
+}
+
+async fn run_heartbeat_loop<F, Fut>(mut stop: oneshot::Receiver<()>, mut send_heartbeat: F)
+where
+  F: FnMut() -> Fut,
+  Fut: Future<Output = ()>,
+{
+  let mut heartbeat_interval = interval(Duration::from_secs(5));
+  loop {
+    tokio::select! {
+      biased;
+      _ = &mut stop => break,
+      _ = heartbeat_interval.tick() => send_heartbeat().await,
+    }
+  }
+}
+
+async fn stop_heartbeat(
+  stop: oneshot::Sender<()>,
+  heartbeat: tokio::task::JoinHandle<()>,
+) -> Result<()> {
+  let _ = stop.send(());
+  heartbeat
+    .await
+    .context("wait for the heartbeat loop to stop before unregistering")
 }
 
 enum ManagedRunTarget {
@@ -432,7 +475,7 @@ async fn open_managed_run_target_with_starter<F, Fut>(
 ) -> Result<ManagedRunTarget>
 where
   F: FnOnce(ShimArgs, RuntimePaths) -> Fut,
-  Fut: Future<Output = Result<()>>,
+  Fut: Future<Output = IpcClientResult<()>>,
 {
   match CadderSession::connect(paths).await {
     Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
@@ -440,37 +483,39 @@ where
       eprintln!("{}", managed_backend_unavailable_message(paths, &error));
       Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
     }
-    Err(error) => {
-      let attach_error = format_error_chain(&error);
-      match start_daemon(args.clone(), paths.clone()).await {
-        Ok(()) => match CadderSession::connect(paths).await {
-          Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
-          Err(error) => {
-            let daemon_error = format!(
-              "started cadderd, but attach failed: {}",
-              format_error_chain(&error)
-            );
-            eprintln!(
-              "{}",
-              managed_recovery_failed_message(paths, &attach_error, &daemon_error)
-            );
-            Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
-          }
-        },
-        Err(error) => {
-          let daemon_error = format_error_chain(&error);
+    Err(error) => match start_daemon(args.clone(), paths.clone()).await {
+      Ok(()) => match CadderSession::connect(paths).await {
+        Ok(session) => Ok(ManagedRunTarget::Cadder(Arc::new(Mutex::new(session)))),
+        Err(recovery_error) => {
           eprintln!(
             "{}",
-            managed_recovery_failed_message(paths, &attach_error, &daemon_error)
+            managed_recovery_failed_message(
+              paths,
+              &error,
+              ManagedRecoveryStage::PostStartAttach,
+              &recovery_error,
+            )
           );
           Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
         }
+      },
+      Err(recovery_error) => {
+        eprintln!(
+          "{}",
+          managed_recovery_failed_message(
+            paths,
+            &error,
+            ManagedRecoveryStage::DaemonStart,
+            &recovery_error,
+          )
+        );
+        Ok(ManagedRunTarget::Exit(ExitCode::FAILURE))
       }
-    }
+    },
   }
 }
 
-async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> Result<()> {
+async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> IpcClientResult<()> {
   ensure_daemon_running_with_options(
     paths,
     DaemonLaunchOptions {
@@ -485,7 +530,7 @@ async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> Result<(
   .await
 }
 
-async fn start_missing_daemon_owned(args: ShimArgs, paths: RuntimePaths) -> Result<()> {
+async fn start_missing_daemon_owned(args: ShimArgs, paths: RuntimePaths) -> IpcClientResult<()> {
   start_missing_daemon(&args, &paths).await
 }
 
@@ -509,54 +554,115 @@ async fn run_mock_caddy_command(args: &[String]) -> Result<ExitCode> {
   }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedRecoveryStage {
+  DaemonStart,
+  PostStartAttach,
+}
+
+impl ManagedRecoveryStage {
+  fn label(self) -> &'static str {
+    match self {
+      Self::DaemonStart => "Daemon start failed",
+      Self::PostStartAttach => "Post-start attach failed",
+    }
+  }
+}
+
 fn managed_recovery_failed_message(
   paths: &RuntimePaths,
-  attach_error: &str,
-  daemon_error: &str,
+  attach_error: &IpcClientError,
+  recovery_stage: ManagedRecoveryStage,
+  recovery_error: &IpcClientError,
 ) -> String {
+  let recovery = if recovery_stage == ManagedRecoveryStage::PostStartAttach
+    && recovery_error.is_daemon_unavailable()
+  {
+    format!(
+      "Run `cadderd --runtime-dir \"{}\"` in foreground diagnostic mode, correct the startup error, then retry.",
+      paths.runtime_dir().display()
+    )
+  } else {
+    recovery_error
+      .guidance()
+      .map(ToOwned::to_owned)
+      .unwrap_or_else(|| {
+        "Inspect the Cadder daemon diagnostics, correct the reported error, then retry.".to_string()
+      })
+  };
   format!(
     "Cadder could not recover `caddy run` for backend runtime `{}`.\n\
-     Initial attach failed: {attach_error}.\n\
-     Daemon recovery failed: {daemon_error}.\n\
      Managed `caddy run` was not delegated to real Caddy because Cadder must update runtime state through `cadderd`.\n\
-     Next: configure a safe real Caddy command, start `cadderd --background --runtime-dir \"{}\"`, or run `cadder daemon start` for the same runtime and retry.",
+     Next: {recovery}\n\
+     Details:\n\
+     - Initial attach failed: {}\n\
+     - {}: {}",
     paths.runtime_dir().display(),
-    paths.runtime_dir().display(),
+    format_ipc_error_chain(attach_error),
+    recovery_stage.label(),
+    format_ipc_error_chain(recovery_error),
   )
 }
 
-fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &anyhow::Error) -> String {
+fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &IpcClientError) -> String {
   let runtime_dir = paths.runtime_dir().display();
-  let retry = format!(
-    "Start `cadderd --background --runtime-dir \"{}\"` explicitly, or run `cadder daemon start`, then retry `caddy run`.",
-    runtime_dir
-  );
+  let details = format_ipc_diagnostic_details(error);
 
   if daemon_error_indicates_not_running(error) {
-    format!("Cadder backend `cadderd` is not running for runtime `{runtime_dir}`. {retry}")
-  } else {
     format!(
-      "Cadder could not attach `caddy run` to backend runtime `{runtime_dir}`: {}. {retry}",
-      format_error_chain(error)
+      "Cadder backend `cadderd` is not running for runtime `{runtime_dir}`.\n\
+       Managed `caddy run` was not delegated to real Caddy.\n\
+       Next: Run `cadder daemon start --runtime-dir \"{runtime_dir}\"`, then retry `caddy run`.{details}"
+    )
+  } else {
+    let guidance = error.guidance().unwrap_or(
+      "Inspect the Cadder daemon diagnostics, correct the reported error, then retry `caddy run`.",
+    );
+    format!(
+      "Cadder could not attach `caddy run` to backend runtime `{runtime_dir}`: {}\n\
+       Managed `caddy run` was not delegated to real Caddy.\n\
+       Next: {guidance}{details}",
+      terminal_sentence(error.message()),
     )
   }
 }
 
-fn daemon_error_indicates_not_running(error: &anyhow::Error) -> bool {
-  error.chain().any(|cause| {
-    cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-      matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound
-          | std::io::ErrorKind::ConnectionRefused
-          | std::io::ErrorKind::ConnectionAborted
-          | std::io::ErrorKind::ConnectionReset
-          | std::io::ErrorKind::UnexpectedEof
-      )
-    })
-  })
+fn daemon_error_indicates_not_running(error: &IpcClientError) -> bool {
+  error.is_daemon_unavailable()
 }
 
+fn format_ipc_error_chain(error: &IpcClientError) -> String {
+  let mut messages = vec![error.to_string()];
+  let mut source = std::error::Error::source(error);
+  while let Some(error) = source {
+    let message = error.to_string();
+    if messages.last() != Some(&message) {
+      messages.push(message);
+    }
+    source = error.source();
+  }
+  messages.join(": ")
+}
+
+fn format_ipc_diagnostic_details(error: &IpcClientError) -> String {
+  let details = format_ipc_error_chain(error);
+  if details == error.message() {
+    String::new()
+  } else {
+    format!("\nDetails: {details}")
+  }
+}
+
+fn terminal_sentence(message: &str) -> String {
+  let message = message.trim();
+  if message.ends_with(['.', '!', '?']) {
+    message.to_string()
+  } else {
+    format!("{message}.")
+  }
+}
+
+#[cfg(test)]
 fn format_error_chain(error: &anyhow::Error) -> String {
   let mut messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
   messages.dedup();
@@ -652,6 +758,7 @@ mod tests {
   use cadder_daemon::{
     CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer, DaemonState, ProcessRuntime,
   };
+  use cadder_protocol::{ProtocolError, ProtocolErrorCode, ProtocolErrorKind};
   use clap::CommandFactory;
   use std::{fs, path::Path, sync::Mutex as StdMutex};
   use tokio::{sync::watch, time::sleep};
@@ -832,64 +939,145 @@ mod tests {
     assert_eq!(code, ExitCode::FAILURE);
   }
 
-  #[test]
-  fn managed_backend_unavailable_message_explains_manual_backend_start() {
-    let paths = RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-shim-test"))).unwrap();
-    let error = anyhow::Error::from(std::io::Error::new(
-      std::io::ErrorKind::ConnectionRefused,
-      "connection refused",
-    ));
+  #[tokio::test]
+  async fn typed_error_managed_backend_unavailable_message_explains_manual_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let error = CadderSession::connect(&paths).await.unwrap_err();
 
     let message = managed_backend_unavailable_message(&paths, &error);
 
     assert!(message.contains("Cadder backend `cadderd` is not running"));
-    assert!(message.contains("Start `cadderd --background --runtime-dir"));
+    assert!(message.contains("Next: Run `cadder daemon start --runtime-dir"));
     assert!(message.contains("retry `caddy run`"));
+    assert!(
+      message
+        .find("Next:")
+        .expect("message should include recovery")
+        < message
+          .find("Details:")
+          .expect("message should place diagnostics after recovery")
+    );
   }
 
-  #[test]
-  fn read_only_real_caddy_inspection_message_labels_output_and_recovery() {
-    let paths =
-      RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-read-only-test"))).unwrap();
+  #[tokio::test]
+  async fn typed_error_read_only_inspection_uses_matching_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let args = ["version".to_string()];
     let command = classify_caddy_command(&args);
+    let unavailable = CadderSession::connect(&paths).await.unwrap_err();
 
-    let message = read_only_real_caddy_inspection_message(
-      &paths,
-      command,
-      true,
-      "connect to Cadder daemon socket failed",
-    );
+    let message = read_only_real_caddy_inspection_message(&paths, command, &unavailable);
 
     assert!(message.contains("cadderd` is not running"));
     assert!(message.contains("read-only `caddy version`"));
     assert!(message.contains("real-Caddy inspection, not Cadder runtime state"));
     assert!(message.contains("cadder daemon start"));
+    assert!(!message.lines().next().unwrap().contains("os error"));
+    assert!(
+      message
+        .find("Next:")
+        .expect("message should include recovery")
+        < message
+          .find("Details:")
+          .expect("message should place diagnostics after recovery")
+    );
+
+    let permission = IpcClientError::Daemon(ProtocolError::access_denied(
+      message_types::QUERY_STATE_REQUEST,
+      "Access is denied.",
+      Some("Use the account that owns this runtime.".to_string()),
+    ));
+    let permission_message = read_only_real_caddy_inspection_message(&paths, command, &permission);
+    assert!(permission_message.contains("Next: Use the account that owns this runtime."));
+    assert!(!permission_message.contains("cadder daemon start"));
+    assert!(
+      !permission_message
+        .lines()
+        .next()
+        .unwrap()
+        .contains("os error")
+    );
   }
 
   #[test]
-  fn backend_error_helpers_classify_transport_and_protocol_failures() {
+  fn typed_error_backend_helpers_classify_transport_and_protocol_failures() {
     let paths =
       RuntimePaths::resolve(Some(std::env::temp_dir().join("cadder-shim-protocol-test"))).unwrap();
-    let protocol_error = anyhow!("protocol mismatch");
+    let protocol_error = ipc_error(
+      ProtocolErrorKind::IncompatibleProtocolVersion,
+      "incompatible_protocol",
+      "protocol mismatch",
+    );
     let message = managed_backend_unavailable_message(&paths, &protocol_error);
 
     assert!(message.contains("could not attach `caddy run`"));
     assert!(message.contains("protocol mismatch"));
-    for kind in [
-      std::io::ErrorKind::NotFound,
-      std::io::ErrorKind::ConnectionAborted,
-      std::io::ErrorKind::ConnectionReset,
-      std::io::ErrorKind::UnexpectedEof,
-    ] {
-      let error = anyhow::Error::from(std::io::Error::new(kind, "backend unavailable"));
-      assert!(daemon_error_indicates_not_running(&error));
-    }
+    assert!(message.contains("\nNext: Inspect the Cadder daemon diagnostics"));
+    assert!(!message.contains("cadder daemon start"));
+
+    let permission = IpcClientError::Daemon(ProtocolError::access_denied(
+      message_types::QUERY_STATE_REQUEST,
+      "Access is denied.",
+      Some("Use the account that owns this runtime.".to_string()),
+    ));
+    let permission_message = managed_backend_unavailable_message(&paths, &permission);
+    assert!(permission_message.contains("Next: Use the account that owns this runtime."));
+    assert!(!permission_message.contains("cadder daemon start"));
+    let unavailable = ipc_error(
+      ProtocolErrorKind::Internal,
+      "daemon_unavailable",
+      "backend unavailable",
+    );
+    assert!(!daemon_error_indicates_not_running(&unavailable));
 
     let duplicated = Err::<(), _>(anyhow!("same")).context("same").unwrap_err();
     assert_eq!(format_error_chain(&duplicated), "same");
     let nested = Err::<(), _>(anyhow!("inner")).context("outer").unwrap_err();
     assert_eq!(format_error_chain(&nested), "outer: inner");
+  }
+
+  #[tokio::test]
+  async fn typed_error_recovery_message_uses_the_recovery_failure_guidance() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let attach_error = CadderSession::connect(&paths).await.unwrap_err();
+    let start_error = IpcClientError::Daemon(ProtocolError::new(
+      ProtocolErrorKind::InvalidInput,
+      ProtocolErrorCode::parse("invalid_input").unwrap(),
+      "The daemon launch configuration is invalid.",
+      Some("Correct the daemon launch configuration, then retry.".into()),
+      false,
+    ));
+
+    let message = managed_recovery_failed_message(
+      &paths,
+      &attach_error,
+      ManagedRecoveryStage::DaemonStart,
+      &start_error,
+    );
+
+    assert!(message.contains("Next: Correct the daemon launch configuration, then retry."));
+    assert!(!message.contains("cadder daemon start"));
+
+    let post_start_message = managed_recovery_failed_message(
+      &paths,
+      &attach_error,
+      ManagedRecoveryStage::PostStartAttach,
+      &attach_error,
+    );
+    assert!(post_start_message.contains("foreground diagnostic mode"));
+  }
+
+  fn ipc_error(kind: ProtocolErrorKind, code: &str, message: &str) -> IpcClientError {
+    IpcClientError::Daemon(ProtocolError::new(
+      kind,
+      ProtocolErrorCode::parse(code).unwrap(),
+      message,
+      None,
+      false,
+    ))
   }
 
   #[tokio::test]
@@ -984,7 +1172,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn open_managed_run_target_reports_complete_recovery_failure() {
+  async fn typed_error_managed_run_reports_complete_recovery_failure() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let args = ShimArgs {
@@ -995,8 +1183,13 @@ mod tests {
       caddy_backend: None,
       caddy_args: vec!["run".to_string()],
     };
-    let starter =
-      |_args: ShimArgs, _paths: RuntimePaths| async { Err(anyhow!("test daemon start failed")) };
+    let starter = |_args: ShimArgs, _paths: RuntimePaths| async {
+      Err(ipc_error(
+        ProtocolErrorKind::Internal,
+        "daemon_start_failed",
+        "Test daemon start failed.",
+      ))
+    };
 
     let target = open_managed_run_target_with_starter(&args, &paths, starter)
       .await
@@ -1015,6 +1208,51 @@ mod tests {
       .unwrap();
 
     assert_eq!(code, ExitCode::SUCCESS);
+  }
+
+  #[tokio::test]
+  async fn heartbeat_stop_waits_for_in_flight_request_before_unregister() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (heartbeat_started_tx, heartbeat_started_rx) = oneshot::channel();
+    let (heartbeat_release_tx, heartbeat_release_rx) = oneshot::channel();
+    let mut heartbeat_started_tx = Some(heartbeat_started_tx);
+    let mut heartbeat_release_rx = Some(heartbeat_release_rx);
+    let heartbeat_events = events.clone();
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = oneshot::channel();
+    let heartbeat = tokio::spawn(run_heartbeat_loop(heartbeat_stop_rx, move || {
+      let started = heartbeat_started_tx
+        .take()
+        .expect("the test heartbeat should start once");
+      let release = heartbeat_release_rx
+        .take()
+        .expect("the test heartbeat should finish once");
+      let events = heartbeat_events.clone();
+      async move {
+        events.lock().await.push("heartbeat-started");
+        started.send(()).unwrap();
+        release.await.unwrap();
+        events.lock().await.push("heartbeat-finished");
+      }
+    }));
+
+    heartbeat_started_rx.await.unwrap();
+    let unregister_events = events.clone();
+    let shutdown = tokio::spawn(async move {
+      stop_heartbeat(heartbeat_stop_tx, heartbeat).await.unwrap();
+      unregister_events.lock().await.push("unregister");
+    });
+    tokio::task::yield_now().await;
+
+    assert!(!shutdown.is_finished());
+    assert_eq!(*events.lock().await, ["heartbeat-started"]);
+
+    heartbeat_release_tx.send(()).unwrap();
+    shutdown.await.unwrap();
+
+    assert_eq!(
+      *events.lock().await,
+      ["heartbeat-started", "heartbeat-finished", "unregister"]
+    );
   }
 
   #[tokio::test]

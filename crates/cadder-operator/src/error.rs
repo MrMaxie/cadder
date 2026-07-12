@@ -1,8 +1,12 @@
 use anyhow::Error;
+use cadder_daemon::{IpcClientError, IpcClientPhase, LocalIpcErrorCode, LocalIpcErrorKind};
+use cadder_protocol::{ProtocolError, ProtocolErrorKind, RequestId};
 use serde::Serialize;
 use std::{
+  error::Error as StdError,
   fmt::{self, Display},
   path::Path,
+  sync::Arc,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,13 +67,45 @@ impl OperatorErrorKind {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OperatorError {
   pub kind: OperatorErrorKind,
   pub message: String,
   pub guidance: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub daemon_error: Option<ProtocolError>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub local_error: Option<Box<OperatorLocalIpcError>>,
   #[serde(skip)]
   pub command: &'static str,
+  #[serde(skip)]
+  ipc_error: Option<Arc<IpcClientError>>,
+}
+
+impl PartialEq for OperatorError {
+  fn eq(&self, other: &Self) -> bool {
+    self.kind == other.kind
+      && self.message == other.message
+      && self.guidance == other.guidance
+      && self.daemon_error == other.daemon_error
+      && self.local_error == other.local_error
+      && self.command == other.command
+  }
+}
+
+impl Eq for OperatorError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorLocalIpcError {
+  pub kind: LocalIpcErrorKind,
+  pub phase: IpcClientPhase,
+  pub code: LocalIpcErrorCode,
+  pub message: String,
+  pub guidance: Option<String>,
+  pub retryable: bool,
+  pub request_id: Option<RequestId>,
+  pub operation: Option<String>,
 }
 
 impl OperatorError {
@@ -83,7 +119,10 @@ impl OperatorError {
       kind,
       message: message.into(),
       guidance,
+      daemon_error: None,
+      local_error: None,
       command,
+      ipc_error: None,
     }
   }
 
@@ -138,61 +177,110 @@ impl OperatorError {
     )
   }
 
-  pub fn daemon_request(command: &'static str, paths: &Path, action: &str, error: &Error) -> Self {
-    if error_indicates_permission(error) {
-      return Self::new(
-        command,
-        OperatorErrorKind::PermissionOrElevation,
-        format!("Could not {action}: {}.", format_error_chain(error)),
-        Some("Check file-system and local IPC permissions, then retry the command.".to_string()),
-      );
-    }
-
-    if daemon_error_indicates_unavailable(error) {
-      return Self::new(
-        command,
-        OperatorErrorKind::DaemonUnavailable,
-        format!(
-          "Cadder daemon is unavailable for runtime `{}`.",
-          paths.display()
-        ),
-        Some(start_guidance(paths)),
-      );
-    }
-
-    Self::new(
-      command,
-      OperatorErrorKind::IpcFailure,
-      format!("Could not {action}: {}.", format_error_chain(error)),
-      Some(
-        "The daemon responded unexpectedly or the IPC exchange failed before completion."
-          .to_string(),
-      ),
-    )
+  pub fn daemon_request(
+    command: &'static str,
+    paths: &Path,
+    action: &str,
+    error: IpcClientError,
+  ) -> Self {
+    let kind = operator_kind_for_ipc(&error);
+    let message = if kind == OperatorErrorKind::DaemonUnavailable {
+      format!(
+        "Cadder daemon is unavailable for runtime `{}`.",
+        paths.display()
+      )
+    } else {
+      format!("Could not {action}: {}", sentence(error.message()))
+    };
+    let guidance = if kind == OperatorErrorKind::DaemonUnavailable {
+      Some(start_guidance(paths))
+    } else {
+      error.guidance().map(ToOwned::to_owned).or_else(|| {
+        if kind == OperatorErrorKind::IpcFailure {
+          Some(format!(
+            "Inspect cadderd diagnostics for runtime `{}`, correct the reported protocol or transport error, then retry.",
+            paths.display()
+          ))
+        } else {
+          None
+        }
+      })
+    };
+    Self::new(command, kind, message, guidance).with_ipc_error(error)
   }
 
-  pub fn daemon_start(command: &'static str, paths: &Path, error: &Error) -> Self {
-    if error_indicates_permission(error) {
-      return Self::new(
-        command,
-        OperatorErrorKind::PermissionOrElevation,
-        format!("Could not start cadderd: {}.", format_error_chain(error)),
-        Some(
-          "Check the cadderd path, executable permissions, and runtime directory permissions before retrying."
-            .to_string(),
-        ),
-      );
-    }
+  pub fn daemon_start(command: &'static str, paths: &Path, error: IpcClientError) -> Self {
+    let permission_denied = error.is_permission_denied();
+    let kind = if permission_denied {
+      OperatorErrorKind::PermissionOrElevation
+    } else {
+      OperatorErrorKind::DaemonStartFailure
+    };
+    let guidance = error.guidance().map(ToOwned::to_owned).or_else(|| {
+      Some(if permission_denied {
+        "Use the account that owns this Cadder runtime and verify access to the daemon executable and runtime directory."
+          .to_string()
+      } else {
+        format!(
+          "Retry `cadder daemon start --runtime-dir \"{}\"` after fixing the daemon path or startup problem.",
+          paths.display()
+        )
+      })
+    });
 
     Self::new(
       command,
-      OperatorErrorKind::DaemonStartFailure,
-      format!("Could not start cadderd: {}.", format_error_chain(error)),
-      Some(format!(
-        "Retry `cadder daemon start --runtime-dir \"{}\"` after fixing the daemon path or startup problem.",
-        paths.display()
-      )),
+      kind,
+      format!("Could not start cadderd: {}", sentence(error.message())),
+      guidance,
     )
+    .with_ipc_error(error)
+  }
+
+  fn with_ipc_error(mut self, error: IpcClientError) -> Self {
+    self.daemon_error = error.daemon_error().cloned();
+    self.local_error = error.local_error().map(|local| {
+      Box::new(OperatorLocalIpcError {
+        kind: local.kind(),
+        phase: local.phase(),
+        code: local.code(),
+        message: local.message().to_string(),
+        guidance: local.guidance().map(ToOwned::to_owned),
+        retryable: local.retryable(),
+        request_id: local.request_id().cloned(),
+        operation: local.operation().map(ToOwned::to_owned),
+      })
+    });
+    self.ipc_error = Some(Arc::new(error));
+    self
+  }
+}
+
+pub(crate) fn sentence(message: &str) -> String {
+  let message = message.trim();
+  if message.ends_with(['.', '!', '?']) {
+    message.to_string()
+  } else {
+    format!("{message}.")
+  }
+}
+
+fn operator_kind_for_ipc(error: &IpcClientError) -> OperatorErrorKind {
+  if error.is_permission_denied() {
+    return OperatorErrorKind::PermissionOrElevation;
+  }
+  if daemon_error_indicates_unavailable(error) {
+    return OperatorErrorKind::DaemonUnavailable;
+  }
+  if error.is_protocol_incompatible() {
+    return OperatorErrorKind::UnsupportedOperation;
+  }
+  match error.daemon_error().map(|error| &error.kind) {
+    Some(ProtocolErrorKind::Conflict) => OperatorErrorKind::ConflictOrRejected,
+    Some(
+      ProtocolErrorKind::IncompatibleProtocolVersion | ProtocolErrorKind::UnsupportedCapability,
+    ) => OperatorErrorKind::UnsupportedOperation,
+    _ => OperatorErrorKind::IpcFailure,
   }
 }
 
@@ -202,7 +290,14 @@ impl Display for OperatorError {
   }
 }
 
-impl std::error::Error for OperatorError {}
+impl std::error::Error for OperatorError {
+  fn source(&self) -> Option<&(dyn StdError + 'static)> {
+    self
+      .ipc_error
+      .as_deref()
+      .map(|error| error as &(dyn StdError + 'static))
+  }
+}
 
 pub fn format_error_chain(error: &Error) -> String {
   let mut messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
@@ -210,19 +305,8 @@ pub fn format_error_chain(error: &Error) -> String {
   messages.join(": ")
 }
 
-pub fn daemon_error_indicates_unavailable(error: &Error) -> bool {
-  error.chain().any(|cause| {
-    cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
-      matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound
-          | std::io::ErrorKind::ConnectionRefused
-          | std::io::ErrorKind::ConnectionAborted
-          | std::io::ErrorKind::ConnectionReset
-          | std::io::ErrorKind::UnexpectedEof
-      )
-    })
-  })
+pub fn daemon_error_indicates_unavailable(error: &IpcClientError) -> bool {
+  error.is_daemon_unavailable()
 }
 
 pub fn error_indicates_permission(error: &Error) -> bool {
@@ -250,6 +334,8 @@ pub fn start_guidance(paths: &Path) -> String {
 mod tests {
   use super::*;
   use anyhow::{Context, anyhow};
+  use cadder_daemon::{CadderSession, RuntimePaths};
+  use cadder_protocol::ProtocolErrorCode;
 
   #[test]
   fn exit_codes_remain_stable_for_all_error_kinds() {
@@ -264,19 +350,14 @@ mod tests {
     assert_eq!(OperatorExitCode::IpcFailure.code(), 9);
   }
 
-  #[test]
-  fn daemon_unavailable_maps_to_stable_exit_code() {
-    let error = Error::from(std::io::Error::new(
-      std::io::ErrorKind::ConnectionRefused,
-      "connection refused",
-    ));
+  #[tokio::test]
+  async fn typed_error_daemon_unavailable_maps_to_stable_exit_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let error = CadderSession::connect(&paths).await.unwrap_err();
 
-    let mapped = OperatorError::daemon_request(
-      "domains list",
-      Path::new("runtime"),
-      "query domains",
-      &error,
-    );
+    let mapped =
+      OperatorError::daemon_request("domains list", Path::new("runtime"), "query domains", error);
 
     assert_eq!(mapped.kind, OperatorErrorKind::DaemonUnavailable);
     assert_eq!(mapped.exit_code().code(), 3);
@@ -284,48 +365,70 @@ mod tests {
   }
 
   #[test]
-  fn permission_errors_map_to_permission_exit_code() {
-    let error = Error::from(std::io::Error::new(
-      std::io::ErrorKind::PermissionDenied,
-      "permission denied",
+  fn typed_error_permission_maps_to_permission_exit_code() {
+    let error = IpcClientError::Daemon(ProtocolError::access_denied(
+      "start-daemon",
+      "Permission denied.",
+      None,
     ));
 
-    let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), &error);
+    let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), error);
 
     assert_eq!(mapped.kind, OperatorErrorKind::PermissionOrElevation);
     assert_eq!(mapped.exit_code().code(), 7);
   }
 
   #[test]
-  fn daemon_request_maps_unknown_errors_to_ipc_failure() {
-    let error = anyhow!("unexpected daemon envelope");
+  fn typed_error_unknown_daemon_error_maps_to_ipc_failure() {
+    let error = daemon_ipc_error(
+      ProtocolErrorKind::Internal,
+      "internal",
+      "Unexpected daemon envelope.",
+    );
 
     let mapped = OperatorError::daemon_request(
       "logs show",
       Path::new("runtime"),
       "query retained logs",
-      &error,
+      error,
     );
 
     assert_eq!(mapped.kind, OperatorErrorKind::IpcFailure);
-    assert!(mapped.message.contains("unexpected daemon envelope"));
+    assert!(mapped.message.contains("Unexpected daemon envelope"));
     assert!(
       mapped
         .guidance
         .as_deref()
-        .is_some_and(|guidance| guidance.contains("IPC exchange failed"))
+        .is_some_and(|guidance| guidance.contains("Inspect cadderd diagnostics"))
     );
   }
 
   #[test]
-  fn daemon_start_maps_non_permission_errors_to_start_failure() {
-    let error = anyhow!("spawn failed");
+  fn typed_error_incompatible_protocol_maps_to_unsupported_exit_code() {
+    let error = IpcClientError::Daemon(ProtocolError::incompatible_protocol_version(0));
 
-    let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), &error);
+    let mapped =
+      OperatorError::daemon_request("status", Path::new("runtime"), "query state", error);
+
+    assert_eq!(mapped.kind, OperatorErrorKind::UnsupportedOperation);
+    assert_eq!(mapped.exit_code().code(), 8);
+    assert!(mapped.daemon_error.is_some());
+  }
+
+  #[test]
+  fn typed_error_daemon_start_failure_keeps_stable_exit_code() {
+    let error = daemon_ipc_error(
+      ProtocolErrorKind::Internal,
+      "daemon_start_failed",
+      "Spawn failed.",
+    );
+
+    let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), error);
 
     assert_eq!(mapped.kind, OperatorErrorKind::DaemonStartFailure);
     assert_eq!(mapped.exit_code().code(), 4);
-    assert!(mapped.message.contains("spawn failed"));
+    assert!(mapped.message.contains("Spawn failed."));
+    assert!(!mapped.message.ends_with(".."));
   }
 
   #[test]
@@ -388,29 +491,40 @@ mod tests {
       std::io::ErrorKind::PermissionDenied,
       "access is denied",
     ));
+    let permission_error = IpcClientError::Daemon(ProtocolError::access_denied(
+      "query-history",
+      "Access is denied.",
+      None,
+    ));
     let mapped = OperatorError::daemon_request(
       "history show",
       Path::new("runtime"),
       "query history",
-      &permission,
+      permission_error,
     );
     assert_eq!(mapped.kind, OperatorErrorKind::PermissionOrElevation);
     assert!(error_indicates_permission(&permission));
 
-    for kind in [
-      std::io::ErrorKind::NotFound,
-      std::io::ErrorKind::ConnectionRefused,
-      std::io::ErrorKind::ConnectionAborted,
-      std::io::ErrorKind::ConnectionReset,
-      std::io::ErrorKind::UnexpectedEof,
-    ] {
-      let error = Error::from(std::io::Error::new(kind, "daemon unavailable"));
-      assert!(daemon_error_indicates_unavailable(&error), "{kind:?}");
-    }
+    let unavailable = daemon_ipc_error(
+      ProtocolErrorKind::Internal,
+      "daemon_unavailable",
+      "The daemon is unavailable.",
+    );
+    assert!(!daemon_error_indicates_unavailable(&unavailable));
 
     let text_permission = anyhow!("Access is denied while opening pipe");
     assert!(error_indicates_permission(&text_permission));
     let chained = Err::<(), _>(anyhow!("outer")).context("outer").unwrap_err();
     assert_eq!(format_error_chain(&chained), "outer");
+  }
+
+  fn daemon_ipc_error(kind: ProtocolErrorKind, code: &str, message: &str) -> IpcClientError {
+    IpcClientError::Daemon(ProtocolError::new(
+      kind,
+      ProtocolErrorCode::parse(code).unwrap(),
+      message,
+      None,
+      false,
+    ))
   }
 }
