@@ -38,7 +38,7 @@ The implementation touches `cadder-protocol`, `cadder-daemon`, `cadderd`, `cadde
 
 ## Success criteria
 
-- The local endpoint authenticates the peer before reading a request and is reachable only by the runtime owner on every supported operating system.
+- The local endpoint authenticates the peer before buffering or decoding any protocol frame and is reachable only by the runtime owner on every supported operating system.
 - Server, client, shim, and subscriptions reject any NDJSON frame larger than 1 MiB without unbounded allocation.
 - A profile admits at most 64 live connections; request, stream, and shutdown deadlines match the accepted contract and leave no detached tasks.
 - Every connection completes a version-and-capability handshake tied to the current discovery instance before dispatch.

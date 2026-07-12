@@ -7,16 +7,16 @@
 
 ## 2. Authenticated discovery and transport
 
-- [ ] 2.1 `[IPC-001]` Authenticate the OS peer immediately after accept through one testable platform identity boundary (verification: `cargo test -p cadder-daemon peer_identity`)
+- [ ] 2.1 `[IPC-001]` Authenticate the OS peer immediately after accept and before protocol-frame buffering through one connection-owning, testable platform identity boundary (verification: `cargo test -p cadder-daemon peer_identity`)
 - [ ] 2.2 `[IPC-001]` Enforce Unix filesystem socket ownership, `0700/0600` modes, and effective-peer UID checks (verification: Linux and macOS jobs run `cargo test -p cadder-daemon unix_ipc_security`)
-- [ ] 2.3 `[IPC-001]` Enforce a local-only Windows named pipe, owner SID DACL, impersonated client SID, and guaranteed revert paths (verification: Windows job runs `cargo test -p cadder-daemon windows_ipc_security`)
+- [ ] 2.3 `[IPC-001]` Enforce a local-only Windows named pipe, owner SID DACL, fixed transport-authentication preface, impersonated client SID, verified revert paths, and fail-stop behavior when impersonation cannot be reverted (verification: Windows job runs `cargo test -p cadder-daemon windows_ipc_security`)
 - [ ] 2.4 `[IPC-003]` Implement crash-safe atomic discovery publication and generation-aware cleanup for Unix and Windows algorithms (verification: Windows, Linux, and macOS jobs run `cargo test -p cadder-daemon discovery_publication`)
 - [ ] 2.5 `[IPC-003]` Require discovery validation and an instance-matching handshake for readiness and all new sessions (verification: `cargo test -p cadder-daemon discovery_handshake`)
 
 ## 3. Bounded IPC and shutdown
 
 - [ ] 3.1 `[IPC-004]` Replace every unbounded NDJSON reader and writer with the shared 1 MiB bounded codec (verification: `cargo test -p cadder-daemon ipc_codec`)
-- [ ] 3.2 `[IPC-004]` `[IPC-005]` Enforce one active request, reject pipelining, cap live connections at 64, and apply operation-specific deadlines (verification: `cargo test -p cadder-daemon ipc_limits`)
+- [ ] 3.2 `[IPC-004]` `[IPC-005]` Enforce the shared accept-to-first-frame deadline, one active request, pipelining rejection, the 64-connection cap, and operation-specific deadlines (verification: `cargo test -p cadder-daemon ipc_limits`)
 - [ ] 3.3 `[IPC-005]` Bound stream records and bytes, emit heartbeats and gap outcomes, and close stalled writers (verification: `cargo test -p cadder-daemon stream_limits`)
 - [ ] 3.4 `[RUN-005]` `[IPC-005]` Add cancellation/task ownership, lifecycle epochs, and per-operation commit permits that reject late mutation without invalidating unrelated work (verification: `cargo test -p cadder-daemon operation_fence`)
 - [ ] 3.5 `[RUN-005]` `[IPC-009]` Implement the shared accept, request/stream, and owned-runtime shutdown phases and their fixed budgets (verification: `cargo test -p cadder-daemon shutdown_coordinator`)
