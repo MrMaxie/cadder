@@ -36,8 +36,9 @@ testcontainers = "0.27.3"
 
 [target."cfg(windows)".dependencies]
 is_elevated = "=0.1.2"
+widestring = "=1.2.1"
 windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Threading"] }
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.186"

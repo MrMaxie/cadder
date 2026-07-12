@@ -3,6 +3,10 @@ use crate::{
   IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcPrincipal, IpcSecurityPolicy,
   LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile,
   ipc_client_error::LocalIpcErrorContext,
+  ipc_security::{
+    IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_listener_options,
+    send_peer_authentication_preface,
+  },
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
 use anyhow::{Context, Result};
@@ -42,7 +46,7 @@ pub struct DaemonServer {
   paths: RuntimePaths,
   state: DaemonState,
   security_policy: IpcSecurityPolicy,
-  peer_principal_override: Option<IpcPrincipal>,
+  peer_identity_resolver: IpcPeerIdentityResolver,
 }
 
 impl DaemonServer {
@@ -51,23 +55,45 @@ impl DaemonServer {
       paths,
       state,
       security_policy: IpcSecurityPolicy,
-      peer_principal_override: None,
+      peer_identity_resolver: IpcPeerIdentityResolver::System,
     }
   }
 
+  #[cfg(test)]
   pub fn with_peer_principal(mut self, peer_principal: IpcPrincipal) -> Self {
-    self.peer_principal_override = Some(peer_principal);
+    self.peer_identity_resolver = IpcPeerIdentityResolver::Fixed(peer_principal);
+    self
+  }
+
+  #[cfg(test)]
+  pub fn with_peer_identity_failure(mut self, kind: io::ErrorKind) -> Self {
+    self.peer_identity_resolver = IpcPeerIdentityResolver::Failure(kind);
+    self
+  }
+
+  #[cfg(test)]
+  pub fn with_counting_peer_principal(
+    mut self,
+    peer_principal: IpcPrincipal,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+  ) -> Self {
+    self.peer_identity_resolver = IpcPeerIdentityResolver::Counting {
+      principal: peer_principal,
+      calls,
+    };
     self
   }
 
   pub async fn run_until(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+    let owner_principal = IpcPrincipal::current_process(crate::current_privilege_status())
+      .context("authenticate the Cadder runtime-owner identity")?;
+    let endpoint = IpcEndpointMetadata::new(&self.paths, owner_principal.privilege_status());
     let name = self.paths.socket_name().to_ns_name::<GenericNamespaced>()?;
-    let listener = ListenerOptions::new()
-      .name(name)
-      .try_overwrite(true)
+    let listener_options = ListenerOptions::new().name(name).try_overwrite(true);
+    let listener = secure_listener_options(listener_options, &owner_principal)
+      .context("restrict the local IPC listener to the runtime owner")?
       .create_tokio()
       .context("create local IPC listener")?;
-    let endpoint = IpcEndpointMetadata::current(&self.paths);
     let _endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
     let shutdown_signal = self.state.shutdown_signal();
 
@@ -83,17 +109,21 @@ impl DaemonServer {
               match accepted {
                   Ok(conn) => {
                       let state = self.state.clone();
-                      let peer_principal = self
-                          .peer_principal_override
-                          .clone()
-                          .unwrap_or_else(|| IpcPrincipal::from_peer_credentials(conn.peer_creds().ok()));
-                      let security = ConnectionSecurityContext {
-                          endpoint: endpoint.clone(),
-                          policy: self.security_policy.clone(),
-                          peer_principal,
-                      };
+                      let owner_principal = owner_principal.clone();
+                      let policy = self.security_policy.clone();
+                      let peer_identity_resolver = self.peer_identity_resolver.clone();
                       tokio::spawn(async move {
-                          let _ = handle_connection(conn, state, security).await;
+                          match authenticate_accepted_connection(
+                            conn,
+                            owner_principal,
+                            policy,
+                            peer_identity_resolver,
+                          ).await {
+                            Ok((conn, security)) => {
+                              let _ = handle_connection(conn, state, security).await;
+                            }
+                            Err(error) => log_peer_authentication_denial(&state, &error),
+                          }
                       });
                   }
                   Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -107,9 +137,69 @@ impl DaemonServer {
   }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PeerAuthenticationError {
+  #[error("the local IPC authentication preface was not accepted")]
+  Preface(#[source] io::Error),
+  #[error("the local IPC peer identity could not be authenticated")]
+  Identity(#[source] io::Error),
+  #[error("the local IPC peer identity does not match the runtime owner")]
+  PrincipalMismatch,
+}
+
+impl PeerAuthenticationError {
+  fn reason_code(&self) -> &'static str {
+    match self {
+      Self::Preface(_) => "authentication-preface-rejected",
+      Self::Identity(_) => "peer-identity-unavailable",
+      Self::PrincipalMismatch => "principal-outside-runtime-owner",
+    }
+  }
+}
+
+async fn authenticate_accepted_connection(
+  mut conn: Stream,
+  owner_principal: IpcPrincipal,
+  policy: IpcSecurityPolicy,
+  peer_identity_resolver: IpcPeerIdentityResolver,
+) -> std::result::Result<(Stream, ConnectionSecurityContext), PeerAuthenticationError> {
+  receive_peer_authentication_preface(&mut conn)
+    .await
+    .map_err(PeerAuthenticationError::Preface)?;
+  let peer_principal = peer_identity_resolver
+    .resolve(&conn)
+    .map_err(PeerAuthenticationError::Identity)?;
+  if !policy
+    .authenticate_peer(&owner_principal, &peer_principal)
+    .is_allowed()
+  {
+    return Err(PeerAuthenticationError::PrincipalMismatch);
+  }
+
+  let security = ConnectionSecurityContext {
+    owner_principal,
+    policy,
+    peer_principal,
+  };
+  Ok((conn, security))
+}
+
+fn log_peer_authentication_denial(state: &DaemonState, error: &PeerAuthenticationError) {
+  state.logs().append(
+    LogStreamIdentity::runtime_control(),
+    LogSeverity::Warn,
+    format!(
+      "Cadder rejected a local connection before any request ran; runtime state is unchanged. Use the runtime owner account or inspect security diagnostics. Reason: {}",
+      error.reason_code()
+    ),
+    LogAttributionKind::RuntimeControl,
+    Some("ipc-peer-denied".to_string()),
+  );
+}
+
 #[derive(Debug, Clone)]
 struct ConnectionSecurityContext {
-  endpoint: IpcEndpointMetadata,
+  owner_principal: IpcPrincipal,
   policy: IpcSecurityPolicy,
   peer_principal: IpcPrincipal,
 }
@@ -311,9 +401,11 @@ where
   W: AsyncWrite + Unpin,
 {
   let operation = operation_for_message_type(&envelope.message_type);
-  let decision = security
-    .policy
-    .evaluate(&security.endpoint, &security.peer_principal, &operation);
+  let decision = security.policy.evaluate(
+    &security.owner_principal,
+    &security.peer_principal,
+    &operation,
+  );
   if decision.is_allowed() {
     return Ok(true);
   }
@@ -548,7 +640,7 @@ impl CadderSession {
     name: interprocess::local_socket::Name<'_>,
     deadlines: IpcClientDeadlines,
   ) -> IpcClientResult<Self> {
-    let conn = match timeout(deadlines.connect, Stream::connect(name)).await {
+    let mut conn = match timeout(deadlines.connect, Stream::connect(name)).await {
       Ok(Ok(conn)) => conn,
       Ok(Err(error)) => return Err(connection_error(error)),
       Err(_) => {
@@ -566,6 +658,9 @@ impl CadderSession {
         }));
       }
     };
+    send_peer_authentication_preface(&mut conn)
+      .await
+      .map_err(peer_authentication_preface_error)?;
     let (read_half, writer) = tokio::io::split(conn);
     Ok(Self {
       reader: Some(BufReader::new(read_half)),
@@ -1066,6 +1161,47 @@ fn connection_error(error: io::Error) -> IpcClientError {
     phase: IpcClientPhase::Connect,
     code,
     message: message.into(),
+    guidance: Some(guidance.into()),
+    retryable,
+    request_id: None,
+    operation: None,
+    source: Some(Box::new(error)),
+  })
+}
+
+fn peer_authentication_preface_error(error: io::Error) -> IpcClientError {
+  let (kind, code, guidance, retryable) = match error.kind() {
+    io::ErrorKind::PermissionDenied => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::PermissionDenied,
+      "Use the account that owns this Cadder runtime or select an accessible profile.",
+      false,
+    ),
+    io::ErrorKind::TimedOut => (
+      LocalIpcErrorKind::Timeout,
+      LocalIpcErrorCode::Timeout,
+      "Check the daemon status, then retry once it is ready.",
+      true,
+    ),
+    kind if daemon_not_ready_error(kind) => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::DaemonUnavailable,
+      "Start the Cadder daemon for this runtime, then retry.",
+      true,
+    ),
+    _ => (
+      LocalIpcErrorKind::Transport,
+      LocalIpcErrorCode::TransportConnect,
+      "Inspect the local IPC endpoint and runtime diagnostics before retrying.",
+      false,
+    ),
+  };
+  IpcClientError::local(LocalIpcErrorContext {
+    kind,
+    phase: IpcClientPhase::Connect,
+    code,
+    message: "Cadder could not open a connection to the selected runtime; no request was sent."
+      .into(),
     guidance: Some(guidance.into()),
     retryable,
     request_id: None,
@@ -1640,7 +1776,11 @@ async fn daemon_is_ready(paths: &RuntimePaths) -> IpcClientResult<bool> {
     .to_ns_name::<GenericNamespaced>()
     .map_err(endpoint_resolution_error)?;
   match timeout(IpcClientDeadlines::default().connect, Stream::connect(name)).await {
-    Ok(Ok(_)) => Ok(true),
+    Ok(Ok(mut conn)) => match send_peer_authentication_preface(&mut conn).await {
+      Ok(()) => Ok(true),
+      Err(error) if daemon_not_ready_error(error.kind()) => Ok(false),
+      Err(error) => Err(peer_authentication_preface_error(error)),
+    },
     Ok(Err(error)) if daemon_not_ready_error(error.kind()) => Ok(false),
     Ok(Err(error)) => Err(connection_error(error)),
     Err(_) => Err(daemon_readiness_timeout(
@@ -3005,7 +3145,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn daemon_server_denies_unauthorized_state_changing_request_before_execution() {
+  async fn peer_identity_mismatch_closes_without_protocol_dispatch() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let state = DaemonState::with_runtime_paths(
@@ -3015,15 +3155,12 @@ mod tests {
     .await
     .unwrap();
     let logs = state.logs();
-    let denied_account = format!(
-      "{}-other-token=secret",
-      IpcPrincipal::current_process(crate::current_privilege_status()).account()
-    );
+    let denied_identity = "other-token=secret";
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let daemon = tokio::spawn(
       DaemonServer::new(paths.clone(), state)
-        .with_peer_principal(IpcPrincipal::new(
-          denied_account.clone(),
+        .with_peer_principal(IpcPrincipal::test(
+          denied_identity,
           PrivilegeStatus::NormalUser,
         ))
         .run_until(shutdown_rx),
@@ -3031,21 +3168,27 @@ mod tests {
     wait_for_ready(&paths).await;
 
     let endpoint = discover_ipc_endpoint(&paths).unwrap();
-    let mut session = CadderSession::connect(&paths).await.unwrap();
-    let error = session
-      .request::<_>(
-        message_types::SET_AUTOSTART_REQUEST,
-        message_types::SET_AUTOSTART_RESPONSE,
-        &SetAutostartRequest {
-          request_id: new_request_id("deny-autostart"),
-          mode: AutostartMode::Daemon,
-        },
-      )
-      .await
-      .unwrap_err();
-    let response = error
-      .daemon_error()
-      .expect("access denial should remain a daemon protocol error");
+    assert_peer_denied_without_request(&paths).await;
+
+    for _ in 0..50 {
+      if logs
+        .query(
+          LogQuery {
+            stream: LogStreamIdentity::runtime_control(),
+            limit: 10,
+            after_sequence: None,
+            minimum_severity: Some(LogSeverity::Warn),
+          },
+          true,
+        )
+        .entries
+        .iter()
+        .any(|entry| entry.operation.as_deref() == Some("ipc-peer-denied"))
+      {
+        break;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
     let denial_log = logs.query(
       LogQuery {
         stream: LogStreamIdentity::runtime_control(),
@@ -3057,20 +3200,137 @@ mod tests {
     );
 
     assert_eq!(endpoint.socket_name, paths.socket_name());
-    assert_eq!(response.kind, ProtocolErrorKind::AccessDenied);
-    assert_eq!(
-      response.denied_operation.as_deref(),
-      Some(message_types::SET_AUTOSTART_REQUEST)
-    );
     assert!(denial_log.entries.iter().any(|entry| {
-      entry.operation.as_deref() == Some("ipc-access-denied")
+      entry.operation.as_deref() == Some("ipc-peer-denied")
         && entry
           .raw_message
-          .contains(message_types::SET_AUTOSTART_REQUEST)
-        && !entry.raw_message.contains(&denied_account)
+          .contains("principal-outside-runtime-owner")
+        && !entry.raw_message.contains(denied_identity)
         && !entry.raw_message.contains("secret")
+        && !entry
+          .raw_message
+          .contains(message_types::SET_AUTOSTART_REQUEST)
     }));
 
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(2), daemon)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn peer_identity_failure_does_not_stop_listener() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let logs = state.logs();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let daemon = tokio::spawn(
+      DaemonServer::new(paths.clone(), state)
+        .with_peer_identity_failure(io::ErrorKind::PermissionDenied)
+        .run_until(shutdown_rx),
+    );
+    wait_for_ready(&paths).await;
+
+    assert_peer_denied_without_request(&paths).await;
+    assert_peer_denied_without_request(&paths).await;
+
+    for _ in 0..50 {
+      let denial_count = logs
+        .query(
+          LogQuery {
+            stream: LogStreamIdentity::runtime_control(),
+            limit: 10,
+            after_sequence: None,
+            minimum_severity: Some(LogSeverity::Warn),
+          },
+          true,
+        )
+        .entries
+        .iter()
+        .filter(|entry| entry.operation.as_deref() == Some("ipc-peer-denied"))
+        .count();
+      if denial_count >= 2 {
+        break;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+    let denial_log = logs.query(
+      LogQuery {
+        stream: LogStreamIdentity::runtime_control(),
+        limit: 10,
+        after_sequence: None,
+        minimum_severity: Some(LogSeverity::Warn),
+      },
+      true,
+    );
+    assert!(denial_log.entries.iter().any(|entry| {
+      entry.operation.as_deref() == Some("ipc-peer-denied")
+        && entry.raw_message.contains("peer-identity-unavailable")
+        && !entry.raw_message.contains("test peer identity failure")
+    }));
+
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(2), daemon)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn peer_identity_authenticates_once_per_connection_and_reaches_dispatch() {
+    use std::sync::{
+      Arc,
+      atomic::{AtomicUsize, Ordering},
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let owner = IpcPrincipal::current_process(crate::current_privilege_status()).unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let daemon = tokio::spawn(
+      DaemonServer::new(paths.clone(), state)
+        .with_counting_peer_principal(owner, calls.clone())
+        .run_until(shutdown_rx),
+    );
+    wait_for_ready(&paths).await;
+    for _ in 0..50 {
+      if calls.load(Ordering::SeqCst) > 0 {
+        break;
+      }
+      sleep(Duration::from_millis(10)).await;
+    }
+    let baseline = calls.load(Ordering::SeqCst);
+
+    let mut session = CadderSession::connect(&paths).await.unwrap();
+    let response = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: new_request_id("peer-identity-count"),
+        },
+      )
+      .await
+      .unwrap();
+
+    assert!(response.accepted);
+    assert_eq!(calls.load(Ordering::SeqCst), baseline + 1);
     drop(session);
     shutdown_tx.send(true).unwrap();
     timeout(Duration::from_secs(2), daemon)
@@ -3398,7 +3658,10 @@ mod tests {
         .create_tokio()
         .unwrap();
       let task = tokio::spawn(async move {
-        let conn = listener.accept().await.unwrap();
+        let mut conn = listener.accept().await.unwrap();
+        receive_peer_authentication_preface(&mut conn)
+          .await
+          .unwrap();
         handler(conn).await;
       });
       Self {
@@ -3428,7 +3691,10 @@ mod tests {
           .try_overwrite(true)
           .create_tokio()
           .unwrap();
-        let conn = listener.accept().await.unwrap();
+        let mut conn = listener.accept().await.unwrap();
+        receive_peer_authentication_preface(&mut conn)
+          .await
+          .unwrap();
         handler(conn).await;
       });
       Self {
@@ -3524,6 +3790,21 @@ mod tests {
     }
 
     panic!("daemon server did not become ready");
+  }
+
+  async fn assert_peer_denied_without_request(paths: &RuntimePaths) {
+    let name = paths
+      .socket_name()
+      .to_ns_name::<GenericNamespaced>()
+      .unwrap();
+    let mut conn = Stream::connect(name).await.unwrap();
+    send_peer_authentication_preface(&mut conn).await.unwrap();
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(1), conn.read(&mut byte))
+      .await
+      .expect("peer denial should not wait for a protocol request")
+      .unwrap();
+    assert_eq!(read, 0, "peer denial should close without a response");
   }
 
   fn iis_binding(site: &str, protocol: &str, binding: &str) -> IisBindingRecord {

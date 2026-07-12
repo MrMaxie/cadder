@@ -27,7 +27,7 @@ use std::{
   time::Duration,
 };
 use tokio::{
-  io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+  io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
   sync::watch,
   task::JoinHandle,
   time::sleep,
@@ -1877,7 +1877,12 @@ async fn raw_ipc_session(
     .socket_name()
     .to_ns_name::<GenericNamespaced>()
     .unwrap();
-  let conn = Stream::connect(name).await.unwrap();
+  let mut conn = Stream::connect(name).await.unwrap();
+  #[cfg(windows)]
+  {
+    conn.write_all(b" ").await.unwrap();
+    conn.flush().await.unwrap();
+  }
   let (read_half, writer) = tokio::io::split(conn);
   (BufReader::new(read_half), writer)
 }
@@ -1933,7 +1938,13 @@ impl ScriptedIpcPeer {
       .create_tokio()
       .unwrap();
     let task = tokio::spawn(async move {
-      let conn = listener.accept().await.unwrap();
+      let mut conn = listener.accept().await.unwrap();
+      #[cfg(windows)]
+      {
+        let mut preface = [0_u8; 1];
+        conn.read_exact(&mut preface).await.unwrap();
+        assert_eq!(preface, [b' ']);
+      }
       handler(conn).await;
     });
 

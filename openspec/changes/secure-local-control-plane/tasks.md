@@ -7,7 +7,7 @@
 
 ## 2. Authenticated discovery and transport
 
-- [ ] 2.1 `[IPC-001]` Authenticate the OS peer immediately after accept and before protocol-frame buffering through one connection-owning, testable platform identity boundary (verification: `cargo test -p cadder-daemon peer_identity`)
+- [x] 2.1 `[IPC-001]` Authenticate the OS peer immediately after accept and before protocol-frame buffering through one connection-owning, testable platform identity boundary (verification: `cargo test -p cadder-daemon peer_identity`)
 - [ ] 2.2 `[IPC-001]` Enforce Unix filesystem socket ownership, `0700/0600` modes, and effective-peer UID checks (verification: Linux and macOS jobs run `cargo test -p cadder-daemon unix_ipc_security`)
 - [ ] 2.3 `[IPC-001]` Enforce a local-only Windows named pipe, owner SID DACL, fixed transport-authentication preface, impersonated client SID, verified revert paths, and fail-stop behavior when impersonation cannot be reverted (verification: Windows job runs `cargo test -p cadder-daemon windows_ipc_security`)
 - [ ] 2.4 `[IPC-003]` Implement crash-safe atomic discovery publication and generation-aware cleanup for Unix and Windows algorithms (verification: Windows, Linux, and macOS jobs run `cargo test -p cadder-daemon discovery_publication`)

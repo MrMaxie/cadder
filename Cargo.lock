@@ -433,6 +433,7 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.17",
  "tokio",
+ "widestring",
  "windows",
  "windows-sys 0.61.2",
 ]
