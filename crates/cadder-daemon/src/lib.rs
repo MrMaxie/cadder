@@ -7,6 +7,7 @@ mod ipc_security;
 mod logs;
 mod paths;
 mod privilege;
+mod process_tree;
 mod runtime;
 mod runtime_lock;
 mod state;

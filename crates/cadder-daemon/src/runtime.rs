@@ -1,4 +1,4 @@
-use crate::{logs::CaddyLogStore, paths::RuntimePaths};
+use crate::{logs::CaddyLogStore, paths::RuntimePaths, process_tree::ProcessTreeChild};
 use anyhow::{Context, Result};
 use cadder_protocol::{
   LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus,
@@ -7,30 +7,13 @@ use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
   fs,
   io::{AsyncBufReadExt, BufReader},
-  process::{Child, Command},
+  process::Command,
   sync::Mutex,
   task::yield_now,
   time::timeout,
 };
 
 use crate::caddy::RealCaddyResolver;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-fn hidden_command(binary: PathBuf) -> Command {
-  let mut command = Command::new(binary);
-  configure_hidden_child(&mut command);
-  command
-}
-
-#[cfg(windows)]
-fn configure_hidden_child(command: &mut Command) {
-  command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_hidden_child(_command: &mut Command) {}
 
 #[derive(Debug, Clone)]
 pub enum CaddyRuntime {
@@ -79,7 +62,7 @@ impl From<ProcessRuntime> for CaddyRuntime {
 pub struct ProcessRuntime {
   resolver: RealCaddyResolver,
   paths: RuntimePaths,
-  child: Arc<Mutex<Option<Child>>>,
+  child: Arc<Mutex<Option<ProcessTreeChild>>>,
   timeouts: RuntimeTimeouts,
 }
 
@@ -195,20 +178,19 @@ impl ProcessRuntime {
 
   async fn start(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
     let binary = self.resolver.resolve()?;
-    let mut command = hidden_command(binary);
+    let mut command = Command::new(binary);
     command
       .arg("run")
       .arg("--config")
       .arg(config_path)
       .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true);
-    let mut child = command.spawn().context("start real Caddy runtime")?;
+      .stderr(Stdio::piped());
+    let mut child = ProcessTreeChild::spawn(command).context("start real Caddy runtime")?;
 
-    if let Some(stdout) = child.stdout.take() {
+    if let Some(stdout) = child.take_stdout() {
       spawn_log_reader(stdout, logs.clone(), "stdout");
     }
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = child.take_stderr() {
       spawn_log_reader(stderr, logs.clone(), "stderr");
     }
 
@@ -234,24 +216,17 @@ impl ProcessRuntime {
 
   async fn reload(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
     let binary = self.resolver.resolve()?;
-    let mut command = hidden_command(binary);
+    let mut command = Command::new(binary);
     command
       .arg("reload")
       .arg("--config")
       .arg(config_path)
       .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true);
-    let child = command.spawn().context("start real Caddy reload")?;
-    let output = timeout(self.timeouts.reload, child.wait_with_output())
-      .await
-      .with_context(|| {
-        format!(
-          "real Caddy reload timed out after {} seconds",
-          self.timeouts.reload.as_secs()
-        )
-      })?
-      .context("reload real Caddy runtime")?;
+      .stderr(Stdio::piped());
+    let child = ProcessTreeChild::spawn(command).context("start real Caddy reload")?;
+    let output = child
+      .wait_for_output(self.timeouts.reload, "real Caddy reload")
+      .await?;
     if output.status.success() {
       logs.append(
         LogStreamIdentity::runtime_control(),
@@ -420,20 +395,18 @@ impl MockCaddyRuntime {
 }
 
 async fn request_graceful_stop(binary: PathBuf, graceful_stop: Duration) -> Result<()> {
-  let mut command = hidden_command(binary);
+  let mut command = Command::new(binary);
   command
     .arg("stop")
     .arg("--address")
     .arg("localhost:2019")
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-  let mut child = command.spawn().context("start caddy stop")?;
+    .stderr(Stdio::null());
+  let mut child = ProcessTreeChild::spawn(command).context("start caddy stop")?;
   let status = match timeout(graceful_stop, child.wait()).await {
     Ok(result) => result.context("wait for caddy stop")?,
     Err(_) => {
       let _ = child.kill().await;
-      let _ = child.wait().await;
       anyhow::bail!(
         "caddy stop timed out after {} seconds",
         graceful_stop.as_secs()
@@ -493,6 +466,7 @@ mod tests {
     runtime: ProcessRuntime,
     logs: CaddyLogStore,
     command_log: PathBuf,
+    run_exit_file: PathBuf,
     _temp: tempfile::TempDir,
   }
 
@@ -512,6 +486,7 @@ mod tests {
     let paths = RuntimePaths::resolve(Some(runtime_dir)).unwrap();
     paths.ensure_dirs().unwrap();
     let command_log = temp.path().join("fake-caddy.log");
+    let run_exit_file = temp.path().join("fake-caddy.exit");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, mode);
     let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
     let runtime = ProcessRuntime::with_timeouts(resolver, paths, short_timeouts());
@@ -520,6 +495,7 @@ mod tests {
       runtime,
       logs: CaddyLogStore::default(),
       command_log,
+      run_exit_file,
       _temp: temp,
     }
   }
@@ -637,7 +613,9 @@ mod tests {
       .apply_config(br#"{"apps":{}}"#, &fixture.logs)
       .await
       .unwrap();
+    std_fs::write(&fixture.run_exit_file, b"exit").unwrap();
     wait_for_command_log(&fixture.command_log, "run-exited").await;
+    wait_for_runtime_child_exit(&fixture.runtime).await;
 
     fixture
       .runtime
@@ -646,6 +624,8 @@ mod tests {
       .unwrap();
 
     wait_for_command_count(&fixture.command_log, "run", 2).await;
+    fixture.runtime.stop().await.unwrap();
+    wait_for_command_log(&fixture.command_log, "stop").await;
   }
 
   #[tokio::test]
@@ -707,7 +687,10 @@ mod tests {
   async fn wait_for_command_count(path: &Path, command: &str, expected: usize) {
     for _ in 0..500 {
       let log = std_fs::read_to_string(path).unwrap_or_default();
-      let count = log.lines().filter(|line| line.starts_with(command)).count();
+      let count = log
+        .lines()
+        .filter(|line| line.split_whitespace().next() == Some(command))
+        .count();
       if count >= expected {
         return;
       }
@@ -717,8 +700,25 @@ mod tests {
     panic!("expected {expected} `{command}` commands in fake Caddy log:\n{log}");
   }
 
+  async fn wait_for_runtime_child_exit(runtime: &ProcessRuntime) {
+    for _ in 0..500 {
+      let has_exited = {
+        let mut child = runtime.child.lock().await;
+        child
+          .as_mut()
+          .is_none_or(|child| child.try_wait().unwrap().is_some())
+      };
+      if has_exited {
+        return;
+      }
+      sleep(Duration::from_millis(20)).await;
+    }
+    panic!("expected fake Caddy runtime child to exit");
+  }
+
   fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeRuntimeMode) -> PathBuf {
     let stop_file = dir.join("fake-caddy.stop");
+    let run_exit_file = dir.join("fake-caddy.exit");
 
     #[cfg(windows)]
     {
@@ -729,16 +729,16 @@ mod tests {
         "exit /b 0"
       };
       let stop_behavior = if matches!(mode, FakeRuntimeMode::SlowStop) {
-        "ping -n 3 127.0.0.1 >nul\r\n  echo stop> \"{stop_file}\"\r\n  exit /b 0"
+        "\"%SystemRoot%\\System32\\ping.exe\" -n 3 127.0.0.1 >nul\r\n  echo stop> \"{stop_file}\"\r\n  exit /b 0"
       } else if matches!(mode, FakeRuntimeMode::FailStop) {
         "echo stop> \"{stop_file}\"\r\n  exit /b 7"
       } else {
         "echo stop> \"{stop_file}\"\r\n  exit /b 0"
       };
       let run_behavior = if matches!(mode, FakeRuntimeMode::ShortRun) {
-        "ping -n 2 127.0.0.1 >nul\r\n  echo run-exited>> \"{command_log}\"\r\n  exit /b 0"
+        ":short_run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  if exist \"{run_exit_file}\" goto short_run_exit\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto short_run_loop\r\n  :short_run_exit\r\n  del /q \"{run_exit_file}\"\r\n  echo run-exited>> \"{command_log}\"\r\n  exit /b 0"
       } else {
-        ":run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  ping -n 2 127.0.0.1 >nul\r\n  goto run_loop"
+        ":run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto run_loop"
       };
       std_fs::write(
         &path,
@@ -763,6 +763,7 @@ exit /b 0
           stop_behavior = stop_behavior.replace("{stop_file}", &stop_file.display().to_string()),
           run_behavior = run_behavior
             .replace("{stop_file}", &stop_file.display().to_string())
+            .replace("{run_exit_file}", &run_exit_file.display().to_string())
             .replace("{command_log}", &command_log.display().to_string()),
         ),
       )
@@ -787,14 +788,14 @@ exit /b 0
         ": > '{stop_file}'\n  exit 0"
       };
       let run_behavior = if matches!(mode, FakeRuntimeMode::ShortRun) {
-        "sleep 1\n  printf '%s\n' 'run-exited' >> '{command_log}'\n  exit 0"
+        "while [ ! -f '{run_exit_file}' ] && [ ! -f '{stop_file}' ]; do /bin/sleep 0.02; done\n  if [ -f '{run_exit_file}' ]; then /bin/rm -f '{run_exit_file}'; printf '%s\n' 'run-exited' >> '{command_log}'; fi\n  exit 0"
       } else {
-        "while [ ! -f '{stop_file}' ]; do sleep 0.2; done\n  exit 0"
+        "while [ ! -f '{stop_file}' ]; do /bin/sleep 0.2; done\n  exit 0"
       };
       std_fs::write(
         &path,
         format!(
-          r#"#!/usr/bin/env sh
+          r#"#!/bin/sh
 printf '%s\n' "$*" >> '{command_log}'
 if [ "$1" = "reload" ]; then
   {reload_behavior}
@@ -813,6 +814,7 @@ exit 0
           stop_behavior = stop_behavior.replace("{stop_file}", &stop_file.display().to_string()),
           run_behavior = run_behavior
             .replace("{stop_file}", &stop_file.display().to_string())
+            .replace("{run_exit_file}", &run_exit_file.display().to_string())
             .replace("{command_log}", &command_log.display().to_string()),
         ),
       )

@@ -2,6 +2,7 @@ use crate::{
   config::{CONFIG_FILE_NAME, CadderConfig, configured_real_caddy_command},
   logs::CaddyLogStore,
   paths::RuntimePaths,
+  process_tree::ProcessTreeChild,
   runtime::{CaddyRuntime, ProcessRuntime},
 };
 use anyhow::{Context, Result, anyhow};
@@ -20,26 +21,9 @@ use std::{
   str::FromStr,
   time::Duration,
 };
-use tokio::{process::Command, time::timeout};
+use tokio::process::Command;
 
 pub const CADDER_CADDY_BACKEND_ENV: &str = "CADDER_CADDY_BACKEND";
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-fn hidden_command(binary: PathBuf) -> Command {
-  let mut command = Command::new(binary);
-  configure_hidden_child(&mut command);
-  command
-}
-
-#[cfg(windows)]
-fn configure_hidden_child(command: &mut Command) {
-  command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_hidden_child(_command: &mut Command) {}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CaddyBackendMode {
@@ -376,7 +360,7 @@ impl CaddyConfigAdapter {
       .and_then(|run| run.adapter.as_deref())
       .unwrap_or("caddyfile");
 
-    let mut command = hidden_command(binary);
+    let mut command = Command::new(binary);
     command
       .arg("adapt")
       .arg("--config")
@@ -384,18 +368,11 @@ impl CaddyConfigAdapter {
       .arg("--adapter")
       .arg(adapter)
       .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .kill_on_drop(true);
-    let child = command.spawn().context("start caddy adapt")?;
-    let output = timeout(self.command_timeout, child.wait_with_output())
-      .await
-      .with_context(|| {
-        format!(
-          "caddy adapt timed out after {} seconds",
-          self.command_timeout.as_secs()
-        )
-      })?
-      .context("run caddy adapt")?;
+      .stderr(Stdio::piped());
+    let child = ProcessTreeChild::spawn(command).context("start caddy adapt")?;
+    let output = child
+      .wait_for_output(self.command_timeout, "caddy adapt")
+      .await?;
 
     if !output.status.success() {
       return Err(anyhow!(
@@ -1378,7 +1355,7 @@ exit 0
       path,
       r#"@echo off
 if "%1"=="adapt" (
-  ping -n 6 127.0.0.1 >nul
+  "%SystemRoot%\System32\ping.exe" -n 60 127.0.0.1 >nul
   echo {"apps":{}}
   exit /b 0
 )
@@ -1392,9 +1369,9 @@ exit /b 0
       use std::os::unix::fs::PermissionsExt;
       fs::write(
         path,
-        r#"#!/usr/bin/env sh
+        r#"#!/bin/sh
 if [ "$1" = "adapt" ]; then
-  sleep 1
+  /bin/sleep 60
   printf '%s\n' '{"apps":{}}'
   exit 0
 fi
@@ -1813,7 +1790,11 @@ app.localhost, http://api.localhost:8080 {
     let prepared = adapter.prepare(registration).await;
 
     assert_eq!(prepared.diagnostics[0].code, "adapt-failed");
-    assert!(prepared.diagnostics[0].message.contains("timed out"));
+    assert!(
+      prepared.diagnostics[0]
+        .message
+        .contains("timed out after 250 ms")
+    );
   }
 
   #[test]

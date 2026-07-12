@@ -2076,7 +2076,10 @@ async fn wait_for_command_log(path: &Path, command: &str) {
 async fn wait_for_command_count(path: &Path, command: &str, expected: usize) {
   for _ in 0..COMMAND_LOG_WAIT_ATTEMPTS {
     let log = fs::read_to_string(path).unwrap_or_default();
-    let count = log.lines().filter(|line| line.starts_with(command)).count();
+    let count = log
+      .lines()
+      .filter(|line| line.split_whitespace().next() == Some(command))
+      .count();
     if count >= expected {
       return;
     }
