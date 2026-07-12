@@ -19,21 +19,21 @@ context: |
 
 rules:
   proposal:
-    - Describe the problem, user value, scope, non-goals, and success criteria before proposing implementation details.
-    - Keep each proposal focused on one coherent change; split unrelated goals into separate changes.
-    - Distinguish confirmed facts from assumptions, and cite current specs or code evidence when scope depends on them.
+    - "Describe the problem, user value, scope, non-goals, and success criteria before proposing implementation details."
+    - "Keep each proposal focused on one coherent change; split unrelated goals into separate changes."
+    - "Distinguish confirmed facts from assumptions, and cite current specs or code evidence when scope depends on them."
   design:
-    - Separate product surfaces from implementation crates and library modules.
-    - Record ownership, permissions, failure modes, and trust boundaries for every integration or privilege boundary.
-    - Prefer mature external tools and libraries over custom orchestration when they fit the job.
-    - Define test seams, fakes, and verification strategy before describing implementation details.
+    - "Separate product surfaces from implementation crates and library modules."
+    - "Record ownership, permissions, failure modes, and trust boundaries for every integration or privilege boundary."
+    - "Prefer mature external tools and libraries over custom orchestration when they fit the job."
+    - "Define test seams, fakes, and verification strategy before describing implementation details."
   specs:
-    - Use the OpenSpec delta format correctly: ADDED, MODIFIED, REMOVED, or RENAMED Requirements as appropriate.
-    - For MODIFIED requirements, include the full updated requirement block, not a partial patch.
-    - Write normative SHALL/MUST requirements with observable behavior and at least one scenario using the required heading level.
-    - Keep specs focused on what the system must do; put implementation choices in design unless they are part of the user-facing contract.
+    - "Use the OpenSpec delta format correctly: ADDED, MODIFIED, REMOVED, or RENAMED Requirements as appropriate."
+    - "For MODIFIED requirements, include the full updated requirement block, not a partial patch."
+    - "Write normative SHALL/MUST requirements with observable behavior and at least one scenario using the required heading level."
+    - "Keep specs focused on what the system must do; put implementation choices in design unless they are part of the user-facing contract."
   tasks:
-    - Break work into independently verifiable slices.
-    - Keep cleanup and implementation tasks separate when cleanup has migration risk.
-    - Order tasks by dependency and keep each task small enough to complete and verify in one focused session.
-    - Name the expected verification level for each task without prescribing a specific tool unless the design or spec requires it.
+    - "Break work into independently verifiable slices."
+    - "Keep cleanup and implementation tasks separate when cleanup has migration risk."
+    - "Order tasks by dependency and keep each task small enough to complete and verify in one focused session."
+    - "Name the expected verification level for each task without prescribing a specific tool unless the design or spec requires it."

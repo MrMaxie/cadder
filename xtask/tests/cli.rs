@@ -26,6 +26,7 @@ fn help_and_list_commands_are_lightweight_and_discover_docs_release_and_dev_task
   assert!(help_text.contains("documentation:"), "{help_text}");
   assert!(help_text.contains("release and packaging:"), "{help_text}");
   assert!(help_text.contains("docs-check"), "{help_text}");
+  assert!(help_text.contains("openspec-check"), "{help_text}");
   assert!(help_text.contains("verify-assets"), "{help_text}");
   assert!(help_text.contains("verify-release-assets"), "{help_text}");
   assert!(
@@ -44,6 +45,10 @@ fn help_and_list_commands_are_lightweight_and_discover_docs_release_and_dev_task
     "{list_text}"
   );
   assert!(
+    list_text.lines().any(|line| line == "openspec-check"),
+    "{list_text}"
+  );
+  assert!(
     list_text.lines().any(|line| line == "runtime-installer"),
     "{list_text}"
   );
@@ -56,6 +61,18 @@ fn help_and_list_commands_are_lightweight_and_discover_docs_release_and_dev_task
       .lines()
       .any(|line| line == "verify-workspace-topology"),
     "{list_text}"
+  );
+
+  let openspec_help = Command::new(xtask_bin())
+    .args(["help", "openspec-check"])
+    .output()
+    .unwrap();
+  let openspec_help_stdout = openspec_help.stdout.clone();
+  assert_success(openspec_help);
+  let openspec_help_text = String::from_utf8_lossy(&openspec_help_stdout);
+  assert!(
+    openspec_help_text.contains("cargo xtask openspec-check"),
+    "{openspec_help_text}"
   );
 }
 
@@ -128,6 +145,7 @@ fn check_command_runs_validation_pipeline_with_fake_cargo() {
   let log = dir.join("fake-tool.log");
   write_fake_command(&fake_bin, "cargo", 0);
   write_fake_command(&fake_bin, "bun", 0);
+  write_fake_openspec(&fake_bin, "1.5.0");
 
   let output = Command::new(xtask_bin())
     .arg("check")
@@ -140,6 +158,15 @@ fn check_command_runs_validation_pipeline_with_fake_cargo() {
   assert_success(output);
   let invocations = fs::read_to_string(&log).unwrap();
   assert!(invocations.contains("fmt --check"), "{invocations}");
+  assert!(invocations.contains("doctor --json"), "{invocations}");
+  assert!(
+    invocations.contains("schema validate implementation --json"),
+    "{invocations}"
+  );
+  assert!(
+    invocations.contains("validate --specs --strict --json"),
+    "{invocations}"
+  );
   assert!(
     invocations.contains("clippy --workspace --all-targets -- -D warnings"),
     "{invocations}"
@@ -150,6 +177,60 @@ fn check_command_runs_validation_pipeline_with_fake_cargo() {
     "{invocations}"
   );
   assert!(invocations.contains("run check"), "{invocations}");
+  fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn openspec_check_command_enforces_version_and_runs_schema_aware_validation() {
+  let dir = unique_temp_dir("openspec-check-command");
+  fs::create_dir_all(&dir).unwrap();
+  let fake_bin = dir.join("bin");
+  fs::create_dir_all(&fake_bin).unwrap();
+  let log = dir.join("fake-openspec.log");
+  write_fake_openspec(&fake_bin, "1.5.0");
+
+  let output = Command::new(xtask_bin())
+    .arg("openspec-check")
+    .current_dir(workspace_root())
+    .env("PATH", &fake_bin)
+    .env("CADDER_FAKE_TOOL_LOG", &log)
+    .output()
+    .unwrap();
+
+  assert_success(output);
+  let invocations = fs::read_to_string(&log).unwrap();
+  assert!(invocations.contains("--version"), "{invocations}");
+  assert!(invocations.contains("doctor --json"), "{invocations}");
+  assert!(
+    invocations.contains("schema validate implementation --json"),
+    "{invocations}"
+  );
+  assert!(
+    invocations.contains("validate --specs --strict --json"),
+    "{invocations}"
+  );
+  fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn openspec_check_command_rejects_a_different_cli_version() {
+  let dir = unique_temp_dir("openspec-check-version");
+  fs::create_dir_all(&dir).unwrap();
+  let fake_bin = dir.join("bin");
+  fs::create_dir_all(&fake_bin).unwrap();
+  write_fake_openspec(&fake_bin, "1.6.0");
+
+  let output = Command::new(xtask_bin())
+    .arg("openspec-check")
+    .current_dir(workspace_root())
+    .env("PATH", &fake_bin)
+    .output()
+    .unwrap();
+
+  assert!(!output.status.success());
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(stderr.contains("OpenSpec 1.5.0 is required"), "{stderr}");
+  assert!(stderr.contains("1.6.0"), "{stderr}");
   fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -655,6 +736,46 @@ fn main() {{
     .status()
     .unwrap();
   assert!(status.success(), "failed to compile fake {name}");
+  path
+}
+
+fn write_fake_openspec(dir: &Path, version: &str) -> PathBuf {
+  let path = dir.join(command_file_name("openspec"));
+  let source = dir.join("openspec_fake_command.rs");
+  fs::write(
+    &source,
+    format!(
+      r#"
+use std::io::Write;
+
+fn main() {{
+  let args = std::env::args().skip(1).collect::<Vec<_>>();
+  if let Ok(path) = std::env::var("CADDER_FAKE_TOOL_LOG") {{
+    if !path.is_empty() {{
+      let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+      writeln!(file, "{{}}", args.join(" ")).unwrap();
+    }}
+  }}
+  if args == ["--version"] {{
+    println!("{version}");
+  }}
+}}
+"#
+    ),
+  )
+  .unwrap();
+  let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+  let status = Command::new(rustc)
+    .arg(&source)
+    .arg("-o")
+    .arg(&path)
+    .status()
+    .unwrap();
+  assert!(status.success(), "failed to compile fake openspec");
   path
 }
 
