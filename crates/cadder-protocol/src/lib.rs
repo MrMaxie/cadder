@@ -7,12 +7,16 @@ pub mod commands;
 pub mod envelopes;
 pub mod errors;
 pub mod events;
+pub mod handshake;
 pub mod history;
+pub mod identifiers;
 pub mod iis;
 pub mod logs;
 pub mod message_types;
 pub mod responses;
 pub mod state;
+pub mod version;
+pub mod wire;
 
 pub use autostart::*;
 pub use client::*;
@@ -20,12 +24,16 @@ pub use commands::*;
 pub use envelopes::*;
 pub use errors::*;
 pub use events::*;
+pub use handshake::*;
 pub use history::*;
+pub use identifiers::*;
 pub use iis::*;
 pub use logs::*;
 pub use message_types::*;
 pub use responses::*;
 pub use state::*;
+pub use version::*;
+pub use wire::*;
 #[cfg(test)]
 mod tests {
   use chrono::Utc;

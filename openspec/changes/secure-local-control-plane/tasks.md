@@ -1,6 +1,6 @@
 ## 1. Protocol core
 
-- [ ] 1.1 `[IPC-006]` `[IPC-007]` `[IPC-010]` Add validated protocol-version, capability, request-ID, handshake, envelope, and typed-error contracts (verification: `cargo test -p cadder-protocol protocol`)
+- [x] 1.1 `[IPC-006]` `[IPC-007]` `[IPC-010]` Add validated protocol-version, capability, request-ID, handshake, envelope, and typed-error contracts (verification: `cargo test -p cadder-protocol protocol`)
 - [ ] 1.2 `[IPC-006]` `[IPC-010]` Add the central operation registry and reject unsupported versions or capabilities before payload decoding (verification: `cargo test -p cadder-daemon operation_registry`)
 - [ ] 1.3 `[IPC-010]` Add compatibility fixtures for additive responses, gated mutation fields and variants, unknown discriminators, and release-failing wire drift (verification: `cargo test -p cadder-protocol wire_compatibility`)
 - [ ] 1.4 `[IPC-007]` Preserve typed daemon, discovery, transport, and timeout errors through every client API (verification: `cargo test -p cadder-daemon typed_error`)

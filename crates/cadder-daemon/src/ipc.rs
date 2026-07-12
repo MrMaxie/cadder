@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use cadder_protocol::{
   HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity, LogStreamIdentity,
   ProtocolError, ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest,
-  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, SetAutostartRequest,
+  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
   SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
   ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest, UnregisterEntrypointRequest,
   message_types,
@@ -156,10 +156,8 @@ async fn handle_connection_loop(
     let envelope: IpcEnvelope = match serde_json::from_str(line.trim_end()) {
       Ok(envelope) => envelope,
       Err(error) => {
-        let response = ProtocolErrorResponse::rejected(
-          "unparseable",
-          ProtocolError::payload_decode_failed(error),
-        );
+        let response =
+          ProtocolErrorResponse::rejected(None, ProtocolError::payload_decode_failed(error));
         send_response!(message_types::PROTOCOL_ERROR_RESPONSE, response);
         continue;
       }
@@ -393,14 +391,12 @@ where
   }
 }
 
-fn request_id_from_payload(envelope: &IpcEnvelope) -> String {
+fn request_id_from_payload(envelope: &IpcEnvelope) -> Option<RequestId> {
   envelope
     .payload
     .get("requestId")
     .and_then(|value| value.as_str())
-    .filter(|request_id| !request_id.is_empty())
-    .unwrap_or("unknown")
-    .to_string()
+    .and_then(|request_id| RequestId::parse(request_id).ok())
 }
 
 #[derive(Debug, Clone)]

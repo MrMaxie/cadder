@@ -1,8 +1,11 @@
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, ops::Deref};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::{MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION};
+use crate::{
+  MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolErrorCode, ProtocolVersionRange,
+  RequestId,
+};
 
 pub mod capabilities {
   pub const AUTOSTART: &str = "autostart";
@@ -135,21 +138,50 @@ pub type ProtocolResult<T> = Result<T, ProtocolError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// A stable category used to map protocol failures to client behavior.
 pub enum ProtocolErrorKind {
   IncompatibleProtocolVersion,
   UnsupportedCapability,
   PayloadDecodeFailed,
   AccessDenied,
+  InvalidInput,
+  Conflict,
+  Configuration,
+  CaddyRuntime,
+  Storage,
+  Busy,
+  Frame,
+  Timeout,
+  ProtocolViolation,
+  ShuttingDown,
+  StaleInstance,
+  Internal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+/// A compact owning typed error carried by Cadder protocol responses.
+///
+/// Operation and handshake envelopes add the request correlation before serialization.
+pub struct ProtocolError(Box<ProtocolErrorData>);
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProtocolError {
+/// Read-only fields exposed by [`ProtocolError`].
+///
+/// This separate allocation keeps `ProtocolResult<T>` small without changing the JSON object.
+pub struct ProtocolErrorData {
   pub kind: ProtocolErrorKind,
+  pub code: ProtocolErrorCode,
   pub message: Box<str>,
   pub guidance: Option<Box<str>>,
+  pub retryable: bool,
+  pub request_id: Option<RequestId>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub protocol_version: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub minimum_compatible_protocol_version: Option<u16>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub current_protocol_version: Option<u16>,
   pub required_capability: Option<Box<str>>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,17 +192,55 @@ pub struct ProtocolError {
   pub supported_capabilities: Box<[String]>,
   #[serde(default)]
   pub supported_capability_versions: Box<[ProtocolCapability]>,
+  #[serde(skip)]
+  legacy_version_metadata_present: bool,
 }
 
 impl ProtocolError {
+  fn from_data(data: ProtocolErrorData) -> Self {
+    Self(Box::new(data))
+  }
+
+  /// Creates an uncorrelated typed error for a handler or transport boundary.
+  ///
+  /// A response constructor attaches the validated request ID before the error reaches the wire.
+  pub fn new(
+    kind: ProtocolErrorKind,
+    code: ProtocolErrorCode,
+    message: impl Into<Box<str>>,
+    guidance: Option<Box<str>>,
+    retryable: bool,
+  ) -> Self {
+    Self::from_data(ProtocolErrorData {
+      kind,
+      code,
+      message: message.into(),
+      guidance,
+      retryable,
+      request_id: None,
+      protocol_version: None,
+      minimum_compatible_protocol_version: None,
+      current_protocol_version: None,
+      required_capability: None,
+      required_capability_version: None,
+      denied_operation: None,
+      supported_capabilities: Box::default(),
+      supported_capability_versions: Box::default(),
+      legacy_version_metadata_present: false,
+    })
+  }
+
   pub fn incompatible_protocol_version(protocol_version: u16) -> Self {
-    Self {
+    Self::from_data(ProtocolErrorData {
       kind: ProtocolErrorKind::IncompatibleProtocolVersion,
+      code: ProtocolErrorCode::known("incompatible_protocol"),
       message: format!(
         "unsupported Cadder IPC protocol version {protocol_version}; supported compatible range is {MIN_COMPATIBLE_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
       )
       .into_boxed_str(),
       guidance: Some(protocol_version_guidance(protocol_version).into_boxed_str()),
+      retryable: false,
+      request_id: None,
       protocol_version: Some(protocol_version),
       minimum_compatible_protocol_version: Some(MIN_COMPATIBLE_PROTOCOL_VERSION),
       current_protocol_version: Some(PROTOCOL_VERSION),
@@ -179,7 +249,64 @@ impl ProtocolError {
       denied_operation: None,
       supported_capabilities: current_capabilities(),
       supported_capability_versions: current_capability_versions(),
-    }
+      legacy_version_metadata_present: true,
+    })
+  }
+
+  /// Creates a versioned incompatibility error for two non-overlapping ranges.
+  pub fn incompatible_protocol_range(
+    offered: ProtocolVersionRange,
+    supported: ProtocolVersionRange,
+  ) -> Self {
+    let (message, older_component) = if offered.maximum().major() != supported.maximum().major() {
+      (
+        format!(
+          "Cadder IPC protocol major {} is incompatible with supported major {}.",
+          offered.maximum().major(),
+          supported.maximum().major()
+        ),
+        if offered.maximum() < supported.minimum() {
+          "client"
+        } else {
+          "daemon"
+        },
+      )
+    } else {
+      (
+        format!(
+          "Cadder IPC version range {}..={} does not overlap the supported range {}..={}.",
+          offered.minimum(),
+          offered.maximum(),
+          supported.minimum(),
+          supported.maximum()
+        ),
+        if offered.maximum() < supported.minimum() {
+          "client"
+        } else {
+          "daemon"
+        },
+      )
+    };
+    Self::from_data(ProtocolErrorData {
+      kind: ProtocolErrorKind::IncompatibleProtocolVersion,
+      code: ProtocolErrorCode::known("incompatible_protocol"),
+      message: message.into_boxed_str(),
+      guidance: Some(
+        format!("Upgrade the older Cadder {older_component}, then retry the connection.")
+          .into_boxed_str(),
+      ),
+      retryable: false,
+      request_id: None,
+      protocol_version: None,
+      minimum_compatible_protocol_version: None,
+      current_protocol_version: None,
+      required_capability: None,
+      required_capability_version: None,
+      denied_operation: None,
+      supported_capabilities: current_capabilities(),
+      supported_capability_versions: current_capability_versions(),
+      legacy_version_metadata_present: false,
+    })
   }
 
   pub fn unsupported_capability(
@@ -206,8 +333,9 @@ impl ProtocolError {
     supported_capability_versions: impl Into<Box<[ProtocolCapability]>>,
   ) -> Self {
     let required_capability = required_capability.into();
-    Self {
+    Self::from_data(ProtocolErrorData {
       kind: ProtocolErrorKind::UnsupportedCapability,
+      code: ProtocolErrorCode::known("unsupported_capability"),
       message: format!(
         "unsupported Cadder protocol capability `{required_capability}` version {required_capability_version}"
       )
@@ -216,6 +344,8 @@ impl ProtocolError {
         "Use one of the advertised Cadder capabilities, or upgrade the older Cadder node to a build that supports `{required_capability}` version {required_capability_version}."
       )
       .into_boxed_str()),
+      retryable: false,
+      request_id: None,
       protocol_version: Some(PROTOCOL_VERSION),
       minimum_compatible_protocol_version: Some(MIN_COMPATIBLE_PROTOCOL_VERSION),
       current_protocol_version: Some(PROTOCOL_VERSION),
@@ -224,7 +354,8 @@ impl ProtocolError {
       denied_operation: None,
       supported_capabilities: supported_capabilities.into(),
       supported_capability_versions: supported_capability_versions.into(),
-    }
+      legacy_version_metadata_present: true,
+    })
   }
 
   pub fn access_denied(
@@ -232,10 +363,13 @@ impl ProtocolError {
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
-    Self {
+    Self::from_data(ProtocolErrorData {
       kind: ProtocolErrorKind::AccessDenied,
+      code: ProtocolErrorCode::known("permission_denied"),
       message: message.into().into_boxed_str(),
       guidance: guidance.map(String::into_boxed_str),
+      retryable: false,
+      request_id: None,
       protocol_version: Some(PROTOCOL_VERSION),
       minimum_compatible_protocol_version: Some(MIN_COMPATIBLE_PROTOCOL_VERSION),
       current_protocol_version: Some(PROTOCOL_VERSION),
@@ -244,17 +378,21 @@ impl ProtocolError {
       denied_operation: Some(operation.into().into_boxed_str()),
       supported_capabilities: current_capabilities(),
       supported_capability_versions: current_capability_versions(),
-    }
+      legacy_version_metadata_present: true,
+    })
   }
 
   pub fn payload_decode_failed(error: serde_json::Error) -> Self {
-    Self {
+    Self::from_data(ProtocolErrorData {
       kind: ProtocolErrorKind::PayloadDecodeFailed,
+      code: ProtocolErrorCode::known("invalid_payload"),
       message: format!("could not decode Cadder protocol payload: {error}").into_boxed_str(),
       guidance: Some(
         "Verify that the request payload matches the Cadder IPC schema for this message type."
           .into(),
       ),
+      retryable: false,
+      request_id: None,
       protocol_version: None,
       minimum_compatible_protocol_version: Some(MIN_COMPATIBLE_PROTOCOL_VERSION),
       current_protocol_version: Some(PROTOCOL_VERSION),
@@ -263,7 +401,125 @@ impl ProtocolError {
       denied_operation: None,
       supported_capabilities: current_capabilities(),
       supported_capability_versions: current_capability_versions(),
+      legacy_version_metadata_present: true,
+    })
+  }
+
+  pub fn with_request_id(mut self, request_id: RequestId) -> Self {
+    self.0.request_id = Some(request_id);
+    self
+  }
+
+  pub(crate) fn for_versioned_response(mut self, request_id: RequestId) -> Self {
+    self.0.request_id = Some(request_id);
+    self.0.protocol_version = None;
+    self.0.minimum_compatible_protocol_version = None;
+    self.0.current_protocol_version = None;
+    self.0.legacy_version_metadata_present = false;
+    self
+  }
+
+  pub(crate) fn has_legacy_version_metadata(&self) -> bool {
+    self.0.legacy_version_metadata_present
+      || self.protocol_version.is_some()
+      || self.minimum_compatible_protocol_version.is_some()
+      || self.current_protocol_version.is_some()
+  }
+}
+
+impl Deref for ProtocolError {
+  type Target = ProtocolErrorData;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+impl<'de> Deserialize<'de> for ProtocolError {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let wire = ProtocolErrorWire::deserialize(deserializer)?;
+    let (protocol_version, protocol_version_present) = wire.protocol_version.into_parts();
+    let (minimum_compatible_protocol_version, minimum_version_present) =
+      wire.minimum_compatible_protocol_version.into_parts();
+    let (current_protocol_version, current_version_present) =
+      wire.current_protocol_version.into_parts();
+    Ok(Self::from_data(ProtocolErrorData {
+      kind: wire.kind,
+      code: wire.code,
+      message: wire.message,
+      guidance: wire.guidance,
+      retryable: wire.retryable,
+      request_id: wire.request_id,
+      protocol_version: protocol_version.flatten(),
+      minimum_compatible_protocol_version: minimum_compatible_protocol_version.flatten(),
+      current_protocol_version: current_protocol_version.flatten(),
+      required_capability: wire.required_capability,
+      required_capability_version: wire.required_capability_version,
+      denied_operation: wire.denied_operation,
+      supported_capabilities: wire.supported_capabilities,
+      supported_capability_versions: wire.supported_capability_versions,
+      legacy_version_metadata_present: protocol_version_present
+        || minimum_version_present
+        || current_version_present,
+    }))
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtocolErrorWire {
+  kind: ProtocolErrorKind,
+  code: ProtocolErrorCode,
+  message: Box<str>,
+  guidance: Option<Box<str>>,
+  retryable: bool,
+  #[serde(deserialize_with = "deserialize_required_request_id")]
+  request_id: Option<RequestId>,
+  #[serde(default)]
+  protocol_version: WireField<Option<u16>>,
+  #[serde(default)]
+  minimum_compatible_protocol_version: WireField<Option<u16>>,
+  #[serde(default)]
+  current_protocol_version: WireField<Option<u16>>,
+  required_capability: Option<Box<str>>,
+  #[serde(default)]
+  required_capability_version: Option<u16>,
+  #[serde(default)]
+  denied_operation: Option<Box<str>>,
+  #[serde(default)]
+  supported_capabilities: Box<[String]>,
+  #[serde(default)]
+  supported_capability_versions: Box<[ProtocolCapability]>,
+}
+
+#[derive(Default)]
+enum WireField<T> {
+  #[default]
+  Missing,
+  Present(T),
+}
+
+impl<T> WireField<T> {
+  fn into_parts(self) -> (Option<T>, bool) {
+    match self {
+      Self::Missing => (None, false),
+      Self::Present(value) => (Some(value), true),
     }
+  }
+}
+
+impl<'de, T> Deserialize<'de> for WireField<T>
+where
+  T: Deserialize<'de>,
+{
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    T::deserialize(deserializer).map(Self::Present)
   }
 }
 
@@ -287,7 +543,7 @@ fn protocol_version_guidance(protocol_version: u16) -> String {
   )
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProtocolErrorResponse {
   pub request_id: String,
@@ -298,12 +554,197 @@ pub struct ProtocolErrorResponse {
 }
 
 impl ProtocolErrorResponse {
-  pub fn rejected(request_id: impl Into<String>, error: ProtocolError) -> Self {
+  pub fn rejected(request_id: Option<RequestId>, mut error: ProtocolError) -> Self {
+    let response_request_id = request_id
+      .as_ref()
+      .map(ToString::to_string)
+      .unwrap_or_else(|| "unknown".to_string());
+    error.0.request_id = request_id;
     Self {
-      request_id: request_id.into(),
+      request_id: response_request_id,
       accepted: false,
       error,
       capabilities: Some(ProtocolCapabilities::current()),
     }
+  }
+}
+
+impl<'de> Deserialize<'de> for ProtocolErrorResponse {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WireResponse {
+      request_id: String,
+      accepted: bool,
+      error: CompatibleProtocolError,
+      #[serde(default)]
+      capabilities: Option<ProtocolCapabilities>,
+    }
+
+    let response = WireResponse::deserialize(deserializer)?;
+    if response.accepted {
+      return Err(de::Error::custom(
+        "a protocol error response cannot be accepted",
+      ));
+    }
+    let request_id = if response.request_id == "unknown" {
+      None
+    } else {
+      Some(RequestId::parse(response.request_id.clone()).map_err(de::Error::custom)?)
+    };
+    let error = response
+      .error
+      .into_current(request_id)
+      .map_err(de::Error::custom)?;
+
+    Ok(Self {
+      request_id: response.request_id,
+      accepted: false,
+      error,
+      capabilities: response.capabilities,
+    })
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompatibleProtocolError {
+  kind: ProtocolErrorKind,
+  #[serde(default)]
+  code: Option<ProtocolErrorCode>,
+  message: Box<str>,
+  guidance: Option<Box<str>>,
+  #[serde(default)]
+  retryable: Option<bool>,
+  #[serde(default)]
+  request_id: Option<RequestId>,
+  protocol_version: Option<u16>,
+  minimum_compatible_protocol_version: Option<u16>,
+  current_protocol_version: Option<u16>,
+  required_capability: Option<Box<str>>,
+  #[serde(default)]
+  required_capability_version: Option<u16>,
+  #[serde(default)]
+  denied_operation: Option<Box<str>>,
+  #[serde(default)]
+  supported_capabilities: Box<[String]>,
+  #[serde(default)]
+  supported_capability_versions: Box<[ProtocolCapability]>,
+}
+
+impl CompatibleProtocolError {
+  fn into_current(
+    self,
+    outer_request_id: Option<RequestId>,
+  ) -> Result<ProtocolError, &'static str> {
+    let request_id = match (self.request_id, outer_request_id) {
+      (Some(nested), Some(outer)) if nested == outer => Some(nested),
+      (None, outer) => outer,
+      _ => return Err("the response and protocol error request IDs must match"),
+    };
+    let legacy_version_metadata_present = self.protocol_version.is_some()
+      || self.minimum_compatible_protocol_version.is_some()
+      || self.current_protocol_version.is_some();
+    Ok(ProtocolError::from_data(ProtocolErrorData {
+      code: self
+        .code
+        .unwrap_or_else(|| ProtocolErrorCode::known(default_error_code(&self.kind))),
+      kind: self.kind,
+      message: self.message,
+      guidance: self.guidance,
+      retryable: self.retryable.unwrap_or(false),
+      request_id,
+      protocol_version: self.protocol_version,
+      minimum_compatible_protocol_version: self.minimum_compatible_protocol_version,
+      current_protocol_version: self.current_protocol_version,
+      required_capability: self.required_capability,
+      required_capability_version: self.required_capability_version,
+      denied_operation: self.denied_operation,
+      supported_capabilities: self.supported_capabilities,
+      supported_capability_versions: self.supported_capability_versions,
+      legacy_version_metadata_present,
+    }))
+  }
+}
+
+fn default_error_code(kind: &ProtocolErrorKind) -> &'static str {
+  match kind {
+    ProtocolErrorKind::IncompatibleProtocolVersion => "incompatible_protocol",
+    ProtocolErrorKind::UnsupportedCapability => "unsupported_capability",
+    ProtocolErrorKind::PayloadDecodeFailed => "invalid_payload",
+    ProtocolErrorKind::InvalidInput => "invalid_input",
+    ProtocolErrorKind::AccessDenied => "permission_denied",
+    ProtocolErrorKind::Conflict => "conflict",
+    ProtocolErrorKind::Configuration => "configuration",
+    ProtocolErrorKind::CaddyRuntime => "caddy_runtime",
+    ProtocolErrorKind::Storage => "storage",
+    ProtocolErrorKind::Busy => "busy",
+    ProtocolErrorKind::Frame => "frame",
+    ProtocolErrorKind::Timeout => "timeout",
+    ProtocolErrorKind::ProtocolViolation => "protocol_violation",
+    ProtocolErrorKind::ShuttingDown => "shutting_down",
+    ProtocolErrorKind::StaleInstance => "stale_instance",
+    ProtocolErrorKind::Internal => "internal",
+  }
+}
+
+fn deserialize_required_request_id<'de, D>(deserializer: D) -> Result<Option<RequestId>, D::Error>
+where
+  D: Deserializer<'de>,
+{
+  Option::<RequestId>::deserialize(deserializer)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn protocol_error_response_adapts_legacy_errors_with_outer_correlation() {
+    let legacy = r#"{
+      "requestId":"legacy-1",
+      "accepted":false,
+      "error":{
+        "kind":"payloadDecodeFailed",
+        "message":"Legacy daemon rejected the payload.",
+        "guidance":"Check the payload.",
+        "protocolVersion":2,
+        "minimumCompatibleProtocolVersion":1,
+        "currentProtocolVersion":2,
+        "requiredCapability":null,
+        "supportedCapabilities":[],
+        "supportedCapabilityVersions":[]
+      }
+    }"#;
+
+    let response: ProtocolErrorResponse = serde_json::from_str(legacy).unwrap();
+
+    assert_eq!(response.error.code.as_ref(), "invalid_payload");
+    assert_eq!(
+      response.error.request_id.as_ref().map(RequestId::as_str),
+      Some("legacy-1")
+    );
+    assert!(!response.error.retryable);
+    assert_eq!(response.error.current_protocol_version, Some(2));
+    let duplicate_message = legacy.replacen(
+      "\"message\":\"Legacy daemon rejected the payload.\"",
+      "\"message\":\"First value.\",\"message\":\"Legacy daemon rejected the payload.\"",
+      1,
+    );
+    assert!(serde_json::from_str::<ProtocolErrorResponse>(&duplicate_message).is_err());
+
+    let uncorrelated = ProtocolErrorResponse::rejected(
+      None,
+      ProtocolError::payload_decode_failed(
+        serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+      ),
+    );
+    let decoded: ProtocolErrorResponse =
+      serde_json::from_str(&serde_json::to_string(&uncorrelated).unwrap()).unwrap();
+    assert_eq!(decoded.request_id, "unknown");
+    assert_eq!(decoded.error.request_id, None);
   }
 }
