@@ -1,0 +1,10 @@
+{
+  "protocolErrorKind": "futureFailureKind",
+  "serverHandshakeFrame": {
+    "status": "deferred",
+    "data": {}
+  },
+  "responseOutcome": {
+    "deferred": {}
+  }
+}

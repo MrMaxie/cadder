@@ -1,30 +1,153 @@
-use crate::{ProtocolError, ProtocolVersion, RequestId};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use crate::{CapabilityId, ProtocolError, ProtocolResult, ProtocolVersion, RequestId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::DeserializeOwned};
+use serde_json::value::RawValue;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 /// A closed operation request sent after a successful handshake.
 pub struct RequestEnvelope<T> {
-  pub protocol_version: ProtocolVersion,
-  pub operation: Box<str>,
-  pub request_id: RequestId,
-  pub payload: T,
+  protocol_version: ProtocolVersion,
+  operation: Box<str>,
+  request_id: RequestId,
+  /// Payload extensions used by this request. The daemon gates them before typed decoding.
+  payload_capabilities: Box<[CapabilityId]>,
+  payload: T,
 }
 
-impl<T> RequestEnvelope<T> {
-  /// Creates a request with a validated version and correlation ID.
-  pub fn new(
-    protocol_version: ProtocolVersion,
-    operation: impl Into<Box<str>>,
-    request_id: RequestId,
-    payload: T,
-  ) -> Self {
+pub(crate) mod operation_payload_sealed {
+  pub trait Sealed {}
+}
+
+/// A protocol-owned payload bound to one request operation and extension set.
+///
+/// The trait is sealed so a dispatcher cannot substitute an ad hoc permissive decoder for a
+/// closed wire contract.
+pub trait OperationPayload: operation_payload_sealed::Sealed + DeserializeOwned {
+  /// The only operation that may decode this payload type.
+  const OPERATION: &'static str;
+  /// Every payload extension that this decoder understands and requires in the request header.
+  const PAYLOAD_CAPABILITIES: &'static [&'static str] = &[];
+  /// Identifies an unknown enum or union discriminator without classifying ordinary bad input as
+  /// a version mismatch.
+  fn incompatible_discriminator(_payload: &serde_json::Value) -> Option<String> {
+    None
+  }
+}
+
+impl<T> RequestEnvelope<T>
+where
+  T: OperationPayload,
+{
+  /// Creates a request whose operation and extension header come from its sealed payload type.
+  pub fn new(protocol_version: ProtocolVersion, request_id: RequestId, payload: T) -> Self {
     Self {
       protocol_version,
-      operation: operation.into(),
+      operation: T::OPERATION.into(),
       request_id,
+      payload_capabilities: T::PAYLOAD_CAPABILITIES
+        .iter()
+        .map(|capability| CapabilityId::known(capability))
+        .collect(),
       payload,
     }
+  }
+
+  /// Returns the protocol version selected for this request.
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the operation fixed by the sealed payload type.
+  pub fn operation(&self) -> &str {
+    &self.operation
+  }
+
+  /// Returns the request correlation ID.
+  pub fn request_id(&self) -> &RequestId {
+    &self.request_id
+  }
+
+  /// Returns the payload capabilities fixed by the sealed payload type.
+  pub fn payload_capabilities(&self) -> &[CapabilityId] {
+    &self.payload_capabilities
+  }
+
+  /// Returns the typed payload.
+  pub fn payload(&self) -> &T {
+    &self.payload
+  }
+}
+
+/// A closed request header that preserves the exact payload until authorization succeeds.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RawRequestEnvelope {
+  protocol_version: ProtocolVersion,
+  operation: Box<str>,
+  request_id: RequestId,
+  payload_capabilities: Box<[CapabilityId]>,
+  payload: Box<RawValue>,
+}
+
+impl RawRequestEnvelope {
+  /// Returns the protocol version selected for this request.
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the exact operation label.
+  pub fn operation(&self) -> &str {
+    &self.operation
+  }
+
+  /// Returns the correlation ID supplied by the client.
+  pub fn request_id(&self) -> &RequestId {
+    &self.request_id
+  }
+
+  /// Returns payload extensions that must be authorized before decoding.
+  pub fn payload_capabilities(&self) -> &[CapabilityId] {
+    &self.payload_capabilities
+  }
+
+  pub(crate) fn decode_payload<T>(&self, closed: bool) -> ProtocolResult<T>
+  where
+    T: OperationPayload,
+  {
+    if !closed {
+      return serde_json::from_str(self.payload.get())
+        .map_err(ProtocolError::payload_decode_failed);
+    }
+
+    let payload_value: serde_json::Value =
+      serde_json::from_str(self.payload.get()).map_err(ProtocolError::payload_decode_failed)?;
+    if let Some(path) = T::incompatible_discriminator(&payload_value) {
+      return Err(ProtocolError::incompatible_payload_contract(Some(&path)));
+    }
+
+    let mut first_ignored = None;
+    let mut deserializer = serde_json::Deserializer::from_str(self.payload.get());
+    let decoded = serde_ignored::deserialize(&mut deserializer, |path| {
+      if first_ignored.is_none() {
+        first_ignored = Some(path.to_string());
+      }
+    });
+    let value = match decoded {
+      Ok(value) => value,
+      Err(_) if first_ignored.is_some() => {
+        return Err(ProtocolError::incompatible_payload_contract(
+          first_ignored.as_deref(),
+        ));
+      }
+      Err(error) => return Err(ProtocolError::payload_decode_failed(error)),
+    };
+    if deserializer.end().is_err() {
+      return Err(ProtocolError::incompatible_payload_contract(None));
+    }
+    if let Some(path) = first_ignored {
+      return Err(ProtocolError::incompatible_payload_contract(Some(&path)));
+    }
+    Ok(value)
   }
 }
 

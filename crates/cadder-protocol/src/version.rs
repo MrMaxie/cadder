@@ -11,7 +11,7 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
   /// Creates a version and rejects the reserved major version zero.
-  pub fn new(major: u16, minor: u16) -> Result<Self, ProtocolVersionError> {
+  pub const fn new(major: u16, minor: u16) -> Result<Self, ProtocolVersionError> {
     if major == 0 {
       return Err(ProtocolVersionError::ZeroMajor);
     }

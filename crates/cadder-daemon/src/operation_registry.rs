@@ -232,7 +232,9 @@ mod tests {
       CapabilityId::parse("future-surface").unwrap(),
       CapabilityId::parse(capabilities::RUNTIME_STATE).unwrap(),
     ];
-    let negotiated = OPERATION_REGISTRY.negotiate_capabilities(&requested);
+    let negotiated = OPERATION_REGISTRY
+      .negotiate_capabilities(CURRENT_PROTOCOL_VERSION, &requested)
+      .unwrap();
 
     assert_eq!(
       negotiated
@@ -289,7 +291,9 @@ mod tests {
       .authorize(
         "unknown-operation",
         CURRENT_PROTOCOL_VERSION,
-        &OPERATION_REGISTRY.advertised_capabilities(),
+        &OPERATION_REGISTRY
+          .advertised_capabilities(CURRENT_PROTOCOL_VERSION)
+          .unwrap(),
       )
       .unwrap_err();
     assert_eq!(unknown.code.as_str(), "unsupported_operation");

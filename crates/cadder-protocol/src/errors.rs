@@ -164,6 +164,30 @@ pub enum ProtocolErrorKind {
   Internal,
 }
 
+impl ProtocolErrorKind {
+  /// Returns the stable default machine code for this error category.
+  pub const fn default_code(&self) -> &'static str {
+    match self {
+      Self::IncompatibleProtocolVersion => "incompatible_protocol",
+      Self::UnsupportedCapability => "unsupported_capability",
+      Self::PayloadDecodeFailed => "invalid_payload",
+      Self::InvalidInput => "invalid_input",
+      Self::AccessDenied => "permission_denied",
+      Self::Conflict => "conflict",
+      Self::Configuration => "configuration",
+      Self::CaddyRuntime => "caddy_runtime",
+      Self::Storage => "storage",
+      Self::Busy => "busy",
+      Self::Frame => "frame",
+      Self::Timeout => "timeout",
+      Self::ProtocolViolation => "protocol_violation",
+      Self::ShuttingDown => "shutting_down",
+      Self::StaleInstance => "stale_instance",
+      Self::Internal => "internal",
+    }
+  }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 /// A compact owning typed error carried by Cadder protocol responses.
@@ -441,6 +465,50 @@ impl ProtocolError {
     })
   }
 
+  /// Reports that a closed mutation payload uses a contract this protocol session cannot decode.
+  pub fn incompatible_payload_contract(path: Option<&str>) -> Self {
+    let message = path.filter(|path| safe_payload_path(path)).map_or_else(
+      || "The mutation payload does not match the negotiated Cadder protocol contract.".into(),
+      |path| {
+        format!(
+          "The mutation payload uses `{path}`, which is not part of the negotiated Cadder protocol contract."
+        )
+      },
+    );
+    Self::from_data(ProtocolErrorData {
+      kind: ProtocolErrorKind::IncompatibleProtocolVersion,
+      code: ProtocolErrorCode::known("incompatible_payload"),
+      message: message.into_boxed_str(),
+      guidance: Some(
+        "Upgrade the older Cadder component or use only fields and variants supported by the negotiated capabilities."
+          .into(),
+      ),
+      retryable: false,
+      request_id: None,
+      protocol_version: None,
+      minimum_compatible_protocol_version: None,
+      current_protocol_version: None,
+      required_capability: None,
+      required_capability_version: None,
+      denied_operation: None,
+      supported_capabilities: current_capabilities(),
+      supported_capability_versions: current_capability_versions(),
+      legacy_version_metadata_present: false,
+    })
+  }
+
+  pub(crate) fn decoder_contract_mismatch(operation: &str, payload_operation: &str) -> Self {
+    Self::new(
+      ProtocolErrorKind::Internal,
+      ProtocolErrorCode::known("internal"),
+      format!(
+        "Cadder selected the `{payload_operation}` payload decoder for the `{operation}` operation."
+      ),
+      Some("Report this Cadder protocol dispatcher error.".into()),
+      false,
+    )
+  }
+
   pub fn with_request_id(mut self, request_id: RequestId) -> Self {
     self.0.request_id = Some(request_id);
     self
@@ -461,6 +529,14 @@ impl ProtocolError {
       || self.minimum_compatible_protocol_version.is_some()
       || self.current_protocol_version.is_some()
   }
+}
+
+fn safe_payload_path(path: &str) -> bool {
+  !path.is_empty()
+    && path.len() <= 160
+    && path
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'[' | b']'))
 }
 
 impl Deref for ProtocolError {
@@ -687,7 +763,7 @@ impl CompatibleProtocolError {
     Ok(ProtocolError::from_data(ProtocolErrorData {
       code: self
         .code
-        .unwrap_or_else(|| ProtocolErrorCode::known(default_error_code(&self.kind))),
+        .unwrap_or_else(|| ProtocolErrorCode::known(self.kind.default_code())),
       kind: self.kind,
       message: self.message,
       guidance: self.guidance,
@@ -703,27 +779,6 @@ impl CompatibleProtocolError {
       supported_capability_versions: self.supported_capability_versions,
       legacy_version_metadata_present,
     }))
-  }
-}
-
-fn default_error_code(kind: &ProtocolErrorKind) -> &'static str {
-  match kind {
-    ProtocolErrorKind::IncompatibleProtocolVersion => "incompatible_protocol",
-    ProtocolErrorKind::UnsupportedCapability => "unsupported_capability",
-    ProtocolErrorKind::PayloadDecodeFailed => "invalid_payload",
-    ProtocolErrorKind::InvalidInput => "invalid_input",
-    ProtocolErrorKind::AccessDenied => "permission_denied",
-    ProtocolErrorKind::Conflict => "conflict",
-    ProtocolErrorKind::Configuration => "configuration",
-    ProtocolErrorKind::CaddyRuntime => "caddy_runtime",
-    ProtocolErrorKind::Storage => "storage",
-    ProtocolErrorKind::Busy => "busy",
-    ProtocolErrorKind::Frame => "frame",
-    ProtocolErrorKind::Timeout => "timeout",
-    ProtocolErrorKind::ProtocolViolation => "protocol_violation",
-    ProtocolErrorKind::ShuttingDown => "shutting_down",
-    ProtocolErrorKind::StaleInstance => "stale_instance",
-    ProtocolErrorKind::Internal => "internal",
   }
 }
 

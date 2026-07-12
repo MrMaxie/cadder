@@ -174,7 +174,7 @@ pub struct QueryIisBindingsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetIisHandoffRequest {
   pub request_id: String,
   pub binding_id: String,

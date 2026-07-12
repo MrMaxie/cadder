@@ -4,14 +4,14 @@ use uuid::Uuid;
 use crate::{AutostartMode, EntrypointRegistration, HistoryKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterEntrypointRequest {
   pub request_id: String,
   pub registration: EntrypointRegistration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UnregisterEntrypointRequest {
   pub request_id: String,
   pub registration_id: String,
@@ -19,7 +19,7 @@ pub struct UnregisterEntrypointRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HeartbeatEntrypointRequest {
   pub request_id: String,
   pub registration_id: String,
@@ -39,7 +39,7 @@ pub struct SubscribeStateRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetEntrypointEnabledRequest {
   pub request_id: String,
   pub registration_id: String,
@@ -48,7 +48,7 @@ pub struct SetEntrypointEnabledRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetDomainEnabledRequest {
   pub request_id: String,
   pub registration_id: String,
@@ -71,14 +71,14 @@ pub struct QueryAutostartRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetAutostartRequest {
   pub request_id: String,
   pub mode: AutostartMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShutdownDaemonRequest {
   pub request_id: String,
 }
