@@ -161,8 +161,10 @@ impl fmt::Display for VersionRangeError {
 
 impl std::error::Error for VersionRangeError {}
 
+/// The version that introduces the Cadder 1.0 operation set.
+pub const PROTOCOL_VERSION_1_0: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 /// The protocol version implemented by this build.
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = PROTOCOL_VERSION_1_0;
 /// The inclusive protocol range implemented by this build.
 pub const SUPPORTED_PROTOCOL_VERSIONS: ProtocolVersionRange =
   ProtocolVersionRange::exact(CURRENT_PROTOCOL_VERSION);

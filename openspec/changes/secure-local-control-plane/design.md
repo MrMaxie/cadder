@@ -71,7 +71,24 @@ Terminal clients render an error in user order: the operation that did not compl
 | Operation timeout | The operation did not finish and its commit authority is revoked. Check current status before retrying. | `timeout`, retryability set by the operation registry |
 | Daemon shutting down | The daemon is stopping and did not start the operation. Start it again, then retry. | `shutting_down`, retryable after restart |
 
-The client reads and validates discovery, connects to its endpoint, authenticates through the OS transport, and sends `ClientHello` with its supported version range, requested capabilities, runtime ID, and daemon instance ID. `ClientHello` and `ServerHandshakeFrame` are standalone pre-negotiation frames; operation envelopes begin only after a successful handshake, so request IDs never appear in two nested envelope layers. The daemon accepts with `ServerHello` containing the selected version and capabilities or rejects with a correlated `ProtocolError`, including version-upgrade guidance when ranges do not overlap. A central `OperationRegistry` maps every message type to its capability, minimum version, read/mutation classification, stream classification, and deadline class. Dispatch checks the registry before decoding the operation payload.
+The client reads and validates discovery, connects to its endpoint, authenticates through the OS transport, and sends `ClientHello` with its supported version range, requested capabilities, runtime ID, and daemon instance ID. `ClientHello` and `ServerHandshakeFrame` are standalone pre-negotiation frames; operation envelopes begin only after a successful handshake, so request IDs never appear in two nested envelope layers. The daemon accepts with `ServerHello` containing the selected version and capabilities or rejects with a correlated `ProtocolError`, including version-upgrade guidance when ranges do not overlap. A central `OperationRegistry` maps every message type to its capability, immutable introduction version, read/mutation classification, stream classification, and deadline class. Dispatch first requires the envelope version to belong to the build's supported range, then checks the operation's introduction version and capability before decoding the payload. Existing operations retain introduction version 1.0 when the current protocol minor advances.
+
+| Capability | Operations | Access and delivery | Deadline | Retry after timeout |
+| --- | --- | --- | --- | --- |
+| `entrypoint-registration` | register, unregister | mutation, unary | reload | no |
+| `entrypoint-registration` | heartbeat | mutation, unary | ordinary | yes |
+| `runtime-state` | query state | read-only, unary | ordinary | yes |
+| `state-subscription` | subscribe state | read-only, server stream | stream | yes |
+| `activation-control` | set entrypoint/domain enabled | mutation, unary | reload | no |
+| `iis-handoff` | query bindings | read-only, unary | ordinary | yes |
+| `iis-handoff` | set handoff | mutation, unary | reload | no |
+| `logs` | query logs | read-only, unary | ordinary | yes |
+| `history` | query history | read-only, unary | ordinary | yes |
+| `autostart` | query autostart | read-only, unary | ordinary | yes |
+| `autostart` | set autostart | mutation, unary | ordinary | no |
+| `daemon-lifecycle` | shutdown daemon | mutation, unary | shutdown | no |
+
+The transitional flat envelope uses an explicit legacy registry adapter that preserves its numeric compatibility floor and advertised-capability semantics without treating that connection as a negotiated 1.0 session. Removal of this adapter belongs to the shared-client migration in task 6.1 together with the production switch to the handshake and versioned envelope.
 
 One codec based on `tokio_util::codec::LinesCodec` serves daemon, client, shim, and subscription paths. Its maximum line length is 1,048,576 bytes excluding LF. Outbound envelopes are serialized into a bounded buffer before writing. The connection reader remains active while a handler runs so that a second pipelined request can be rejected without starting another handler; later sequential requests on the persistent shim session remain valid.
 

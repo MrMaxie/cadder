@@ -8,11 +8,28 @@ use crate::{
 };
 
 pub mod capabilities {
+  pub const ACTIVATION_CONTROL: &str = "activation-control";
   pub const AUTOSTART: &str = "autostart";
+  pub const DAEMON_LIFECYCLE: &str = "daemon-lifecycle";
+  pub const ENTRYPOINT_REGISTRATION: &str = "entrypoint-registration";
   pub const HISTORY: &str = "history";
   pub const IIS_HANDOFF: &str = "iis-handoff";
   pub const LOGS: &str = "logs";
+  pub const RUNTIME_STATE: &str = "runtime-state";
   pub const STATE_SUBSCRIPTION: &str = "state-subscription";
+
+  /// Every capability advertised by this build in stable wire order.
+  pub const ALL: &[&str] = &[
+    ACTIVATION_CONTROL,
+    AUTOSTART,
+    DAEMON_LIFECYCLE,
+    ENTRYPOINT_REGISTRATION,
+    HISTORY,
+    IIS_HANDOFF,
+    LOGS,
+    RUNTIME_STATE,
+    STATE_SUBSCRIPTION,
+  ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,29 +126,18 @@ impl ProtocolCapabilities {
 }
 
 pub fn current_capabilities() -> Box<[String]> {
-  [
-    capabilities::AUTOSTART,
-    capabilities::HISTORY,
-    capabilities::IIS_HANDOFF,
-    capabilities::LOGS,
-    capabilities::STATE_SUBSCRIPTION,
-  ]
-  .iter()
-  .map(|capability| (*capability).to_string())
-  .collect()
+  capabilities::ALL
+    .iter()
+    .map(|capability| (*capability).to_string())
+    .collect()
 }
 
 pub fn current_capability_versions() -> Box<[ProtocolCapability]> {
-  [
-    capabilities::AUTOSTART,
-    capabilities::HISTORY,
-    capabilities::IIS_HANDOFF,
-    capabilities::LOGS,
-    capabilities::STATE_SUBSCRIPTION,
-  ]
-  .into_iter()
-  .map(|capability| ProtocolCapability::new(capability, 1, 1))
-  .collect()
+  capabilities::ALL
+    .iter()
+    .copied()
+    .map(|capability| ProtocolCapability::new(capability, 1, 1))
+    .collect()
 }
 
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
@@ -324,6 +330,36 @@ impl ProtocolError {
       supported_capabilities,
       supported_capability_versions,
     )
+  }
+
+  /// Creates the legacy-compatible diagnostic for an unknown message type.
+  pub fn unsupported_operation(
+    operation: impl Into<String>,
+    supported_capabilities: impl Into<Box<[String]>>,
+  ) -> Self {
+    let operation = operation.into();
+    let supported_capabilities = supported_capabilities.into();
+    let supported_capability_versions = supported_capabilities
+      .iter()
+      .map(|capability| ProtocolCapability::new(capability.clone(), 1, 1))
+      .collect();
+    Self::from_data(ProtocolErrorData {
+      kind: ProtocolErrorKind::UnsupportedCapability,
+      code: ProtocolErrorCode::known("unsupported_operation"),
+      message: format!("Cadder does not support the `{operation}` operation.").into_boxed_str(),
+      guidance: Some("Use an operation advertised by the connected Cadder daemon.".into()),
+      retryable: false,
+      request_id: None,
+      protocol_version: None,
+      minimum_compatible_protocol_version: None,
+      current_protocol_version: None,
+      required_capability: Some(format!("message-type:{operation}").into_boxed_str()),
+      required_capability_version: None,
+      denied_operation: None,
+      supported_capabilities,
+      supported_capability_versions,
+      legacy_version_metadata_present: false,
+    })
   }
 
   pub fn unsupported_capability_version(

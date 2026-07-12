@@ -45,6 +45,11 @@ impl CapabilityId {
   pub fn as_str(&self) -> &str {
     &self.0
   }
+
+  pub(crate) fn known(value: &'static str) -> Self {
+    debug_assert!(validate_capability_id(value).is_ok());
+    Self(value.into())
+  }
 }
 
 impl AsRef<str> for CapabilityId {

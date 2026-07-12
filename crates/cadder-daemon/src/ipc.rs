@@ -1,15 +1,16 @@
 use crate::{
   CaddyBackendMode, DaemonState, IpcEndpointMetadata, IpcEndpointPublication, IpcOperation,
   IpcPrincipal, IpcSecurityPolicy, RuntimePaths, RuntimeProfile,
+  operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
 use anyhow::{Context, Result, anyhow};
 use cadder_protocol::{
   HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity, LogStreamIdentity,
-  ProtocolError, ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest,
-  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
-  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest, UnregisterEntrypointRequest,
-  message_types,
+  OPERATION_REGISTRY, OperationAccess, ProtocolError, ProtocolErrorResponse, QueryAutostartRequest,
+  QueryIisBindingsRequest, QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest,
+  RequestId, SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
+  SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest,
+  UnregisterEntrypointRequest, message_types,
 };
 use fs4::{FileExt, TryLockError};
 use interprocess::local_socket::{
@@ -138,8 +139,8 @@ async fn handle_connection_loop(
     };
   }
   macro_rules! decode_request {
-    ($envelope:expr, $request:ty) => {
-      match decode_or_reject::<$request, _>(&mut write_half, $envelope).await? {
+    ($authorized:expr, $request:ty) => {
+      match decode_or_reject::<$request, _>(&mut write_half, $authorized).await? {
         Some(request) => request,
         None => continue,
       }
@@ -165,9 +166,17 @@ async fn handle_connection_loop(
     if !authorize_or_reject(&mut write_half, &state, &envelope, security).await? {
       continue;
     }
-    match envelope.message_type.as_str() {
+    let authorized = match authorize_legacy(&envelope) {
+      Ok(authorized) => authorized,
+      Err(error) => {
+        let response = ProtocolErrorResponse::rejected(request_id_from_payload(&envelope), error);
+        send_response!(message_types::PROTOCOL_ERROR_RESPONSE, response);
+        continue;
+      }
+    };
+    match authorized.definition().name() {
       message_types::REGISTER_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&envelope, RegisterEntrypointRequest);
+        let request = decode_request!(&authorized, RegisterEntrypointRequest);
         let nonce = request
           .registration
           .entrypoint_instance
@@ -186,7 +195,7 @@ async fn handle_connection_loop(
         send_response!(message_types::REGISTER_ENTRYPOINT_RESPONSE, response);
       }
       message_types::UNREGISTER_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&envelope, UnregisterEntrypointRequest);
+        let request = decode_request!(&authorized, UnregisterEntrypointRequest);
         let response = state
           .unregister(
             request.request_id,
@@ -200,57 +209,57 @@ async fn handle_connection_loop(
         send_response!(message_types::UNREGISTER_ENTRYPOINT_RESPONSE, response);
       }
       message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&envelope, HeartbeatEntrypointRequest);
+        let request = decode_request!(&authorized, HeartbeatEntrypointRequest);
         let response = state.heartbeat(request).await;
         send_response!(message_types::HEARTBEAT_ENTRYPOINT_RESPONSE, response);
       }
       message_types::QUERY_STATE_REQUEST => {
-        let request = decode_request!(&envelope, QueryStateRequest);
+        let request = decode_request!(&authorized, QueryStateRequest);
         let response = state.query_state(request.request_id).await;
         send_response!(message_types::QUERY_STATE_RESPONSE, response);
       }
       message_types::SET_ENTRYPOINT_ENABLED_REQUEST => {
-        let request = decode_request!(&envelope, SetEntrypointEnabledRequest);
+        let request = decode_request!(&authorized, SetEntrypointEnabledRequest);
         let response = state.set_entrypoint_enabled(request).await;
         send_response!(message_types::SET_ENTRYPOINT_ENABLED_RESPONSE, response);
       }
       message_types::SET_DOMAIN_ENABLED_REQUEST => {
-        let request = decode_request!(&envelope, SetDomainEnabledRequest);
+        let request = decode_request!(&authorized, SetDomainEnabledRequest);
         let response = state.set_domain_enabled(request).await;
         send_response!(message_types::SET_DOMAIN_ENABLED_RESPONSE, response);
       }
       message_types::QUERY_IIS_BINDINGS_REQUEST => {
-        let request = decode_request!(&envelope, QueryIisBindingsRequest);
+        let request = decode_request!(&authorized, QueryIisBindingsRequest);
         let response = state.query_iis_bindings(request.request_id).await;
         send_response!(message_types::QUERY_IIS_BINDINGS_RESPONSE, response);
       }
       message_types::SET_IIS_HANDOFF_REQUEST => {
-        let request = decode_request!(&envelope, SetIisHandoffRequest);
+        let request = decode_request!(&authorized, SetIisHandoffRequest);
         let response = state.set_iis_handoff(request).await;
         send_response!(message_types::SET_IIS_HANDOFF_RESPONSE, response);
       }
       message_types::QUERY_LOGS_REQUEST => {
-        let request = decode_request!(&envelope, QueryLogsRequest);
+        let request = decode_request!(&authorized, QueryLogsRequest);
         let response = state.query_logs(request).await;
         send_response!(message_types::QUERY_LOGS_RESPONSE, response);
       }
       message_types::QUERY_HISTORY_REQUEST => {
-        let request = decode_request!(&envelope, cadder_protocol::QueryHistoryRequest);
+        let request = decode_request!(&authorized, cadder_protocol::QueryHistoryRequest);
         let response = state.query_history(request).await;
         send_response!(message_types::QUERY_HISTORY_RESPONSE, response);
       }
       message_types::QUERY_AUTOSTART_REQUEST => {
-        let request = decode_request!(&envelope, QueryAutostartRequest);
+        let request = decode_request!(&authorized, QueryAutostartRequest);
         let response = state.query_autostart(request.request_id).await;
         send_response!(message_types::QUERY_AUTOSTART_RESPONSE, response);
       }
       message_types::SET_AUTOSTART_REQUEST => {
-        let request = decode_request!(&envelope, SetAutostartRequest);
+        let request = decode_request!(&authorized, SetAutostartRequest);
         let response = state.set_autostart(request).await;
         send_response!(message_types::SET_AUTOSTART_RESPONSE, response);
       }
       message_types::SUBSCRIBE_STATE_REQUEST => {
-        let request = decode_request!(&envelope, SubscribeStateRequest);
+        let request = decode_request!(&authorized, SubscribeStateRequest);
         let snapshot = state.snapshot().await;
         let initial = cadder_protocol::StateChangedEvent {
           request_id: request.request_id.clone(),
@@ -267,7 +276,7 @@ async fn handle_connection_loop(
         }
       }
       message_types::SHUTDOWN_DAEMON_REQUEST => {
-        let request = decode_request!(&envelope, ShutdownDaemonRequest);
+        let request = decode_request!(&authorized, ShutdownDaemonRequest);
         let mut response = state.shutdown().await;
         response.request_id = request.request_id;
         send_response!(message_types::SHUTDOWN_DAEMON_RESPONSE, response);
@@ -329,15 +338,10 @@ where
 }
 
 fn operation_for_message_type(message_type: &str) -> IpcOperation {
-  match message_type {
-    message_types::REGISTER_ENTRYPOINT_REQUEST
-    | message_types::UNREGISTER_ENTRYPOINT_REQUEST
-    | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
-    | message_types::SET_ENTRYPOINT_ENABLED_REQUEST
-    | message_types::SET_DOMAIN_ENABLED_REQUEST
-    | message_types::SET_IIS_HANDOFF_REQUEST
-    | message_types::SET_AUTOSTART_REQUEST
-    | message_types::SHUTDOWN_DAEMON_REQUEST => IpcOperation::state_changing(message_type),
+  match OPERATION_REGISTRY.lookup(message_type) {
+    Some(operation) if operation.access() == OperationAccess::Mutation => {
+      IpcOperation::state_changing(message_type)
+    }
     _ => IpcOperation::read_only(message_type),
   }
 }
@@ -376,15 +380,18 @@ where
   Ok(())
 }
 
-async fn decode_or_reject<T, W>(writer: &mut W, envelope: &IpcEnvelope) -> Result<Option<T>>
+async fn decode_or_reject<T, W>(
+  writer: &mut W,
+  envelope: &AuthorizedLegacyEnvelope<'_>,
+) -> Result<Option<T>>
 where
   T: DeserializeOwned,
   W: AsyncWrite + Unpin,
 {
-  match envelope.decode_typed() {
+  match envelope.decode() {
     Ok(request) => Ok(Some(request)),
     Err(error) => {
-      let response = ProtocolErrorResponse::rejected(request_id_from_payload(envelope), error);
+      let response = ProtocolErrorResponse::rejected(envelope.request_id(), error);
       write_envelope(writer, message_types::PROTOCOL_ERROR_RESPONSE, &response).await?;
       Ok(None)
     }

@@ -5,6 +5,7 @@ mod iis;
 mod ipc;
 mod ipc_security;
 mod logs;
+mod operation_registry;
 mod paths;
 mod privilege;
 mod process_tree;

@@ -6,13 +6,13 @@ use cadder_daemon::{
 use cadder_protocol::{
   ActivationState, BasicResponse, ConfigApplyStatus, EntrypointInstanceIdentity,
   EntrypointRegistration, HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity,
-  LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity, PROTOCOL_VERSION, ProtocolErrorKind,
-  ProtocolErrorResponse, QueryAutostartRequest, QueryAutostartResponse, QueryIisBindingsRequest,
-  QueryIisBindingsResponse, QueryLogsRequest, QueryLogsResponse, QueryStateRequest,
-  QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse, RuntimeStatus,
-  SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  SetIisHandoffResponse, ShimRunMetadata, SourcePath, StateChangeKind, UnregisterEntrypointRequest,
-  message_types, new_request_id,
+  LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity, PROTOCOL_VERSION, ProtocolCapabilities,
+  ProtocolErrorKind, ProtocolErrorResponse, QueryAutostartRequest, QueryAutostartResponse,
+  QueryIisBindingsRequest, QueryIisBindingsResponse, QueryLogsRequest, QueryLogsResponse,
+  QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse,
+  RuntimeStatus, SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
+  SetIisHandoffRequest, SetIisHandoffResponse, ShimRunMetadata, SourcePath, StateChangeKind,
+  UnregisterEntrypointRequest, message_types, new_request_id,
 };
 use chrono::Utc;
 use interprocess::local_socket::{
@@ -1283,6 +1283,59 @@ async fn ipc_reports_unsupported_message_type() {
       .as_ref()
       .expect("protocol error response should advertise daemon capabilities")
       .supports(cadder_protocol::capabilities::LOGS)
+  );
+  harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn operation_registry_rejects_missing_capability_before_payload_decode() {
+  let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
+  let harness = Harness::start(FakeCaddy::new(fixture)).await;
+  let (mut reader, mut writer) = raw_ipc_session(&harness.paths).await;
+  let mut capabilities = ProtocolCapabilities::current();
+  capabilities.supported_capabilities = capabilities
+    .supported_capabilities
+    .iter()
+    .filter(|capability| capability.as_str() != cadder_protocol::capabilities::LOGS)
+    .cloned()
+    .collect();
+  capabilities.supported_capability_versions = capabilities
+    .supported_capability_versions
+    .iter()
+    .filter(|capability| capability.name != cadder_protocol::capabilities::LOGS)
+    .cloned()
+    .collect();
+  let request = IpcEnvelope {
+    protocol_version: PROTOCOL_VERSION,
+    capabilities: Some(capabilities),
+    message_type: message_types::QUERY_LOGS_REQUEST.to_string(),
+    payload: serde_json::json!({
+      "requestId": "capability-gate",
+      "invalid": "this payload never reaches QueryLogsRequest decoding"
+    }),
+  };
+
+  write_raw_line(
+    &mut writer,
+    &format!("{}\n", serde_json::to_string(&request).unwrap()),
+  )
+  .await;
+  let envelope = read_raw_envelope(&mut reader).await;
+  let response: ProtocolErrorResponse = envelope.decode().unwrap();
+
+  assert_eq!(
+    envelope.message_type,
+    message_types::PROTOCOL_ERROR_RESPONSE
+  );
+  assert_eq!(response.request_id, "capability-gate");
+  assert_eq!(
+    response.error.kind,
+    ProtocolErrorKind::UnsupportedCapability
+  );
+  assert_eq!(response.error.code.as_str(), "unsupported_capability");
+  assert_eq!(
+    response.error.required_capability.as_deref(),
+    Some(cadder_protocol::capabilities::LOGS)
   );
   harness.shutdown().await;
 }
