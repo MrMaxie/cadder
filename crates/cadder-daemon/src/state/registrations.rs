@@ -44,7 +44,11 @@ impl DaemonState {
       });
     }
 
-    let _operation = self.config_operation.lock().await;
+    let _operation = self
+      .config_operation
+      .acquire()
+      .await
+      .expect("config operation semaphore closed");
     {
       let inner = self.inner.lock().await;
       if registration_has_different_owner(&inner, &registration) {
@@ -58,51 +62,142 @@ impl DaemonState {
       coordinator.adapter()
     };
     let prepared = adapter.prepare(registration).await;
-    let (id, registrations) = {
-      let mut coordinator = self.coordinator.lock().await;
-      let mut inner = self.inner.lock().await;
+    let (mut candidate_coordinator, mut candidate_registrations) = {
+      let coordinator = self.coordinator.lock().await;
+      let inner = self.inner.lock().await;
       if registration_has_different_owner(&inner, &prepared.registration) {
         return Ok(registration_owner_conflict(request_id));
       }
-      let id = fence.commit(|| {
-        let mut prepared = coordinator.commit_prepared_registration(source_path, prepared);
-        let now = Utc::now();
-        prepared.created_at_utc = now;
-        prepared.last_heartbeat_utc = now;
-        let id = prepared.registration_id.clone();
-        inner.registrations.insert(id.clone(), prepared);
-        id
-      })?;
-      let registrations = inner.registrations.values().cloned().collect::<Vec<_>>();
-      (id, registrations)
+      (coordinator.clone(), inner.registrations.clone())
     };
 
-    self
-      .apply_registrations_fenced(registrations.clone(), fence)
-      .await?;
-    fence.commit(|| {
-      self.store.record_history(
-        HistoryKind::Registration,
-        format!("Registered entrypoint `{id}`."),
-        Some(&id),
-        None,
-        &serde_json::json!({
-          "registrationId": id,
-          "domainCount": registrations
-            .iter()
-            .find(|registration| registration.registration_id == id)
-            .map(|registration| registration.registered_domains.len())
-            .unwrap_or_default()
-        }),
-      );
-    })?;
-    self
-      .publish_change_fenced(
-        StateChangeKind::RegistrationsChanged,
-        Some(id.clone()),
-        fence,
-      )
-      .await?;
+    let mut prepared = candidate_coordinator.commit_prepared_registration(source_path, prepared);
+    let now = Utc::now();
+    prepared.created_at_utc = now;
+    prepared.last_heartbeat_utc = now;
+    let id = prepared.registration_id.clone();
+    let domain_count = prepared.registered_domains.len();
+    candidate_registrations.insert(id.clone(), prepared);
+    let registrations = candidate_registrations
+      .values()
+      .cloned()
+      .collect::<Vec<_>>();
+    let runtime = candidate_coordinator.runtime();
+    let mut runtime_receipt = None;
+    match candidate_coordinator.begin_apply(&registrations) {
+      CaddyApplyAction::Current(_) => {}
+      CaddyApplyAction::Stop { attempted } => {
+        if runtime.inspect().await.status != cadder_protocol::RuntimeStatus::Idle {
+          return Ok(registration_runtime_rejected(
+            request_id,
+            "the running Caddy runtime requires a rollback-capable stop",
+          ));
+        }
+        candidate_coordinator.finish_idle(attempted);
+      }
+      CaddyApplyAction::Apply {
+        attempted,
+        rendered,
+        hash,
+        source_config_paths,
+      } => {
+        fence.commit(|| ())?;
+        match runtime.begin_apply_config(&rendered, &self.logs).await {
+          Ok(attempt) => {
+            let (receipt, outcome) = attempt.into_parts();
+            match outcome {
+              Ok(()) => {
+                runtime_receipt = Some(receipt);
+                candidate_coordinator.finish_runtime_apply(
+                  attempted,
+                  hash,
+                  source_config_paths,
+                  Ok(()),
+                );
+              }
+              Err(error) => {
+                rollback_runtime_receipt(self, Some(receipt)).await;
+                candidate_coordinator.finish_runtime_apply(
+                  attempted,
+                  hash,
+                  source_config_paths,
+                  Err(error),
+                );
+              }
+            }
+          }
+          Err(error) => {
+            candidate_coordinator.finish_runtime_apply(
+              attempted,
+              hash,
+              source_config_paths,
+              Err(error),
+            );
+          }
+        }
+      }
+    }
+
+    let runtime_state = match &runtime_receipt {
+      Some(receipt) => receipt.projected_state().await,
+      None => runtime.inspect().await,
+    };
+    #[cfg(test)]
+    if let Some(hook) = &self.register_publish_hook {
+      hook.pause().await;
+    }
+    let storage_state = self.store.state();
+    let publish_result = {
+      let _publish = self.publish_operation.lock().await;
+      let mut coordinator = self.coordinator.lock().await;
+      let mut inner = self.inner.lock().await;
+      merge_live_heartbeats(&mut candidate_registrations, &inner.registrations);
+      let snapshot = GuiStateSnapshot {
+        captured_at_utc: Utc::now(),
+        registrations: candidate_registrations.values().cloned().collect(),
+        runtime: runtime_state,
+        config: candidate_coordinator.current_state(),
+        storage: Some(storage_state),
+      };
+      fence.commit_final(|| -> Result<()> {
+        if let Some(receipt) = runtime_receipt.as_mut() {
+          receipt.accept(&self.logs)?;
+        }
+        *coordinator = candidate_coordinator;
+        inner.registrations = candidate_registrations;
+        self.store.record_history(
+          HistoryKind::Registration,
+          format!("Registered entrypoint `{id}`."),
+          Some(&id),
+          None,
+          &serde_json::json!({
+            "registrationId": id,
+            "domainCount": domain_count
+          }),
+        );
+        inner.sequence += 1;
+        let _ = self.events.send(StateChangedEvent {
+          request_id: "state-change".to_string(),
+          sequence_number: inner.sequence,
+          change_kind: StateChangeKind::RegistrationsChanged,
+          snapshot,
+          registration_id: Some(id.clone()),
+        });
+        Ok(())
+      })
+    };
+
+    match publish_result {
+      Ok(Ok(())) => {}
+      Err(rejection) => {
+        rollback_runtime_receipt(self, runtime_receipt).await;
+        return Err(rejection);
+      }
+      Ok(Err(error)) => {
+        rollback_runtime_receipt(self, runtime_receipt).await;
+        return Ok(registration_runtime_rejected(request_id, error));
+      }
+    }
 
     Ok(RegisterEntrypointResponse {
       request_id,
@@ -136,7 +231,11 @@ impl DaemonState {
     shim_session_nonce: &str,
     fence: &OperationFence,
   ) -> Result<BasicResponse, CommitRejection> {
-    let _operation = self.config_operation.lock().await;
+    let _operation = self
+      .config_operation
+      .acquire()
+      .await
+      .expect("config operation semaphore closed");
     let (removed, removed_registration, registrations) = {
       let mut inner = self.inner.lock().await;
       let (removed, removed_registration) = fence.commit(|| {
@@ -305,7 +404,11 @@ impl DaemonState {
     request: SetEntrypointEnabledRequest,
     fence: &OperationFence,
   ) -> Result<BasicResponse, CommitRejection> {
-    let _operation = self.config_operation.lock().await;
+    let _operation = self
+      .config_operation
+      .acquire()
+      .await
+      .expect("config operation semaphore closed");
     let (accepted, registrations) = {
       let mut inner = self.inner.lock().await;
       let accepted = fence.commit(|| {
@@ -389,7 +492,11 @@ impl DaemonState {
     request: SetDomainEnabledRequest,
     fence: &OperationFence,
   ) -> Result<BasicResponse, CommitRejection> {
-    let _operation = self.config_operation.lock().await;
+    let _operation = self
+      .config_operation
+      .acquire()
+      .await
+      .expect("config operation semaphore closed");
     let (accepted, registrations) = {
       let mut inner = self.inner.lock().await;
       let accepted = fence.commit(|| {
@@ -458,6 +565,59 @@ impl DaemonState {
       }
       .to_string(),
     })
+  }
+}
+
+fn merge_live_heartbeats(
+  candidate: &mut BTreeMap<String, EntrypointRegistration>,
+  live: &BTreeMap<String, EntrypointRegistration>,
+) {
+  for (registration_id, candidate_registration) in candidate {
+    let Some(live_registration) = live.get(registration_id) else {
+      continue;
+    };
+    if candidate_registration
+      .entrypoint_instance
+      .shim_session_nonce
+      == live_registration.entrypoint_instance.shim_session_nonce
+    {
+      candidate_registration.last_heartbeat_utc = candidate_registration
+        .last_heartbeat_utc
+        .max(live_registration.last_heartbeat_utc);
+    }
+  }
+}
+
+async fn rollback_runtime_receipt(
+  state: &DaemonState,
+  receipt: Option<crate::runtime::RuntimeApplyReceipt>,
+) {
+  let Some(receipt) = receipt else {
+    return;
+  };
+  if let Err(error) = receipt.rollback(&state.logs).await {
+    state.begin_operation_drain();
+    state.logs.append(
+      LogStreamIdentity::runtime_control(),
+      LogSeverity::Error,
+      format!(
+        "runtime rollback failed after rejected registration; Cadder entered read-only drain: {error:#}"
+      ),
+      LogAttributionKind::RuntimeControl,
+      Some("registration-rollback".to_string()),
+    );
+  }
+}
+
+fn registration_runtime_rejected(
+  request_id: String,
+  error: impl std::fmt::Display,
+) -> RegisterEntrypointResponse {
+  RegisterEntrypointResponse {
+    request_id,
+    accepted: false,
+    message: format!("Entrypoint registration could not update Caddy: {error}."),
+    registration_id: None,
   }
 }
 

@@ -10,7 +10,7 @@ impl DaemonState {
         sequence: 0,
       })),
       coordinator: Arc::new(Mutex::new(coordinator)),
-      config_operation: Arc::new(Mutex::new(())),
+      config_operation: Arc::new(Semaphore::new(1)),
       publish_operation: Arc::new(Mutex::new(())),
       events,
       logs: CaddyLogStore::default(),
@@ -21,6 +21,8 @@ impl DaemonState {
       iis_operation: Arc::new(Mutex::new(())),
       shutdown_signal: ShutdownSignal::default(),
       operation_fences: OperationFenceAuthority::default(),
+      #[cfg(test)]
+      register_publish_hook: None,
     }
   }
 
@@ -28,6 +30,7 @@ impl DaemonState {
     mut coordinator: CaddyConfigCoordinator,
     paths: RuntimePaths,
   ) -> Result<Self> {
+    crate::runtime_file::cleanup_stale_config_candidates(&paths)?;
     let iis_store = IisMetadataStore::load(paths.metadata_path()).await?;
     let store = RuntimeStore::open(paths.storage_path());
     let handoffs = iis_store.snapshot().await;
@@ -45,7 +48,11 @@ impl DaemonState {
     state.autostart = AutostartManager::new(&paths);
     state.iis_store = iis_store;
     if !handoffs.is_empty() {
-      let _operation = state.config_operation.lock().await;
+      let _operation = state
+        .config_operation
+        .acquire()
+        .await
+        .expect("config operation semaphore closed");
       let fence = state.issue_operation_fence()?;
       state.apply_registrations_fenced(Vec::new(), &fence).await?;
     }

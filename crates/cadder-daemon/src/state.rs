@@ -30,7 +30,7 @@ use std::{
     atomic::{AtomicBool, Ordering},
   },
 };
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, Semaphore, broadcast};
 
 mod autostart_control;
 mod config_apply;
@@ -49,7 +49,7 @@ mod tests;
 pub struct DaemonState {
   inner: Arc<Mutex<DaemonInner>>,
   coordinator: Arc<Mutex<CaddyConfigCoordinator>>,
-  config_operation: Arc<Mutex<()>>,
+  config_operation: Arc<Semaphore>,
   publish_operation: Arc<Mutex<()>>,
   events: broadcast::Sender<StateChangedEvent>,
   logs: CaddyLogStore,
@@ -60,12 +60,54 @@ pub struct DaemonState {
   iis_operation: Arc<Mutex<()>>,
   shutdown_signal: ShutdownSignal,
   operation_fences: OperationFenceAuthority,
+  #[cfg(test)]
+  register_publish_hook: Option<RegisterPublishTestHook>,
 }
 
 #[derive(Debug)]
 struct DaemonInner {
   registrations: BTreeMap<String, EntrypointRegistration>,
   sequence: u64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct RegisterPublishTestHook {
+  reached: Arc<Semaphore>,
+  release: Arc<Semaphore>,
+}
+
+#[cfg(test)]
+impl RegisterPublishTestHook {
+  fn new() -> Self {
+    Self {
+      reached: Arc::new(Semaphore::new(0)),
+      release: Arc::new(Semaphore::new(0)),
+    }
+  }
+
+  async fn pause(&self) {
+    self.reached.add_permits(1);
+    self
+      .release
+      .acquire()
+      .await
+      .expect("register publish test hook closed")
+      .forget();
+  }
+
+  async fn wait_until_reached(&self) {
+    self
+      .reached
+      .acquire()
+      .await
+      .expect("register publish test hook closed")
+      .forget();
+  }
+
+  fn release(&self) {
+    self.release.add_permits(1);
+  }
 }
 
 #[derive(Debug, Clone, Default)]

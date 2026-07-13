@@ -213,6 +213,72 @@ exit 1
   }
 }
 
+fn write_transaction_fake_caddy(path: &Path, stop_marker: &Path) {
+  #[cfg(windows)]
+  fs::write(
+    path,
+    format!(
+      r#"@echo off
+if "%1"=="adapt" (
+  echo {{"apps":{{"http":{{"servers":{{"srv0":{{"routes":[{{"match":[{{"host":["app.localhost"]}}],"handle":[{{"handler":"static_response","body":"ok"}}],"terminal":true}}]}}}}}}}}}}
+  exit /b 0
+)
+if "%1"=="reload" exit /b 0
+if "%1"=="stop" (
+  echo stop>"{}"
+  exit /b 0
+)
+if "%1"=="run" (
+  :run_loop
+  if exist "{}" exit /b 0
+  ping -n 2 127.0.0.1 >nul
+  goto run_loop
+)
+exit /b 1
+"#,
+      stop_marker.display(),
+      stop_marker.display()
+    ),
+  )
+  .unwrap();
+
+  #[cfg(not(windows))]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(
+      path,
+      format!(
+        r#"#!/usr/bin/env sh
+case "$1" in
+  adapt)
+    printf '%s\n' '{{"apps":{{"http":{{"servers":{{"srv0":{{"routes":[{{"match":[{{"host":["app.localhost"]}}],"handle":[{{"handler":"static_response","body":"ok"}}],"terminal":true}}]}}}}}}}}}}'
+    exit 0
+    ;;
+  reload)
+    exit 0
+    ;;
+  stop)
+    : > '{}'
+    exit 0
+    ;;
+  run)
+    while [ ! -f '{}' ]; do sleep 0.02; done
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+        stop_marker.display(),
+        stop_marker.display()
+      ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).unwrap();
+  }
+}
+
 async fn wait_for_marker(path: &Path) {
   tokio::time::timeout(std::time::Duration::from_secs(5), async {
     while !path.exists() {
@@ -1758,6 +1824,29 @@ async fn subscribe_receives_registration_change_event() {
 }
 
 #[tokio::test]
+async fn registration_event_matches_the_published_mock_runtime_state() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+  let mut events = state.subscribe();
+
+  let response = state
+    .register("register".to_string(), registration("shim-1", "nonce-1"))
+    .await;
+  let event = events.recv().await.unwrap();
+  let snapshot = state.snapshot().await;
+
+  assert!(response.accepted);
+  assert_eq!(event.snapshot.registrations, snapshot.registrations);
+  assert_eq!(event.snapshot.runtime, snapshot.runtime);
+  assert_eq!(event.snapshot.config, snapshot.config);
+  assert_eq!(
+    event.snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Running
+  );
+}
+
+#[tokio::test]
 async fn heartbeat_accepts_owner_and_rejects_wrong_nonce() {
   let state = state();
   state
@@ -2034,6 +2123,59 @@ async fn operation_fence_timeout_before_delayed_commit_preserves_state() {
   assert!(snapshot.registrations.is_empty());
   assert!(history.records.is_empty());
   assert_eq!(sequence, 0);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
+async fn operation_fence_revoke_after_runtime_apply_rolls_back_before_worker_finishes() {
+  let temp = tempfile::tempdir().unwrap();
+  let fake_caddy = fake_caddy_path(temp.path());
+  let stop_marker = temp.path().join("stop-runtime");
+  write_transaction_fake_caddy(&fake_caddy, &stop_marker);
+  let (mut state, paths) = state_with_fake_caddy_paths(IisProvider::fake(Vec::new()), &fake_caddy);
+  let hook = RegisterPublishTestHook::new();
+  state.register_publish_hook = Some(hook.clone());
+  let registering_state = state.state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+  let mut events = state.subscribe();
+
+  let pending = tokio::spawn(async move {
+    registering_state
+      .register_fenced(
+        "operation-fence-after-apply".to_string(),
+        registration("shim-1", "nonce-1"),
+        &pending_fence,
+      )
+      .await
+  });
+  hook.wait_until_reached().await;
+  assert!(!paths.effective_config_path().exists());
+  fence.revoke();
+  hook.release();
+
+  let result = pending.await.unwrap();
+  let snapshot = state.snapshot().await;
+  let history = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "operation-fence-after-apply-history".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await;
+
+  assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
+  assert!(snapshot.registrations.is_empty());
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Idle
+  );
+  assert!(!paths.effective_config_path().exists());
+  assert!(history.records.is_empty());
+  assert_eq!(state.inner.lock().await.sequence, 0);
   assert!(matches!(
     events.try_recv(),
     Err(broadcast::error::TryRecvError::Empty)

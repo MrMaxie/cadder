@@ -78,6 +78,12 @@ pub(crate) fn validate_owner_only_runtime_file(path: &Path) -> io::Result<()> {
   validate_mode(&fs::symlink_metadata(path)?, path, OWNER_FILE_MODE)
 }
 
+/// Restricts an existing owner-controlled regular runtime file to mode `0600`.
+pub(crate) fn secure_owner_only_runtime_file(path: &Path) -> io::Result<()> {
+  let file = open_existing_lock_file_without_following_symlinks(path)?;
+  secure_open_file(&file, path)
+}
+
 /// Persists a directory entry update on Unix filesystems.
 pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
   let parent = path.parent().ok_or_else(|| {

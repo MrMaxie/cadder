@@ -18,6 +18,20 @@ enum LifecyclePhase {
   Draining,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitPermitState {
+  Active,
+  Finalized,
+  Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RevokeOutcome {
+  Revoked,
+  AlreadyRevoked,
+  Finalized,
+}
+
 #[derive(Debug)]
 struct LifecycleEpoch {
   number: u64,
@@ -52,7 +66,7 @@ impl OperationFenceAuthority {
     Ok(OperationFence {
       lifecycle: self.lifecycle.clone(),
       epoch: lifecycle.number,
-      permit: Arc::new(Mutex::new(true)),
+      permit: Arc::new(Mutex::new(CommitPermitState::Active)),
       cancellation: lifecycle.cancellation.child_token(),
     })
   }
@@ -76,7 +90,7 @@ impl OperationFenceAuthority {
 pub(crate) struct OperationFence {
   lifecycle: Arc<Mutex<LifecycleEpoch>>,
   epoch: u64,
-  permit: Arc<Mutex<bool>>,
+  permit: Arc<Mutex<CommitPermitState>>,
   cancellation: CancellationToken,
 }
 
@@ -86,12 +100,27 @@ impl OperationFence {
   }
 
   pub(crate) fn revoke(&self) {
-    *self.permit.lock().expect("operation permit lock poisoned") = false;
-    self.cancellation.cancel();
+    let _ = self.try_revoke();
+  }
+
+  pub(crate) fn try_revoke(&self) -> RevokeOutcome {
+    let mut permit = self.permit.lock().expect("operation permit lock poisoned");
+    match *permit {
+      CommitPermitState::Active => {
+        *permit = CommitPermitState::Revoked;
+        self.cancellation.cancel();
+        RevokeOutcome::Revoked
+      }
+      CommitPermitState::Revoked => RevokeOutcome::AlreadyRevoked,
+      CommitPermitState::Finalized => RevokeOutcome::Finalized,
+    }
   }
 
   pub(crate) fn complete(&self) {
-    self.revoke();
+    let mut permit = self.permit.lock().expect("operation permit lock poisoned");
+    if *permit == CommitPermitState::Active {
+      *permit = CommitPermitState::Finalized;
+    }
   }
 
   pub(crate) fn commit<T>(&self, commit: impl FnOnce() -> T) -> Result<T, CommitRejection> {
@@ -104,11 +133,29 @@ impl OperationFence {
     }
 
     let permit = self.permit.lock().expect("operation permit lock poisoned");
-    if !*permit {
+    if *permit != CommitPermitState::Active {
       return Err(CommitRejection::Revoked);
     }
 
     Ok(commit())
+  }
+
+  pub(crate) fn commit_final<T>(&self, commit: impl FnOnce() -> T) -> Result<T, CommitRejection> {
+    let lifecycle = self.lifecycle.lock().expect("lifecycle lock poisoned");
+    if lifecycle.number != self.epoch {
+      return Err(CommitRejection::StaleEpoch);
+    }
+    if lifecycle.phase == LifecyclePhase::Draining {
+      return Err(CommitRejection::Draining);
+    }
+
+    let mut permit = self.permit.lock().expect("operation permit lock poisoned");
+    if *permit != CommitPermitState::Active {
+      return Err(CommitRejection::Revoked);
+    }
+    let result = commit();
+    *permit = CommitPermitState::Finalized;
+    Ok(result)
   }
 }
 
@@ -164,6 +211,17 @@ mod tests {
     fence.revoke();
 
     assert!(*committed.lock().unwrap());
+    assert_eq!(fence.commit(|| ()).unwrap_err(), CommitRejection::Revoked);
+  }
+
+  #[test]
+  fn operation_fence_final_commit_cannot_be_reclassified_as_timeout() {
+    let authority = OperationFenceAuthority::default();
+    let fence = authority.issue().unwrap();
+
+    fence.commit_final(|| ()).unwrap();
+
+    assert_eq!(fence.try_revoke(), RevokeOutcome::Finalized);
     assert_eq!(fence.commit(|| ()).unwrap_err(), CommitRejection::Revoked);
   }
 }

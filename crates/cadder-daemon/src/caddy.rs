@@ -441,7 +441,7 @@ impl MockCaddyConfigAdapter {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CaddyConfigCoordinator {
   adapter: CaddyRegistrationAdapter,
   runtime: CaddyRuntime,

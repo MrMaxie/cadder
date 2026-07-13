@@ -1,11 +1,20 @@
-use crate::{logs::CaddyLogStore, paths::RuntimePaths, process_tree::ProcessTreeChild};
+use crate::{
+  logs::CaddyLogStore,
+  paths::RuntimePaths,
+  process_tree::ProcessTreeChild,
+  runtime_file::{StagedRuntimeConfig, read_effective_config, restore_effective_config},
+};
 use anyhow::{Context, Result};
 use cadder_protocol::{
   LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus,
 };
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+  path::{Path, PathBuf},
+  process::Stdio,
+  sync::{Arc, Mutex as StdMutex},
+  time::Duration,
+};
 use tokio::{
-  fs,
   io::{AsyncBufReadExt, BufReader},
   process::Command,
   sync::Mutex,
@@ -38,9 +47,46 @@ impl CaddyRuntime {
   }
 
   pub async fn apply_config(&self, rendered: &[u8], logs: &CaddyLogStore) -> Result<()> {
+    let attempt = self.begin_apply_config(rendered, logs).await?;
+    let (mut receipt, outcome) = attempt.into_parts();
+    if let Err(error) = outcome {
+      let rollback = receipt.rollback(logs).await;
+      return match rollback {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(error.context(format!(
+          "uncertain runtime apply rollback also failed: {rollback_error:#}"
+        ))),
+      };
+    }
+    if let Err(error) = receipt.accept(logs) {
+      let rollback = receipt.rollback(logs).await;
+      return match rollback {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(error.context(format!(
+          "runtime apply rollback also failed: {rollback_error:#}"
+        ))),
+      };
+    }
+    Ok(())
+  }
+
+  pub(crate) async fn begin_apply_config(
+    &self,
+    rendered: &[u8],
+    logs: &CaddyLogStore,
+  ) -> Result<RuntimeApplyAttempt> {
     match self {
-      Self::Real(runtime) => runtime.apply_config(rendered, logs).await,
-      Self::Mock(runtime) => runtime.apply_config(rendered, logs).await,
+      Self::Real(runtime) => {
+        let (receipt, outcome) = runtime.begin_apply_config(rendered, logs).await?;
+        Ok(RuntimeApplyAttempt {
+          receipt: RuntimeApplyReceipt::Real(receipt),
+          outcome,
+        })
+      }
+      Self::Mock(runtime) => Ok(RuntimeApplyAttempt {
+        receipt: RuntimeApplyReceipt::Mock(runtime.begin_apply_config(rendered).await?),
+        outcome: Ok(()),
+      }),
     }
   }
 
@@ -48,6 +94,54 @@ impl CaddyRuntime {
     match self {
       Self::Real(runtime) => runtime.stop().await,
       Self::Mock(runtime) => runtime.stop().await,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeApplyAttempt {
+  receipt: RuntimeApplyReceipt,
+  outcome: Result<()>,
+}
+
+impl RuntimeApplyAttempt {
+  pub(crate) fn into_parts(self) -> (RuntimeApplyReceipt, Result<()>) {
+    (self.receipt, self.outcome)
+  }
+}
+
+#[derive(Debug)]
+pub(crate) enum RuntimeApplyReceipt {
+  Real(ProcessRuntimeApplyReceipt),
+  Mock(MockRuntimeApplyReceipt),
+}
+
+impl RuntimeApplyReceipt {
+  pub(crate) fn accept(&mut self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.accept(),
+      Self::Mock(receipt) => receipt.accept(logs),
+    }
+  }
+
+  pub(crate) async fn rollback(self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.rollback(logs).await,
+      Self::Mock(receipt) => receipt.rollback().await,
+    }
+  }
+
+  pub(crate) async fn projected_state(&self) -> RuntimeState {
+    match self {
+      Self::Real(receipt) => receipt.runtime.inspect().await,
+      Self::Mock(receipt) => RuntimeState {
+        status: RuntimeStatus::Running,
+        binary_path: Some("mock-caddy".to_string()),
+        version: Some(format!("mock:{}", receipt.applied_config_bytes)),
+        process_id: None,
+        admin_endpoint: None,
+        diagnostics: Vec::new(),
+      },
     }
   }
 }
@@ -163,20 +257,37 @@ impl ProcessRuntime {
   }
 
   pub async fn apply_config(&self, rendered: &[u8], logs: &CaddyLogStore) -> Result<()> {
-    let config_path = self.paths.effective_config_path();
-    fs::write(&config_path, rendered)
+    CaddyRuntime::from(self.clone())
+      .apply_config(rendered, logs)
       .await
-      .with_context(|| format!("write effective config {}", config_path.display()))?;
-
-    if !self.runtime_is_running(logs).await {
-      self.start(&config_path, logs).await?;
-    } else {
-      self.reload(&config_path, logs).await?;
-    }
-    Ok(())
   }
 
-  async fn start(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
+  async fn begin_apply_config(
+    &self,
+    rendered: &[u8],
+    logs: &CaddyLogStore,
+  ) -> Result<(ProcessRuntimeApplyReceipt, Result<()>)> {
+    let previous_config = read_effective_config(&self.paths).await?;
+    let staged = StagedRuntimeConfig::stage(&self.paths, rendered).await?;
+    let was_running = self.runtime_is_running(logs).await;
+
+    let outcome = if !was_running {
+      self.start(staged.path(), logs).await
+    } else {
+      self.reload(staged.path(), logs).await
+    };
+    Ok((
+      ProcessRuntimeApplyReceipt {
+        runtime: self.clone(),
+        staged,
+        previous_config,
+        was_running,
+      },
+      outcome,
+    ))
+  }
+
+  async fn start(&self, config_path: &Path, logs: &CaddyLogStore) -> Result<()> {
     let binary = self.resolver.resolve()?;
     let mut command = Command::new(binary);
     command
@@ -214,7 +325,7 @@ impl ProcessRuntime {
     Ok(())
   }
 
-  async fn reload(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
+  async fn reload(&self, config_path: &Path, logs: &CaddyLogStore) -> Result<()> {
     let binary = self.resolver.resolve()?;
     let mut command = Command::new(binary);
     command
@@ -325,13 +436,67 @@ impl ProcessRuntime {
   }
 }
 
+#[derive(Debug)]
+pub(crate) struct ProcessRuntimeApplyReceipt {
+  runtime: ProcessRuntime,
+  staged: StagedRuntimeConfig,
+  previous_config: Option<Vec<u8>>,
+  was_running: bool,
+}
+
+impl ProcessRuntimeApplyReceipt {
+  fn accept(&mut self) -> Result<()> {
+    self.staged.promote()
+  }
+
+  async fn rollback(self, logs: &CaddyLogStore) -> Result<()> {
+    let Self {
+      runtime,
+      staged,
+      previous_config,
+      was_running,
+    } = self;
+    let rollback: Result<()> = async {
+      if was_running {
+        let previous = previous_config.as_deref().ok_or_else(|| {
+          anyhow::anyhow!("running Caddy runtime did not have a previous effective config")
+        })?;
+        let mut rollback_config = StagedRuntimeConfig::stage(&runtime.paths, previous).await?;
+        runtime.reload(rollback_config.path(), logs).await?;
+        rollback_config.promote()
+      } else {
+        runtime.stop().await?;
+        restore_effective_config(&runtime.paths, previous_config.as_deref()).await
+      }
+    }
+    .await;
+    drop(staged);
+    if let Err(error) = rollback {
+      let stop_error = runtime.stop().await.err();
+      let restore_error = restore_effective_config(&runtime.paths, previous_config.as_deref())
+        .await
+        .err();
+      return Err(error.context(format!(
+        "runtime rollback entered fail-closed cleanup; stop error: {}; file restore error: {}",
+        stop_error
+          .as_ref()
+          .map_or_else(|| "none".to_string(), |error| format!("{error:#}")),
+        restore_error
+          .as_ref()
+          .map_or_else(|| "none".to_string(), |error| format!("{error:#}"))
+      )));
+    }
+    Ok(())
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct MockCaddyRuntime {
   paths: RuntimePaths,
-  state: Arc<Mutex<MockCaddyRuntimeState>>,
+  state: Arc<StdMutex<MockCaddyRuntimeState>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct MockCaddyRuntimeState {
   running: bool,
   applied_config_bytes: usize,
@@ -341,12 +506,12 @@ impl MockCaddyRuntime {
   pub fn new(paths: RuntimePaths) -> Self {
     Self {
       paths,
-      state: Arc::new(Mutex::new(MockCaddyRuntimeState::default())),
+      state: Arc::new(StdMutex::new(MockCaddyRuntimeState::default())),
     }
   }
 
   pub async fn inspect(&self) -> RuntimeState {
-    let state = self.state.lock().await;
+    let state = self.state.lock().expect("mock runtime state lock poisoned");
     if state.running {
       RuntimeState {
         status: RuntimeStatus::Running,
@@ -362,22 +527,40 @@ impl MockCaddyRuntime {
   }
 
   pub async fn apply_config(&self, rendered: &[u8], logs: &CaddyLogStore) -> Result<()> {
-    let config_path = self.paths.effective_config_path();
-    if let Some(parent) = config_path.parent() {
-      fs::create_dir_all(parent)
-        .await
-        .with_context(|| format!("create mock runtime directory {}", parent.display()))?;
-    }
-    fs::write(&config_path, rendered)
+    CaddyRuntime::Mock(self.clone())
+      .apply_config(rendered, logs)
       .await
-      .with_context(|| format!("write mock effective config {}", config_path.display()))?;
+  }
 
-    {
-      let mut state = self.state.lock().await;
-      state.running = true;
-      state.applied_config_bytes = rendered.len();
-    }
+  async fn begin_apply_config(&self, rendered: &[u8]) -> Result<MockRuntimeApplyReceipt> {
+    let previous_config = read_effective_config(&self.paths).await?;
+    let staged = StagedRuntimeConfig::stage(&self.paths, rendered).await?;
+    let previous_state = self
+      .state
+      .lock()
+      .expect("mock runtime state lock poisoned")
+      .clone();
 
+    Ok(MockRuntimeApplyReceipt {
+      runtime: self.clone(),
+      staged,
+      previous_config,
+      previous_state,
+      applied_config_bytes: rendered.len(),
+    })
+  }
+
+  fn accept_state(&self, applied_config_bytes: usize) {
+    let mut state = self.state.lock().expect("mock runtime state lock poisoned");
+    state.running = true;
+    state.applied_config_bytes = applied_config_bytes;
+  }
+
+  fn restore_state(&self, previous: MockCaddyRuntimeState) {
+    *self.state.lock().expect("mock runtime state lock poisoned") = previous;
+  }
+
+  fn record_apply(&self, logs: &CaddyLogStore) {
     logs.append(
       LogStreamIdentity::runtime_control(),
       LogSeverity::Info,
@@ -385,11 +568,38 @@ impl MockCaddyRuntime {
       LogAttributionKind::RuntimeControl,
       Some("mock-apply".to_string()),
     );
-    Ok(())
   }
 
   pub async fn stop(&self) -> Result<()> {
-    self.state.lock().await.running = false;
+    self
+      .state
+      .lock()
+      .expect("mock runtime state lock poisoned")
+      .running = false;
+    Ok(())
+  }
+}
+
+#[derive(Debug)]
+pub(crate) struct MockRuntimeApplyReceipt {
+  runtime: MockCaddyRuntime,
+  staged: StagedRuntimeConfig,
+  previous_config: Option<Vec<u8>>,
+  previous_state: MockCaddyRuntimeState,
+  applied_config_bytes: usize,
+}
+
+impl MockRuntimeApplyReceipt {
+  fn accept(&mut self, logs: &CaddyLogStore) -> Result<()> {
+    self.staged.promote()?;
+    self.runtime.accept_state(self.applied_config_bytes);
+    self.runtime.record_apply(logs);
+    Ok(())
+  }
+
+  async fn rollback(self) -> Result<()> {
+    restore_effective_config(&self.runtime.paths, self.previous_config.as_deref()).await?;
+    self.runtime.restore_state(self.previous_state);
     Ok(())
   }
 }
@@ -457,6 +667,7 @@ mod tests {
   enum FakeRuntimeMode {
     LongRunning,
     ShortRun,
+    FailRun,
     FailReload,
     FailStop,
     SlowStop,
@@ -587,9 +798,10 @@ mod tests {
   #[tokio::test]
   async fn apply_config_reports_reload_failure_for_running_runtime() {
     let fixture = runtime_fixture(FakeRuntimeMode::FailReload);
+    let initial_config = br#"{"apps":{}}"#;
     fixture
       .runtime
-      .apply_config(br#"{"apps":{}}"#, &fixture.logs)
+      .apply_config(initial_config, &fixture.logs)
       .await
       .unwrap();
     wait_for_command_log(&fixture.command_log, "run").await;
@@ -601,8 +813,61 @@ mod tests {
       .unwrap_err();
 
     assert!(error.to_string().contains("caddy reload failed"));
-    wait_for_command_log(&fixture.command_log, "reload").await;
-    fixture.runtime.stop().await.unwrap();
+    assert_eq!(
+      std_fs::read(fixture.runtime.paths.effective_config_path()).unwrap(),
+      initial_config
+    );
+    assert!(!has_runtime_config_candidate(
+      fixture.runtime.paths.runtime_dir()
+    ));
+    wait_for_command_count(&fixture.command_log, "reload", 2).await;
+    wait_for_command_log(&fixture.command_log, "stop").await;
+    assert_eq!(fixture.runtime.inspect().await.status, RuntimeStatus::Idle);
+  }
+
+  #[tokio::test]
+  async fn apply_config_reports_start_failure_without_publishing_candidate() {
+    let fixture = runtime_fixture(FakeRuntimeMode::FailRun);
+    let effective_path = fixture.runtime.paths.effective_config_path();
+    std_fs::write(&effective_path, b"previous").unwrap();
+
+    let error = fixture
+      .runtime
+      .apply_config(br#"{"apps":{}}"#, &fixture.logs)
+      .await
+      .unwrap_err();
+
+    assert!(error.to_string().contains("exited immediately"));
+    assert_eq!(std_fs::read(effective_path).unwrap(), b"previous");
+    assert!(!has_runtime_config_candidate(
+      fixture.runtime.paths.runtime_dir()
+    ));
+  }
+
+  #[tokio::test]
+  async fn promotion_failure_stops_a_newly_started_runtime_during_rollback() {
+    let fixture = runtime_fixture(FakeRuntimeMode::LongRunning);
+    let attempt = fixture
+      .runtime
+      .begin_apply_config(br#"{"apps":{}}"#, &fixture.logs)
+      .await
+      .unwrap();
+    let (mut receipt, outcome) = attempt;
+    outcome.unwrap();
+    wait_for_command_log(&fixture.command_log, "run").await;
+    std_fs::create_dir(fixture.runtime.paths.effective_config_path()).unwrap();
+
+    let promotion_error = receipt.accept().unwrap_err();
+    let rollback_error = receipt.rollback(&fixture.logs).await.unwrap_err();
+
+    assert!(promotion_error.to_string().contains("promote staged"));
+    assert!(
+      rollback_error
+        .to_string()
+        .contains("effective Caddy config")
+    );
+    assert_eq!(fixture.runtime.inspect().await.status, RuntimeStatus::Idle);
+    wait_for_command_log(&fixture.command_log, "stop").await;
   }
 
   #[tokio::test]
@@ -716,6 +981,18 @@ mod tests {
     panic!("expected fake Caddy runtime child to exit");
   }
 
+  fn has_runtime_config_candidate(runtime_dir: &Path) -> bool {
+    std_fs::read_dir(runtime_dir)
+      .unwrap()
+      .map(|entry| entry.unwrap().path())
+      .any(|path| {
+        path
+          .file_name()
+          .and_then(|name| name.to_str())
+          .is_some_and(|name| name.starts_with(".effective-caddy.") && name.ends_with(".tmp"))
+      })
+  }
+
   fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeRuntimeMode) -> PathBuf {
     let stop_file = dir.join("fake-caddy.stop");
     let run_exit_file = dir.join("fake-caddy.exit");
@@ -735,7 +1012,9 @@ mod tests {
       } else {
         "echo stop> \"{stop_file}\"\r\n  exit /b 0"
       };
-      let run_behavior = if matches!(mode, FakeRuntimeMode::ShortRun) {
+      let run_behavior = if matches!(mode, FakeRuntimeMode::FailRun) {
+        "echo run failed 1>&2\r\n  exit /b 7"
+      } else if matches!(mode, FakeRuntimeMode::ShortRun) {
         ":short_run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  if exist \"{run_exit_file}\" goto short_run_exit\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto short_run_loop\r\n  :short_run_exit\r\n  del /q \"{run_exit_file}\"\r\n  echo run-exited>> \"{command_log}\"\r\n  exit /b 0"
       } else {
         ":run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto run_loop"
@@ -787,7 +1066,9 @@ exit /b 0
       } else {
         ": > '{stop_file}'\n  exit 0"
       };
-      let run_behavior = if matches!(mode, FakeRuntimeMode::ShortRun) {
+      let run_behavior = if matches!(mode, FakeRuntimeMode::FailRun) {
+        "printf '%s\n' 'run failed' >&2\n  exit 7"
+      } else if matches!(mode, FakeRuntimeMode::ShortRun) {
         "while [ ! -f '{run_exit_file}' ] && [ ! -f '{stop_file}' ]; do /bin/sleep 0.02; done\n  if [ -f '{run_exit_file}' ]; then /bin/rm -f '{run_exit_file}'; printf '%s\n' 'run-exited' >> '{command_log}'; fi\n  exit 0"
       } else {
         "while [ ! -f '{stop_file}' ]; do /bin/sleep 0.2; done\n  exit 0"

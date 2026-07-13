@@ -188,7 +188,11 @@ impl DaemonState {
     mark_privileged_batch_approved(&mut steps, &privileged_step_ids);
 
     let apply_state = {
-      let _operation = self.config_operation.lock().await;
+      let _operation = self
+        .config_operation
+        .acquire()
+        .await
+        .expect("config operation semaphore closed");
       {
         let mut coordinator = self.coordinator.lock().await;
         coordinator.set_iis_proxy_route(
@@ -216,7 +220,11 @@ impl DaemonState {
       );
       mark_step_issue(&mut steps, "caddy-apply-proxy-route", &apply_issue);
       {
-        let _operation = self.config_operation.lock().await;
+        let _operation = self
+          .config_operation
+          .acquire()
+          .await
+          .expect("config operation semaphore closed");
         {
           let mut coordinator = self.coordinator.lock().await;
           coordinator.remove_iis_proxy_route(&domain_key);
@@ -357,7 +365,11 @@ impl DaemonState {
     }
 
     {
-      let _operation = self.config_operation.lock().await;
+      let _operation = self
+        .config_operation
+        .acquire()
+        .await
+        .expect("config operation semaphore closed");
       {
         let mut coordinator = self.coordinator.lock().await;
         coordinator.remove_iis_proxy_route(&restore.domain_key);
@@ -385,7 +397,11 @@ impl DaemonState {
       )
       .await
     {
-      let _operation = self.config_operation.lock().await;
+      let _operation = self
+        .config_operation
+        .acquire()
+        .await
+        .expect("config operation semaphore closed");
       {
         let mut coordinator = self.coordinator.lock().await;
         coordinator.set_iis_proxy_route(

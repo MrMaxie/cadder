@@ -8,7 +8,7 @@ use crate::{
     IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_bound_socket,
     secure_listener_options, send_peer_authentication_preface,
   },
-  operation_fence::{CommitRejection, OperationFence},
+  operation_fence::{CommitRejection, OperationFence, RevokeOutcome},
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
 use anyhow::{Context, Result};
@@ -61,6 +61,14 @@ type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec
 struct RequestDispatchContext<'a> {
   operation_fence: Option<&'a OperationFence>,
   deadline: Instant,
+  limits: IpcLimits,
+}
+
+#[derive(Clone, Copy)]
+struct UnarySupervisionContext<'a> {
+  state: &'a DaemonState,
+  owned: &'a ConnectionOwnership,
+  mutation_tasks: &'a TaskTracker,
   limits: IpcLimits,
 }
 
@@ -459,19 +467,23 @@ async fn handle_connection(
   handshake_identity: ServerHandshakeIdentity,
   control: ConnectionControl,
 ) -> Result<()> {
-  let mut owned = ConnectionRegistrations::default();
+  let owned = ConnectionOwnership::default();
+  let mutation_tasks = TaskTracker::new();
   let result = tokio::select! {
     _ = control.connection_cancellation.cancelled() => Ok(()),
     result = handle_connection_loop(
       conn,
       state.clone(),
-      &mut owned,
+      &owned,
+      &mutation_tasks,
       &security,
       &handshake_identity,
       &control,
     ) => result,
   };
-  for (id, nonce) in owned.into_entries() {
+  mutation_tasks.close();
+  mutation_tasks.wait().await;
+  for (id, nonce) in owned.take_entries() {
     state.unregister_for_ipc_disconnect(&id, &nonce).await;
   }
   result
@@ -480,7 +492,8 @@ async fn handle_connection(
 async fn handle_connection_loop(
   conn: Stream,
   state: DaemonState,
-  owned: &mut ConnectionRegistrations,
+  owned: &ConnectionOwnership,
+  mutation_tasks: &TaskTracker,
   security: &ConnectionSecurityContext,
   handshake_identity: &ServerHandshakeIdentity,
   control: &ConnectionControl,
@@ -544,11 +557,14 @@ async fn handle_connection_loop(
         supervise_unary_request(
           &mut reader,
           &mut write_half,
-          &state,
-          owned,
           &authorized,
           &envelope,
-          control.limits,
+          UnarySupervisionContext {
+            state: &state,
+            owned,
+            mutation_tasks,
+            limits: control.limits,
+          },
         )
         .await?
       }
@@ -803,15 +819,16 @@ impl StateStreamBuffer {
 async fn supervise_unary_request<W>(
   reader: &mut IpcFrameReader,
   writer: &mut W,
-  state: &DaemonState,
-  owned: &mut ConnectionRegistrations,
   authorized: &AuthorizedLegacyEnvelope<'_>,
   envelope: &IpcEnvelope,
-  limits: IpcLimits,
+  supervision: UnarySupervisionContext<'_>,
 ) -> Result<ConnectionAction>
 where
   W: AsyncWrite + Unpin,
 {
+  let state = supervision.state;
+  let owned = supervision.owned;
+  let limits = supervision.limits;
   let definition = authorized.definition();
   let deadline = limits.operation_deadline(definition.deadline());
   let request_id = authorized.request_id();
@@ -827,6 +844,17 @@ where
   } else {
     None
   };
+  if definition.name() == message_types::REGISTER_ENTRYPOINT_REQUEST {
+    return supervise_register_request(
+      reader,
+      writer,
+      authorized,
+      operation_fence.expect("registration mutation has an operation fence"),
+      deadline,
+      supervision,
+    )
+    .await;
+  }
   let mut handler = Box::pin(dispatch_authorized_request(
     writer,
     state,
@@ -913,6 +941,178 @@ where
       drop(handler);
       drop(next_frame);
       send_operation_timeout(writer, request_id, definition, limits).await?;
+      Ok(ConnectionAction::Close)
+    }
+  }
+}
+
+async fn supervise_register_request<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  authorized: &AuthorizedLegacyEnvelope<'_>,
+  fence: OperationFence,
+  deadline: Instant,
+  supervision: UnarySupervisionContext<'_>,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  let UnarySupervisionContext {
+    state,
+    owned,
+    mutation_tasks,
+    limits,
+  } = supervision;
+  let request: RegisterEntrypointRequest = match authorized.decode() {
+    Ok(request) => request,
+    Err(error) => {
+      let response = ProtocolErrorResponse::rejected(authorized.request_id(), error);
+      write_envelope_until(
+        writer,
+        message_types::PROTOCOL_ERROR_RESPONSE,
+        &response,
+        deadline,
+        limits.write_no_progress,
+      )
+      .await?;
+      return Ok(ConnectionAction::Continue);
+    }
+  };
+  let request_id = authorized.request_id();
+  let worker_state = state.clone();
+  let worker_fence = fence.clone();
+  let worker_ownership = owned.clone();
+  let nonce = request
+    .registration
+    .entrypoint_instance
+    .shim_session_nonce
+    .clone();
+  let mut worker = mutation_tasks.spawn(async move {
+    let response = worker_state
+      .register_fenced(request.request_id, request.registration, &worker_fence)
+      .await?;
+    if let Some(registration_id) = response
+      .registration_id
+      .as_ref()
+      .filter(|_| response.accepted)
+    {
+      worker_ownership.insert(registration_id.clone(), nonce);
+    }
+    Ok::<_, CommitRejection>(response)
+  });
+  let mut next_frame = Box::pin(reader.next());
+  let cancellation = fence.cancellation();
+
+  enum First<T> {
+    Worker(T),
+    Reader(ConcurrentRead),
+    Cancelled,
+    Timeout,
+  }
+
+  let first = tokio::select! {
+    biased;
+    frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
+    _ = cancellation.cancelled() => First::Cancelled,
+    _ = sleep_until(deadline) => First::Timeout,
+    result = &mut worker => First::Worker(result),
+  };
+
+  match first {
+    First::Worker(result) => {
+      fence.complete();
+      let response = result.context("registration mutation worker failed")??;
+      write_envelope_until(
+        writer,
+        message_types::REGISTER_ENTRYPOINT_RESPONSE,
+        &response,
+        deadline,
+        limits.write_no_progress,
+      )
+      .await?;
+      drop(next_frame);
+      if reader.read_buffer().is_empty() {
+        Ok(ConnectionAction::Continue)
+      } else {
+        send_pipelined_error(writer, None, limits).await?;
+        Ok(ConnectionAction::Close)
+      }
+    }
+    First::Reader(concurrent) => {
+      drop(next_frame);
+      let worker_result = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        _ = sleep_until(deadline) => None,
+        result = &mut worker => Some(result),
+      };
+
+      if let Some(result) = worker_result {
+        fence.complete();
+        let response = result.context("registration mutation worker failed")??;
+        write_envelope_until(
+          writer,
+          message_types::REGISTER_ENTRYPOINT_RESPONSE,
+          &response,
+          deadline,
+          limits.write_no_progress,
+        )
+        .await?;
+      } else {
+        match fence.try_revoke() {
+          RevokeOutcome::Revoked => {
+            drop(worker);
+            send_operation_timeout(writer, request_id, authorized.definition(), limits).await?;
+          }
+          RevokeOutcome::Finalized => {
+            let response = (&mut worker)
+              .await
+              .context("registration mutation worker failed")??;
+            write_envelope_until(
+              writer,
+              message_types::REGISTER_ENTRYPOINT_RESPONSE,
+              &response,
+              Instant::now() + limits.write_no_progress,
+              limits.write_no_progress,
+            )
+            .await?;
+          }
+          RevokeOutcome::AlreadyRevoked => drop(worker),
+        }
+      }
+      if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
+        send_pipelined_error(writer, pipelined_request_id, limits).await?;
+      }
+      Ok(ConnectionAction::Close)
+    }
+    First::Cancelled => {
+      let _ = fence.try_revoke();
+      drop(worker);
+      drop(next_frame);
+      Ok(ConnectionAction::Close)
+    }
+    First::Timeout => {
+      drop(next_frame);
+      match fence.try_revoke() {
+        RevokeOutcome::Revoked => {
+          drop(worker);
+          send_operation_timeout(writer, request_id, authorized.definition(), limits).await?;
+        }
+        RevokeOutcome::Finalized => {
+          let response = worker
+            .await
+            .context("registration mutation worker failed")??;
+          write_envelope_until(
+            writer,
+            message_types::REGISTER_ENTRYPOINT_RESPONSE,
+            &response,
+            Instant::now() + limits.write_no_progress,
+            limits.write_no_progress,
+          )
+          .await?;
+        }
+        RevokeOutcome::AlreadyRevoked => drop(worker),
+      }
       Ok(ConnectionAction::Close)
     }
   }
@@ -1311,7 +1511,7 @@ where
 async fn dispatch_authorized_request<W>(
   writer: &mut W,
   state: &DaemonState,
-  owned: &mut ConnectionRegistrations,
+  owned: &ConnectionOwnership,
   authorized: &AuthorizedLegacyEnvelope<'_>,
   envelope: &IpcEnvelope,
   dispatch: RequestDispatchContext<'_>,
@@ -1851,24 +2051,36 @@ fn operation_for_message_type(message_type: &str) -> IpcOperation {
   }
 }
 
-#[derive(Debug, Default)]
-struct ConnectionRegistrations {
-  by_registration_id: BTreeMap<String, String>,
+#[derive(Debug, Clone, Default)]
+struct ConnectionOwnership {
+  by_registration_id: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 
-impl ConnectionRegistrations {
-  fn insert(&mut self, registration_id: String, shim_session_nonce: String) {
+impl ConnectionOwnership {
+  fn insert(&self, registration_id: String, shim_session_nonce: String) {
     self
       .by_registration_id
+      .lock()
+      .expect("connection ownership lock poisoned")
       .insert(registration_id, shim_session_nonce);
   }
 
-  fn remove(&mut self, registration_id: &str) {
-    self.by_registration_id.remove(registration_id);
+  fn remove(&self, registration_id: &str) {
+    self
+      .by_registration_id
+      .lock()
+      .expect("connection ownership lock poisoned")
+      .remove(registration_id);
   }
 
-  fn into_entries(self) -> impl Iterator<Item = (String, String)> {
-    self.by_registration_id.into_iter()
+  fn take_entries(&self) -> impl Iterator<Item = (String, String)> {
+    std::mem::take(
+      &mut *self
+        .by_registration_id
+        .lock()
+        .expect("connection ownership lock poisoned"),
+    )
+    .into_iter()
   }
 }
 
@@ -4708,8 +4920,8 @@ mod tests {
   }
 
   #[test]
-  fn connection_registrations_replace_remove_and_iterate_owned_entries() {
-    let mut registrations = ConnectionRegistrations::default();
+  fn connection_ownership_replaces_removes_and_takes_owned_entries() {
+    let registrations = ConnectionOwnership::default();
 
     registrations.insert("shim-1".to_string(), "nonce-1".to_string());
     registrations.insert("shim-1".to_string(), "nonce-2".to_string());
@@ -4717,7 +4929,7 @@ mod tests {
     registrations.remove("missing");
     registrations.remove("shim-2");
 
-    let entries = registrations.into_entries().collect::<Vec<_>>();
+    let entries = registrations.take_entries().collect::<Vec<_>>();
     assert_eq!(entries, vec![("shim-1".to_string(), "nonce-2".to_string())]);
   }
 

@@ -10,7 +10,11 @@ impl DaemonState {
   }
 
   pub(crate) async fn prepare_shutdown(&self) -> BasicResponse {
-    let _operation = self.config_operation.lock().await;
+    let _operation = self
+      .config_operation
+      .acquire()
+      .await
+      .expect("config operation semaphore closed");
     let runtime = {
       let coordinator = self.coordinator.lock().await;
       coordinator.runtime()
