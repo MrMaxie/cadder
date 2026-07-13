@@ -308,7 +308,7 @@ async fn ipc_iis_operator_requests_return_typed_responses() {
 }
 
 #[tokio::test]
-async fn shutdown_daemon_request_stops_server_and_rejects_new_clients() {
+async fn shutdown_coordinator_ipc_request_stops_server_and_rejects_new_clients() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
 

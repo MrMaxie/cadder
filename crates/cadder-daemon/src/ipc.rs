@@ -47,7 +47,7 @@ use std::{
   panic::{AssertUnwindSafe, resume_unwind},
   path::PathBuf,
   process::Stdio,
-  sync::Arc,
+  sync::{Arc, OnceLock},
   time::Duration,
 };
 use tokio::{
@@ -152,6 +152,8 @@ struct IpcLimits {
   shutdown_cleanup: Duration,
   #[cfg(test)]
   dispatch_delay: Duration,
+  #[cfg(test)]
+  shutdown_response_delay: Duration,
 }
 
 impl Default for IpcLimits {
@@ -176,6 +178,8 @@ impl Default for IpcLimits {
       shutdown_cleanup: Duration::from_secs(5),
       #[cfg(test)]
       dispatch_delay: Duration::ZERO,
+      #[cfg(test)]
+      shutdown_response_delay: Duration::ZERO,
     }
   }
 }
@@ -189,6 +193,62 @@ impl IpcLimits {
       OperationDeadlineClass::Shutdown => self.shutdown_operation,
     };
     Instant::now() + duration
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShutdownTimeline {
+  started_at: Instant,
+  limits: IpcLimits,
+}
+
+impl ShutdownTimeline {
+  fn new(started_at: Instant, limits: IpcLimits) -> Self {
+    Self { started_at, limits }
+  }
+
+  fn accept_deadline(self) -> Instant {
+    self.started_at + self.limits.shutdown_accept
+  }
+
+  fn handler_deadline(self) -> Instant {
+    self.accept_deadline() + self.limits.shutdown_handler_grace
+  }
+
+  fn runtime_deadline(self, phase_started_at: Instant) -> Instant {
+    self.phase_deadline(
+      phase_started_at,
+      self.handler_deadline() + self.limits.shutdown_runtime,
+      self.limits.shutdown_runtime,
+    )
+  }
+
+  fn storage_deadline(self, phase_started_at: Instant) -> Instant {
+    self.phase_deadline(
+      phase_started_at,
+      self.handler_deadline() + self.limits.shutdown_runtime + self.limits.shutdown_storage,
+      self.limits.shutdown_storage,
+    )
+  }
+
+  fn cleanup_deadline(self, phase_started_at: Instant) -> Instant {
+    self.phase_deadline(
+      phase_started_at,
+      self.handler_deadline()
+        + self.limits.shutdown_runtime
+        + self.limits.shutdown_storage
+        + self.limits.shutdown_cleanup,
+      self.limits.shutdown_cleanup,
+    )
+  }
+
+  fn phase_deadline(
+    self,
+    phase_started_at: Instant,
+    absolute_deadline: Instant,
+    phase_budget: Duration,
+  ) -> Instant {
+    std::cmp::min(phase_started_at + phase_budget, absolute_deadline)
   }
 }
 
@@ -265,6 +325,7 @@ impl DaemonServer {
     let connection_permits = Arc::new(Semaphore::new(self.limits.max_connections));
     let stream_cancellation = CancellationToken::new();
     let request_drain = CancellationToken::new();
+    let request_drain_deadline = Arc::new(OnceLock::new());
     let connection_cancellation = CancellationToken::new();
     let mut connection_tasks = JoinSet::new();
     let mutation_tasks = MutationTaskRegistry::default();
@@ -310,6 +371,7 @@ impl DaemonServer {
                       let mutation_tasks = mutation_tasks.clone();
                       let stream_cancellation = stream_cancellation.clone();
                       let request_drain = request_drain.clone();
+                      let request_drain_deadline = request_drain_deadline.clone();
                       let mutation_cancellation = mutation_cancellation.clone();
                       let connection_cancellation = connection_cancellation.child_token();
                       let limits = self.limits;
@@ -327,6 +389,7 @@ impl DaemonServer {
                               limits,
                               stream_cancellation,
                               request_drain,
+                              request_drain_deadline,
                               mutation_cancellation,
                               connection_cancellation,
                             },
@@ -344,11 +407,19 @@ impl DaemonServer {
       }
     };
 
+    let shutdown_timeline = ShutdownTimeline::new(
+      shutdown_signal.started_at().unwrap_or_else(Instant::now),
+      self.limits,
+    );
     self.state.begin_operation_drain();
     drop(listener);
+    let accept_deadline = shutdown_timeline.accept_deadline();
+    request_drain_deadline
+      .set(accept_deadline)
+      .expect("request drain deadline is set once");
     request_drain.cancel();
     stream_cancellation.cancel();
-    let handler_deadline = Instant::now() + self.limits.shutdown_handler_grace;
+    let handler_deadline = shutdown_timeline.handler_deadline();
     let abort_join_budget = std::cmp::min(
       self.limits.shutdown_connection_abort_join,
       self.limits.shutdown_handler_grace / 2,
@@ -399,18 +470,18 @@ impl DaemonServer {
         }
       }
     }
-    let runtime_deadline = Instant::now() + self.limits.shutdown_runtime;
+    let runtime_deadline = shutdown_timeline.runtime_deadline(Instant::now());
     let runtime_shutdown = self.state.prepare_shutdown_until(runtime_deadline).await;
     if !runtime_shutdown.runtime_quiescent {
       self.state.contain_runtime_fail_stop().await;
     }
-    let storage_deadline = Instant::now() + self.limits.shutdown_storage;
+    let storage_deadline = shutdown_timeline.storage_deadline(Instant::now());
     let storage_shutdown = match self.state.shutdown_storage_until(storage_deadline).await {
       Ok(true) => Ok(()),
       Ok(false) => self.state.contain_storage_shutdown().await,
       Err(error) => Err(error),
     };
-    let cleanup_deadline = Instant::now() + self.limits.shutdown_cleanup;
+    let cleanup_deadline = shutdown_timeline.cleanup_deadline(Instant::now());
     let cleanup = endpoint_publication
       .cleanup_until(cleanup_deadline)
       .await
@@ -584,6 +655,7 @@ struct ConnectionControl {
   limits: IpcLimits,
   stream_cancellation: CancellationToken,
   request_drain: CancellationToken,
+  request_drain_deadline: Arc<OnceLock<Instant>>,
   mutation_cancellation: CancellationToken,
   connection_cancellation: CancellationToken,
 }
@@ -786,11 +858,7 @@ async fn handle_connection_loop(
     };
   }
   loop {
-    let next_frame = tokio::select! {
-      biased;
-      frame = reader.next() => frame,
-      _ = control.request_drain.cancelled() => break,
-    };
+    let next_frame = read_request_or_drain(&mut reader, control).await;
     let line = match next_frame {
       Some(Ok(line)) => line,
       Some(Err(error)) => {
@@ -879,26 +947,20 @@ enum ConnectionAction {
   Close,
 }
 
-struct PendingShutdownSignal<'a> {
-  state: &'a DaemonState,
-  armed: bool,
-}
-
-impl<'a> PendingShutdownSignal<'a> {
-  fn new(state: &'a DaemonState) -> Self {
-    Self { state, armed: true }
-  }
-
-  fn fire(mut self) {
-    self.state.request_shutdown();
-    self.armed = false;
-  }
-}
-
-impl Drop for PendingShutdownSignal<'_> {
-  fn drop(&mut self) {
-    if self.armed {
-      self.state.request_shutdown();
+async fn read_request_or_drain(
+  reader: &mut IpcFrameReader,
+  control: &ConnectionControl,
+) -> Option<Result<String, IpcCodecError>> {
+  tokio::select! {
+    biased;
+    frame = reader.next() => frame,
+    _ = control.request_drain.cancelled() => {
+      let deadline = control
+        .request_drain_deadline
+        .get()
+        .copied()
+        .expect("request drain deadline is set before cancellation");
+      timeout_at(deadline, reader.next()).await.unwrap_or(None)
     }
   }
 }
@@ -1164,7 +1226,7 @@ where
 
   let first = tokio::select! {
     biased;
-    _ = supervision.request_drain.cancelled() => First::ShuttingDown,
+    _ = wait_for_request_drain(definition, supervision.request_drain) => First::ShuttingDown,
     _ = wait_for_operation_cancellation(operation_fence.as_ref()) => First::Cancelled,
     frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
     _ = sleep_until(deadline) => First::Timeout,
@@ -1196,7 +1258,7 @@ where
       }
       let handler_result = tokio::select! {
         biased;
-        _ = supervision.request_drain.cancelled() => FollowUp::ShuttingDown,
+        _ = wait_for_request_drain(definition, supervision.request_drain) => FollowUp::ShuttingDown,
         _ = wait_for_operation_cancellation(operation_fence.as_ref()) => FollowUp::Cancelled,
         _ = sleep_until(deadline) => FollowUp::Timeout,
         result = &mut handler => FollowUp::Handler(result),
@@ -1719,6 +1781,17 @@ async fn wait_for_operation_cancellation(fence: Option<&OperationFence>) {
       cancellation.cancelled().await;
     }
     None => std::future::pending().await,
+  }
+}
+
+async fn wait_for_request_drain(
+  definition: &cadder_protocol::OperationDefinition,
+  request_drain: &CancellationToken,
+) {
+  if definition.name() == message_types::SHUTDOWN_DAEMON_REQUEST {
+    std::future::pending().await
+  } else {
+    request_drain.cancelled().await
   }
 }
 
@@ -2325,8 +2398,12 @@ where
         accepted: true,
         message: "Daemon shutdown started.".to_string(),
       };
-      let pending_shutdown = PendingShutdownSignal::new(state);
-      let response_deadline = std::cmp::min(deadline, Instant::now() + limits.shutdown_accept);
+      let shutdown_started_at = Instant::now();
+      state.prepare_shutdown_at(shutdown_started_at);
+      state.request_shutdown();
+      #[cfg(test)]
+      sleep(limits.shutdown_response_delay).await;
+      let response_deadline = std::cmp::min(deadline, shutdown_started_at + limits.shutdown_accept);
       let write_result = write_envelope_until(
         writer,
         message_types::SHUTDOWN_DAEMON_RESPONSE,
@@ -2335,7 +2412,6 @@ where
         limits.write_no_progress,
       )
       .await;
-      pending_shutdown.fire();
       write_result?;
       return Ok(ConnectionAction::Close);
     }
@@ -4653,7 +4729,7 @@ mod tests {
     let mut connection = connect_authenticated(&paths).await;
 
     shutdown.send(true).unwrap();
-    timeout(Duration::from_secs(2), server)
+    timeout(Duration::from_secs(4), server)
       .await
       .expect("server should join tracked connections during drain")
       .unwrap()
@@ -4701,6 +4777,47 @@ mod tests {
     worker.await.unwrap();
   }
 
+  #[test]
+  fn shutdown_coordinator_default_phase_budgets_total_thirty_seconds() {
+    let limits = IpcLimits::default();
+    let started_at = Instant::now();
+    let timeline = ShutdownTimeline::new(started_at, limits);
+
+    assert_eq!(limits.shutdown_accept, Duration::from_secs(2));
+    assert_eq!(limits.shutdown_handler_grace, Duration::from_secs(8));
+    assert_eq!(limits.shutdown_runtime, Duration::from_secs(10));
+    assert_eq!(limits.shutdown_storage, Duration::from_secs(5));
+    assert_eq!(limits.shutdown_cleanup, Duration::from_secs(5));
+    assert_eq!(
+      limits.shutdown_accept
+        + limits.shutdown_handler_grace
+        + limits.shutdown_runtime
+        + limits.shutdown_storage
+        + limits.shutdown_cleanup,
+      Duration::from_secs(30)
+    );
+    assert_eq!(
+      timeline.accept_deadline(),
+      started_at + Duration::from_secs(2)
+    );
+    assert_eq!(
+      timeline.handler_deadline(),
+      started_at + Duration::from_secs(10)
+    );
+    assert_eq!(
+      timeline.runtime_deadline(started_at + Duration::from_secs(15)),
+      started_at + Duration::from_secs(20)
+    );
+    assert_eq!(
+      timeline.storage_deadline(started_at + Duration::from_secs(23)),
+      started_at + Duration::from_secs(25)
+    );
+    assert_eq!(
+      timeline.cleanup_deadline(started_at + Duration::from_secs(29)),
+      started_at + Duration::from_secs(30)
+    );
+  }
+
   #[tokio::test]
   async fn shutdown_coordinator_reports_a_detached_owned_mutation_panic() {
     let registry = MutationTaskRegistry::default();
@@ -4737,6 +4854,7 @@ mod tests {
     state.set_registration_publish_hook(hook.clone());
     let observed_state = state.clone();
     let limits = IpcLimits {
+      shutdown_accept: Duration::from_millis(25),
       shutdown_handler_grace: Duration::from_millis(50),
       ..IpcLimits::default()
     };
@@ -4872,6 +4990,7 @@ mod tests {
   #[tokio::test]
   async fn shutdown_coordinator_joins_a_stalled_owned_mutation_worker() {
     let limits = IpcLimits {
+      shutdown_accept: Duration::from_millis(25),
       shutdown_handler_grace: Duration::from_millis(50),
       dispatch_delay: Duration::from_secs(5),
       ..IpcLimits::default()
@@ -4909,6 +5028,231 @@ mod tests {
       .expect("shutdown coordinator should join the owned mutation worker")
       .unwrap()
       .unwrap();
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_rejects_a_new_request_on_an_authenticated_connection() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let observed_state = state.clone();
+    let limits = IpcLimits {
+      shutdown_accept: Duration::from_millis(500),
+      shutdown_handler_grace: Duration::from_millis(100),
+      ..IpcLimits::default()
+    };
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      DaemonServer::new(server_paths, state)
+        .with_limits(limits)
+        .run_until(shutdown_rx)
+        .await
+    });
+    wait_for_ready(&paths).await;
+    let mut connection = connect_authenticated(&paths).await;
+
+    shutdown.send(true).unwrap();
+    timeout(Duration::from_secs(1), async {
+      loop {
+        if matches!(
+          observed_state.issue_operation_fence(),
+          Err(CommitRejection::Draining)
+        ) {
+          break;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("shutdown coordinator should enter operation drain");
+
+    let request_id = "shutdown-coordinator-new-request";
+    write_envelope(
+      &mut connection,
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: request_id.to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    let envelope = timeout(Duration::from_secs(1), read_raw_envelope(&mut connection))
+      .await
+      .expect("the draining connection should receive a terminal response");
+    assert_eq!(
+      envelope.message_type,
+      message_types::PROTOCOL_ERROR_RESPONSE
+    );
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(response.error.kind, ProtocolErrorKind::ShuttingDown);
+    assert_eq!(response.error.code.as_str(), "shutting_down");
+    assert!(!response.error.retryable);
+    timeout(Duration::from_secs(2), server)
+      .await
+      .expect("shutdown coordinator should finish within its phase budgets")
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_starts_drain_before_a_slow_shutdown_ack() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let observed_state = state.clone();
+    let limits = IpcLimits {
+      shutdown_accept: Duration::from_millis(400),
+      shutdown_handler_grace: Duration::from_millis(400),
+      shutdown_connection_abort_join: Duration::from_millis(100),
+      shutdown_response_delay: Duration::from_millis(250),
+      ..IpcLimits::default()
+    };
+    let (_external_shutdown, shutdown_rx) = watch::channel(false);
+    let server_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      DaemonServer::new(server_paths, state)
+        .with_limits(limits)
+        .run_until(shutdown_rx)
+        .await
+    });
+    wait_for_ready(&paths).await;
+    let mut shutdown_connection = connect_authenticated(&paths).await;
+    let _idle_connection = connect_authenticated(&paths).await;
+    let mut probe_connection = connect_authenticated(&paths).await;
+    let started_at = Instant::now();
+
+    write_envelope(
+      &mut shutdown_connection,
+      message_types::SHUTDOWN_DAEMON_REQUEST,
+      &ShutdownDaemonRequest {
+        request_id: "shutdown-coordinator-slow-ack".to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_millis(300), async {
+      loop {
+        if matches!(
+          observed_state.issue_operation_fence(),
+          Err(CommitRejection::Draining)
+        ) {
+          break;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("the shutdown request should enter drain before its ACK completes");
+
+    let request_id = "shutdown-coordinator-during-slow-ack";
+    write_envelope(
+      &mut probe_connection,
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: request_id.to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    let envelope = timeout(
+      Duration::from_millis(300),
+      read_raw_envelope(&mut probe_connection),
+    )
+    .await
+    .expect("a peer should be rejected while the shutdown ACK is pending");
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(response.error.kind, ProtocolErrorKind::ShuttingDown);
+
+    let shutdown_envelope = timeout(
+      Duration::from_millis(400),
+      read_raw_envelope(&mut shutdown_connection),
+    )
+    .await
+    .expect("the shutdown requester should receive its ACK within the accept phase");
+    assert_eq!(
+      shutdown_envelope.message_type,
+      message_types::SHUTDOWN_DAEMON_RESPONSE
+    );
+    let shutdown_response: BasicResponse = shutdown_envelope.decode().unwrap();
+    assert!(shutdown_response.accepted);
+
+    timeout(Duration::from_millis(900), server)
+      .await
+      .expect("the slow ACK must not reset the absolute shutdown timeline")
+      .unwrap()
+      .unwrap();
+    assert!(started_at.elapsed() < Duration::from_millis(900));
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_does_not_reset_the_timeline_after_an_expired_ack() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let limits = IpcLimits {
+      shutdown_accept: Duration::from_millis(400),
+      shutdown_handler_grace: Duration::from_millis(400),
+      shutdown_connection_abort_join: Duration::from_millis(100),
+      shutdown_response_delay: Duration::from_millis(600),
+      ..IpcLimits::default()
+    };
+    let (_external_shutdown, shutdown_rx) = watch::channel(false);
+    let server_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      DaemonServer::new(server_paths, state)
+        .with_limits(limits)
+        .run_until(shutdown_rx)
+        .await
+    });
+    wait_for_ready(&paths).await;
+    let mut shutdown_connection = connect_authenticated(&paths).await;
+    let _idle_connection = connect_authenticated(&paths).await;
+    let started_at = Instant::now();
+
+    write_envelope(
+      &mut shutdown_connection,
+      message_types::SHUTDOWN_DAEMON_REQUEST,
+      &ShutdownDaemonRequest {
+        request_id: "shutdown-coordinator-expired-ack".to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_millis(900), server)
+      .await
+      .expect("an expired ACK must not reset the absolute shutdown timeline")
+      .unwrap()
+      .unwrap();
+    assert!(started_at.elapsed() < Duration::from_millis(900));
+
+    let mut byte = [0_u8; 1];
+    let read = timeout(
+      Duration::from_millis(100),
+      shutdown_connection.read(&mut byte),
+    )
+    .await
+    .expect("the expired ACK connection should close")
+    .unwrap();
+    assert_eq!(read, 0);
   }
 
   #[tokio::test]
@@ -4953,7 +5297,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn shutdown_signal_guard_requests_shutdown_when_response_future_is_cancelled() {
+  async fn shutdown_signal_preserves_the_prepared_start_time() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let state =
@@ -4961,12 +5305,15 @@ mod tests {
         .await
         .unwrap();
     let shutdown = state.shutdown_signal();
+    let started_at = Instant::now();
 
-    drop(PendingShutdownSignal::new(&state));
+    state.prepare_shutdown_at(started_at);
+    state.request_shutdown();
 
     timeout(Duration::from_secs(1), shutdown.wait())
       .await
-      .expect("cancelled shutdown response must still wake the server");
+      .expect("a prepared shutdown must wake the server");
+    assert_eq!(shutdown.started_at(), Some(started_at));
   }
 
   #[tokio::test]
@@ -5331,7 +5678,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn stream_limits_idle_cancellation_closes_subscription() {
+  async fn shutdown_coordinator_closes_an_active_subscription_with_a_terminal_outcome() {
     let daemon = RunningTestDaemon::start().await;
     let mut subscription = CadderSession::connect(&daemon.paths)
       .await
@@ -7938,7 +8285,7 @@ mod tests {
 
     async fn stop(self) {
       self.shutdown.send(true).unwrap();
-      timeout(Duration::from_secs(2), self.task)
+      timeout(Duration::from_secs(4), self.task)
         .await
         .unwrap()
         .unwrap()

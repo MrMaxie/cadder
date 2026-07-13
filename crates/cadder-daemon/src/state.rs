@@ -25,7 +25,7 @@ use chrono::Utc;
 use std::{
   collections::{BTreeMap, BTreeSet},
   sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
   },
 };
@@ -118,14 +118,24 @@ impl RegistrationPublishTestHook {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ShutdownSignal {
   requested: Arc<AtomicBool>,
+  started_at: Arc<OnceLock<tokio::time::Instant>>,
   notify: Arc<Notify>,
 }
 
 impl ShutdownSignal {
+  fn prepare(&self, started_at: tokio::time::Instant) {
+    let _ = self.started_at.set(started_at);
+  }
+
   fn request(&self) {
+    self.prepare(tokio::time::Instant::now());
     if !self.requested.swap(true, Ordering::SeqCst) {
       self.notify.notify_waiters();
     }
+  }
+
+  pub(crate) fn started_at(&self) -> Option<tokio::time::Instant> {
+    self.started_at.get().copied()
   }
 
   pub async fn wait(&self) {

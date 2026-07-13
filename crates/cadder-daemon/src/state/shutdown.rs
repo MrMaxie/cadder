@@ -132,6 +132,10 @@ impl DaemonState {
   pub(crate) fn request_shutdown(&self) {
     self.shutdown_signal.request();
   }
+
+  pub(crate) fn prepare_shutdown_at(&self, started_at: Instant) {
+    self.shutdown_signal.prepare(started_at);
+  }
 }
 
 fn shutdown_failure(message: &str) -> BasicResponse {

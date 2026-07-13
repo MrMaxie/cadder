@@ -1499,7 +1499,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn stop_until_clips_oversized_phase_timeouts_and_joins_the_child() {
+  async fn shutdown_coordinator_bounds_owned_runtime_stop_and_joins_the_child() {
     let mut fixture = runtime_fixture(FakeRuntimeMode::SlowStop);
     fixture.runtime.timeouts = RuntimeTimeouts {
       start_check: Duration::from_millis(250),
