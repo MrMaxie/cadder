@@ -1,5 +1,6 @@
 mod autostart;
 mod caddy;
+mod caddy_image;
 mod caddy_path_trust;
 mod config;
 mod iis;
@@ -94,7 +95,7 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
     CaddyBackendMode::Real => {
       let real_caddy =
         RealCaddyResolver::for_daemon(options.real_caddy_override, paths.runtime_profile());
-      real_caddy.resolve()?;
+      real_caddy.pin().await?;
       let adapter = CaddyConfigAdapter::new(real_caddy.clone());
       let runtime = ProcessRuntime::new(real_caddy, paths.clone());
       CaddyConfigCoordinator::new(adapter, runtime)

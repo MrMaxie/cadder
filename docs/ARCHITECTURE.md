@@ -85,6 +85,8 @@ real_caddy = "/absolute/path/to/development/caddy"
 
 Project files, registration working directories, executable-adjacent files, environment selectors, and shim flags never select real Caddy. Cadder validates owner and mutation permissions for the file and its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
 
+At daemon startup, Cadder opens the selected executable and pins its canonical path, source, operating-system file identity, SHA-256 digest, semantic version, required module inventory, and compatibility-probe revision. Cadder accepts Caddy versions from 2.11.3 up to, but not including, 3.0.0. Metadata commands use bounded output, a 30-second deadline, and no stdin. Every subsequent `adapt`, `run`, `reload`, and `stop` process passes through the same verified spawn gate. On Windows, the daemon retains a read-only handle without write or delete sharing for its lifetime. Each child starts suspended, joins Cadder's private kill-on-close Job Object, and resumes only after successful assignment. An identity or digest mismatch fails closed and the newly created process tree is terminated and joined before the operation returns.
+
 For each registration, Cadder runs:
 
 ```sh

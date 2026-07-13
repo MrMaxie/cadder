@@ -25,7 +25,7 @@
 ## 4. Trusted Caddy and ownership containment
 
 - [x] 4.1 `[CAD-001]` Move real-Caddy selection to explicit daemon override, trusted per-user/system selectors, and safe PATH; validate containing-directory ownership/write permissions; remove project, environment, executable-adjacent, and shim selectors (verification: `cargo test -p cadder-daemon trusted_caddy_source`)
-- [ ] 4.2 `[CAD-001]` Pin and reverify Caddy handle identity, digest, semantic version, modules, and probe revision at every spawn seam within the runtime-owner threat boundary (verification: `cargo test -p cadder-daemon pinned_caddy_image`)
+- [x] 4.2 `[CAD-001]` Pin and reverify Caddy handle identity, digest, semantic version, modules, and probe revision at every spawn seam within the runtime-owner threat boundary (verification: `cargo test -p cadder-daemon pinned_caddy_image`)
 - [ ] 4.3 `[RUN-004]` `[RUN-009]` Implement the authenticated runtime-guard protocol, generation lock, containment record, and replacement proof (verification: `cargo test -p cadderd --test cadderd_binary runtime_guard`)
 - [ ] 4.4 `[RUN-004]` `[RUN-009]` Prove forced owner loss terminates only the owned child and grandchild within ten seconds on each supported OS family (verification: Windows, Linux, and macOS jobs run `cargo test -p cadderd --test cadderd_binary containment`)
 

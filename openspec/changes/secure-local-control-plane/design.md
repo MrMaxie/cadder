@@ -4,7 +4,7 @@ The daemon currently uses `interprocess` and newline-delimited JSON, but its `re
 
 The protocol already has early capability and error types, but its version is a flat integer, future versions are accepted without negotiated semantics, dispatcher capability checks are incomplete, and client code collapses daemon errors into text. The shim maintains a persistent session but ignores heartbeat failures, starts missing daemons, exposes executable overrides, and detaches immediately when IPC closes.
 
-`process-wrap` now protects all directly spawned Caddy process trees with a Unix process group or a Windows Job Object. A separate owner-loss guard is still required on Unix because Rust `Drop` does not run when the daemon is forcibly terminated.
+Cadder protects every directly spawned Caddy process tree. Unix uses the `process-wrap` process-group boundary. Windows uses a Cadder-owned Job Object: the child starts suspended, joins a private kill-on-close job, and resumes only after assignment succeeds. This ordering prevents an uncontained child from running and avoids `process-wrap` 9.1.0's racy ToolHelp-based resume path. A separate owner-loss guard is still required on Unix because Rust `Drop` does not run when the daemon is forcibly terminated.
 
 ## Requirements
 
@@ -139,7 +139,7 @@ All Caddy children use `ProcessTreeChild`. A hidden `cadderd` runtime guard owns
 - Keep recovery ahead of diagnostics in terminal errors. A person needs the safe next action before internal identifiers; automation still receives the complete typed error.
 - Allow sequential requests but reject pipelining. The shim requires a persistent session, while one active request keeps ordering, cancellation, and ownership understandable.
 - Pin and reverify Caddy by handle identity, digest, and semantic compatibility at every spawn. Re-resolving PATH or trusting a prior path check permits substitution.
-- Retain `process-wrap` and add a Cadder guard only for owner-loss containment. Reimplementing Job Objects and process groups is unnecessary; neither primitive alone provides a portable daemon-death guarantee.
+- Retain `process-wrap` for Unix process groups. Own the small Windows Job Object spawn boundary so suspended spawn, job assignment, and resume form one fail-closed sequence; do not use `process-wrap`'s Windows resume path. Add a separate Cadder guard only where forced daemon termination bypasses Rust `Drop`. Neither a process group nor a Job Object alone provides a portable daemon-death guarantee.
 - Reject implicit daemon start from the shim. Lifecycle belongs to `cadder daemon start`, which can report configuration and permission failures coherently.
 
 Rejected alternatives include gRPC for local IPC, a bearer secret in discovery, authorization by PID, unbounded `read_line`, retrying flaky process tests, project-selected Caddy wrappers, and killing processes by executable name.

@@ -3,7 +3,7 @@ title: Real Caddy resolution
 description: Trusted sources, precedence, validation, and recursion protection for real Caddy.
 ---
 
-Cadder does not embed Caddy. The daemon resolves one trusted Caddy executable when it starts and keeps that path for the daemon lifetime. Project registration never changes the selected executable.
+Cadder does not embed Caddy. The daemon resolves and pins one trusted Caddy executable when it starts. Project registration never changes the selected executable.
 
 ## Precedence
 
@@ -29,6 +29,14 @@ On Windows, the owner is the runtime account, `SYSTEM`, `Administrators`, or `Tr
 On Linux and macOS, the owner is the runtime account or `root`, according to the source. Group-writable and world-writable components, symbolic links, and files without an executable bit are rejected.
 
 Configuration files pass the same provenance checks and are read through the validated file handle. This binds validation to the bytes Cadder parses.
+
+## Version and image pinning
+
+Cadder accepts Caddy 2.11.3 or newer within the 2.x release line. The selected build contains the standard modules used by Cadder and passes the compatibility probe shipped with the Cadder release.
+
+The daemon pins the executable's canonical path, source, operating-system file identity, SHA-256 digest, semantic version, module inventory, and probe revision. It verifies the pinned image again before every probe, adaptation, runtime start, reload, and stop operation. Metadata output is bounded and each metadata command has a 30-second deadline.
+
+On Windows, Cadder retains a read-only handle without write or delete sharing for the daemon lifetime. Stop the daemon before replacing or upgrading the selected Caddy executable. If the path, identity, or content changes while the daemon runs, Cadder rejects the operation and reports that the pinned image no longer matches.
 
 ## PATH and recursion safety
 

@@ -20,7 +20,6 @@ use std::{
 };
 use tokio::{
   io::{AsyncBufReadExt, BufReader},
-  process::Command,
   sync::Mutex,
   task::yield_now,
   time::{Instant, timeout, timeout_at},
@@ -496,15 +495,18 @@ impl ProcessRuntime {
     if self.child.lock().await.is_some() {
       anyhow::bail!("real Caddy runtime already owns a child process");
     }
-    let binary = self.resolver.resolve()?;
-    let mut command = Command::new(&binary);
-    command
-      .arg("run")
-      .arg("--config")
-      .arg(config_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped());
-    let mut child = ProcessTreeChild::spawn(command).context("start real Caddy runtime")?;
+    let image = self.resolver.verify_for_spawn().await?;
+    let binary = image.path().to_path_buf();
+    let mut child = image
+      .spawn("real Caddy runtime", |command| {
+        command
+          .arg("run")
+          .arg("--config")
+          .arg(config_path)
+          .stdout(Stdio::piped())
+          .stderr(Stdio::piped());
+      })
+      .await?;
 
     self.log_tasks.reopen();
     if let Some(stdout) = child.take_stdout() {
@@ -531,7 +533,7 @@ impl ProcessRuntime {
     self.set_snapshot(RuntimeState {
       status: RuntimeStatus::Running,
       binary_path: Some(binary.display().to_string()),
-      version: None,
+      version: Some(image.version().to_string()),
       process_id,
       admin_endpoint: Some("localhost:2019".to_string()),
       diagnostics: Vec::new(),
@@ -547,15 +549,17 @@ impl ProcessRuntime {
   }
 
   async fn reload(&self, config_path: &Path, logs: &CaddyLogStore) -> Result<()> {
-    let binary = self.resolver.resolve()?;
-    let mut command = Command::new(binary);
-    command
-      .arg("reload")
-      .arg("--config")
-      .arg(config_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped());
-    let child = ProcessTreeChild::spawn(command).context("start real Caddy reload")?;
+    let image = self.resolver.verify_for_spawn().await?;
+    let child = image
+      .spawn("real Caddy reload", |command| {
+        command
+          .arg("reload")
+          .arg("--config")
+          .arg(config_path)
+          .stdout(Stdio::piped())
+          .stderr(Stdio::piped());
+      })
+      .await?;
     let output = child
       .wait_for_output(self.timeouts.reload, "real Caddy reload")
       .await?;
@@ -612,10 +616,16 @@ impl ProcessRuntime {
       match owned.child.try_wait() {
         Ok(Some(_)) => *child_guard = None,
         Ok(None) => {
-          stop_error =
-            request_graceful_stop_until(owned.binary.clone(), deadlines.graceful, deadlines.stop)
+          stop_error = match timeout_at(deadlines.graceful, self.resolver.verify_for_spawn()).await
+          {
+            Ok(Ok(image)) => request_graceful_stop_until(image, deadlines.graceful, deadlines.stop)
               .await
-              .err();
+              .err(),
+            Ok(Err(error)) => Some(error.context("verify pinned Caddy image for graceful stop")),
+            Err(_) => Some(anyhow::anyhow!(
+              "verify pinned Caddy image for graceful stop exceeded its deadline"
+            )),
+          };
 
           match timeout_at(deadlines.stop, owned.child.wait()).await {
             Ok(Ok(_)) => *child_guard = None,
@@ -1008,18 +1018,20 @@ impl MockRuntimeStopReceipt {
 }
 
 async fn request_graceful_stop_until(
-  binary: PathBuf,
+  image: crate::caddy_image::VerifiedCaddyImage,
   wait_deadline: Instant,
   cleanup_deadline: Instant,
 ) -> Result<()> {
-  let mut command = Command::new(binary);
-  command
-    .arg("stop")
-    .arg("--address")
-    .arg("localhost:2019")
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
-  let mut child = ProcessTreeChild::spawn(command).context("start caddy stop")?;
+  let mut child = image
+    .spawn("caddy stop", |command| {
+      command
+        .arg("stop")
+        .arg("--address")
+        .arg("localhost:2019")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    })
+    .await?;
   let graceful_stop = wait_deadline.saturating_duration_since(Instant::now());
   let status = match timeout_at(wait_deadline, child.wait()).await {
     Ok(result) => result.context("wait for caddy stop")?,
@@ -1558,10 +1570,14 @@ mod tests {
     let temp = tempfile::tempdir().unwrap();
     let command_log = temp.path().join("fake-caddy.log");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::SlowStop);
+    let image = RealCaddyResolver::for_test_fixture(fake_caddy)
+      .verify_for_spawn()
+      .await
+      .unwrap();
 
     let started = Instant::now();
     let error = request_graceful_stop_until(
-      fake_caddy,
+      image,
       started + Duration::from_secs(2),
       started + Duration::from_secs(3),
     )
@@ -1576,10 +1592,14 @@ mod tests {
     let temp = tempfile::tempdir().unwrap();
     let command_log = temp.path().join("fake-caddy.log");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::FailStop);
+    let image = RealCaddyResolver::for_test_fixture(fake_caddy)
+      .verify_for_spawn()
+      .await
+      .unwrap();
 
     let started = Instant::now();
     let error = request_graceful_stop_until(
-      fake_caddy,
+      image,
       started + Duration::from_secs(10),
       started + Duration::from_secs(12),
     )

@@ -1,11 +1,16 @@
+#[cfg(any(test, debug_assertions))]
+use crate::caddy_image::{MINIMUM_CADDY_VERSION, required_caddy_modules};
 use crate::{
+  caddy_image::{
+    CADDY_COMPATIBILITY_PROBE_REVISION, CaddyImageSource, OpenedCaddyImage, PinnedCaddyImage,
+    VerifiedCaddyImage,
+  },
   caddy_path_trust::{
     CaddyPathProvenance, same_file_identity, validate_trusted_config, validate_trusted_executable,
   },
   config::{CONFIG_FILE_NAME, CadderConfig},
   logs::CaddyLogStore,
   paths::{RuntimePaths, RuntimeProfile},
-  process_tree::ProcessTreeChild,
   runtime::{CaddyRuntime, ProcessRuntime},
 };
 use anyhow::{Context, Result, anyhow};
@@ -14,6 +19,7 @@ use cadder_protocol::{
   LogSeverity, RegisteredDomain,
 };
 use chrono::Utc;
+use semver::Version;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -25,7 +31,7 @@ use std::{
   sync::{Arc, OnceLock},
   time::Duration,
 };
-use tokio::process::Command;
+use tokio::sync::OnceCell;
 
 pub const CADDER_CADDY_BACKEND_ENV: &str = "CADDER_CADDY_BACKEND";
 
@@ -82,7 +88,14 @@ pub struct RealCaddyResolver {
   config_paths: TrustedConfigPaths,
   executable_path: Option<PathBuf>,
   trust_policy: CaddyTrustPolicy,
-  resolved: Arc<OnceLock<PathBuf>>,
+  resolved: Arc<OnceLock<ResolvedCaddyPath>>,
+  pinned: Arc<OnceCell<Arc<PinnedCaddyImage>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedCaddyPath {
+  path: PathBuf,
+  source: CaddyImageSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +118,7 @@ impl RealCaddyResolver {
       executable_path: env::current_exe().ok(),
       trust_policy: CaddyTrustPolicy::Enforce,
       resolved: Arc::new(OnceLock::new()),
+      pinned: Arc::new(OnceCell::new()),
     }
   }
 
@@ -122,6 +136,7 @@ impl RealCaddyResolver {
       executable_path,
       trust_policy: CaddyTrustPolicy::Enforce,
       resolved: Arc::new(OnceLock::new()),
+      pinned: Arc::new(OnceCell::new()),
     }
   }
 
@@ -170,6 +185,10 @@ impl RealCaddyResolver {
   }
 
   pub fn resolve(&self) -> Result<PathBuf> {
+    Ok(self.resolve_evidence()?.path)
+  }
+
+  fn resolve_evidence(&self) -> Result<ResolvedCaddyPath> {
     if let Some(resolved) = self.resolved.get() {
       return Ok(resolved.clone());
     }
@@ -184,12 +203,53 @@ impl RealCaddyResolver {
     )
   }
 
-  fn resolve_uncached(&self) -> Result<PathBuf> {
+  pub(crate) async fn pin(&self) -> Result<Arc<PinnedCaddyImage>> {
+    let pinned = self
+      .pinned
+      .get_or_try_init(|| async { self.capture_pinned_image().await.map(Arc::new) })
+      .await?;
+    Ok(pinned.clone())
+  }
+
+  pub(crate) async fn verify_for_spawn(&self) -> Result<VerifiedCaddyImage> {
+    self.pin().await?.verified()
+  }
+
+  async fn capture_pinned_image(&self) -> Result<PinnedCaddyImage> {
+    let resolved = self.resolve_evidence()?;
+    let opened = OpenedCaddyImage::open(&resolved.path)?;
+    opened.reverify_path()?;
+
+    #[cfg(any(test, debug_assertions))]
+    if self.trust_policy == CaddyTrustPolicy::TestFixture {
+      return PinnedCaddyImage::capture(
+        &opened,
+        CaddyImageSource::TestFixture,
+        Version::parse(MINIMUM_CADDY_VERSION).expect("minimum Caddy version is valid"),
+        required_caddy_modules(),
+        CADDY_COMPATIBILITY_PROBE_REVISION,
+      );
+    }
+
+    let version_output = run_pinned_metadata_command(&opened, &["version"]).await?;
+    let version = parse_caddy_version(&version_output)?;
+    let module_output = run_pinned_metadata_command(&opened, &["list-modules", "--json"]).await?;
+    let modules = parse_caddy_modules(&module_output)?;
+    PinnedCaddyImage::capture(
+      &opened,
+      resolved.source,
+      version,
+      modules,
+      CADDY_COMPATIBILITY_PROBE_REVISION,
+    )
+  }
+
+  fn resolve_uncached(&self) -> Result<ResolvedCaddyPath> {
     let shim_candidates = self.shim_candidates();
     if let Some(path) = &self.explicit_override {
       return self.resolve_selected(
         path,
-        "explicit daemon override",
+        CaddyImageSource::ExplicitDaemonOverride,
         CaddyPathProvenance::UserOwned,
         &shim_candidates,
       );
@@ -198,13 +258,13 @@ impl RealCaddyResolver {
     if let Some(path) = &self.config_paths.user
       && let Some(selected) = self.selection_from_config(
         path,
-        "per-user configuration",
+        CaddyImageSource::UserConfiguration,
         CaddyPathProvenance::UserOwned,
       )?
     {
       return self.resolve_selected(
         &selected,
-        "per-user configuration",
+        CaddyImageSource::UserConfiguration,
         CaddyPathProvenance::UserOwned,
         &shim_candidates,
       );
@@ -213,23 +273,28 @@ impl RealCaddyResolver {
     if let Some(path) = &self.config_paths.system
       && let Some(selected) = self.selection_from_config(
         path,
-        "system configuration",
+        CaddyImageSource::SystemConfiguration,
         CaddyPathProvenance::SystemOwned,
       )?
     {
       return self.resolve_selected(
         &selected,
-        "system configuration",
+        CaddyImageSource::SystemConfiguration,
         CaddyPathProvenance::SystemOwned,
         &shim_candidates,
       );
     }
 
-    resolve_caddy_on_path(&shim_candidates, self.trust_policy).context(
-      "could not resolve a trusted real Caddy executable. Pass an absolute daemon override, \
-       configure an absolute path in the per-user or system Cadder configuration, or install \
-       a trusted caddy executable on PATH",
-    )
+    resolve_caddy_on_path(&shim_candidates, self.trust_policy)
+      .map(|path| ResolvedCaddyPath {
+        path,
+        source: CaddyImageSource::Path,
+      })
+      .context(
+        "could not resolve a trusted real Caddy executable. Pass an absolute daemon override, \
+         configure an absolute path in the per-user or system Cadder configuration, or install \
+         a trusted caddy executable on PATH",
+      )
   }
 
   pub fn resolution_help(error: &anyhow::Error) -> String {
@@ -248,20 +313,22 @@ impl RealCaddyResolver {
   fn selection_from_config(
     &self,
     path: &Path,
-    source: &str,
+    source: CaddyImageSource,
     provenance: CaddyPathProvenance,
   ) -> Result<Option<PathBuf>> {
+    let source_description = source.description();
     match std::fs::symlink_metadata(path) {
       Ok(_) => {}
       Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
       Err(error) => {
-        return Err(error).with_context(|| format!("inspect {source} at {}", path.display()));
+        return Err(error)
+          .with_context(|| format!("inspect {source_description} at {}", path.display()));
       }
     }
     let config = match self.trust_policy {
       CaddyTrustPolicy::Enforce => {
         let trusted = validate_trusted_config(path, provenance)
-          .with_context(|| format!("validate {source} at {}", path.display()))?;
+          .with_context(|| format!("validate {source_description} at {}", path.display()))?;
         let canonical_path = trusted.canonical_path().to_path_buf();
         CadderConfig::from_reader(trusted.into_file(), &canonical_path)?
       }
@@ -280,7 +347,7 @@ impl RealCaddyResolver {
       && !selected.is_absolute()
     {
       return Err(anyhow!(
-        "{source} {} selects relative real-Caddy path {}; use an absolute path",
+        "{source_description} {} selects relative real-Caddy path {}; use an absolute path",
         path.display(),
         selected.display()
       ));
@@ -291,26 +358,45 @@ impl RealCaddyResolver {
   fn resolve_selected(
     &self,
     path: &Path,
-    source: &str,
+    source: CaddyImageSource,
     provenance: CaddyPathProvenance,
     shim_candidates: &[PathBuf],
-  ) -> Result<PathBuf> {
+  ) -> Result<ResolvedCaddyPath> {
+    let source_description = source.description();
     if !path.is_absolute() {
       return Err(anyhow!(
-        "{source} selects relative real-Caddy path {}; use an absolute path",
+        "{source_description} selects relative real-Caddy path {}; use an absolute path",
         path.display()
       ));
     }
     let canonical = match self.trust_policy {
-      CaddyTrustPolicy::Enforce => validate_trusted_executable(path, provenance)
-        .with_context(|| format!("validate real Caddy from {source}: {}", path.display()))?,
+      CaddyTrustPolicy::Enforce => {
+        validate_trusted_executable(path, provenance).with_context(|| {
+          format!(
+            "validate real Caddy from {source_description}: {}",
+            path.display()
+          )
+        })?
+      }
       #[cfg(any(test, debug_assertions))]
       CaddyTrustPolicy::TestFixture => path
         .canonicalize()
         .with_context(|| format!("canonicalize test Caddy fixture {}", path.display()))?,
     };
     reject_shim_identity(&canonical, shim_candidates)?;
-    Ok(canonical)
+    Ok(ResolvedCaddyPath {
+      path: canonical,
+      source: if self.trust_policy == CaddyTrustPolicy::Enforce {
+        source
+      } else {
+        #[cfg(any(test, debug_assertions))]
+        {
+          CaddyImageSource::TestFixture
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        unreachable!()
+      },
+    })
   }
 
   fn shim_candidates(&self) -> Vec<PathBuf> {
@@ -470,6 +556,60 @@ fn executable_candidates(dir: &Path) -> Vec<PathBuf> {
   }
 }
 
+const CADDY_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CADDY_METADATA_BYTES: usize = 1024 * 1024;
+
+async fn run_pinned_metadata_command(image: &OpenedCaddyImage, args: &[&str]) -> Result<Vec<u8>> {
+  let operation = format!("caddy {}", args.join(" "));
+  let child = image
+    .spawn(&operation, |command| {
+      command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    })
+    .await?;
+  let output = child
+    .wait_for_bounded_output(CADDY_METADATA_TIMEOUT, &operation, MAX_CADDY_METADATA_BYTES)
+    .await?;
+  if !output.status.success() {
+    return Err(anyhow!(
+      "{operation} failed: {}",
+      String::from_utf8_lossy(&output.stderr).trim()
+    ));
+  }
+  Ok(output.stdout)
+}
+
+fn parse_caddy_version(output: &[u8]) -> Result<Version> {
+  let output = std::str::from_utf8(output).context("decode caddy version output as UTF-8")?;
+  let token = output
+    .split_whitespace()
+    .next()
+    .context("caddy version returned empty output")?;
+  let token = token.strip_prefix('v').unwrap_or(token);
+  Version::parse(token).with_context(|| format!("parse Caddy semantic version `{token}`"))
+}
+
+fn parse_caddy_modules(output: &[u8]) -> Result<BTreeSet<String>> {
+  #[derive(serde::Deserialize)]
+  struct ModuleInfo {
+    module_name: String,
+  }
+
+  let modules = serde_json::from_slice::<Vec<ModuleInfo>>(output)
+    .context("decode caddy list-modules --json output")?
+    .into_iter()
+    .map(|module| module.module_name)
+    .filter(|module| !module.trim().is_empty())
+    .collect::<BTreeSet<_>>();
+  if modules.is_empty() {
+    return Err(anyhow!("caddy list-modules returned no module identifiers"));
+  }
+  Ok(modules)
+}
+
 #[derive(Debug, Clone)]
 pub struct CaddyConfigAdapter {
   resolver: RealCaddyResolver,
@@ -527,7 +667,7 @@ impl CaddyConfigAdapter {
   }
 
   async fn adapt(&self, registration: &EntrypointRegistration) -> Result<Value> {
-    let binary = self.resolver.resolve()?;
+    let image = self.resolver.verify_for_spawn().await?;
     let config_path = registration
       .source_config_path
       .canonical
@@ -539,16 +679,18 @@ impl CaddyConfigAdapter {
       .and_then(|run| run.adapter.as_deref())
       .unwrap_or("caddyfile");
 
-    let mut command = Command::new(binary);
-    command
-      .arg("adapt")
-      .arg("--config")
-      .arg(config_path)
-      .arg("--adapter")
-      .arg(adapter)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped());
-    let child = ProcessTreeChild::spawn(command).context("start caddy adapt")?;
+    let child = image
+      .spawn("caddy adapt", |command| {
+        command
+          .arg("adapt")
+          .arg("--config")
+          .arg(config_path)
+          .arg("--adapter")
+          .arg(adapter)
+          .stdout(Stdio::piped())
+          .stderr(Stdio::piped());
+      })
+      .await?;
     let output = child
       .wait_for_output(self.command_timeout, "caddy adapt")
       .await?;
@@ -1714,6 +1856,24 @@ exit 1
   }
 
   #[test]
+  fn pinned_caddy_image_parses_semantic_version_and_module_inventory() {
+    let modules = required_caddy_modules();
+    let output = serde_json::to_vec(
+      &modules
+        .iter()
+        .map(|module| json!({ "module_name": module, "module_type": "standard" }))
+        .collect::<Vec<_>>(),
+    )
+    .unwrap();
+
+    assert_eq!(
+      parse_caddy_version(b"v2.11.3 h1:fixture\n").unwrap(),
+      Version::new(2, 11, 3)
+    );
+    assert_eq!(parse_caddy_modules(&output).unwrap(), modules);
+  }
+
+  #[test]
   fn trusted_caddy_source_invalid_higher_priority_config_fails_without_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let system = dir.path().join(exe_name_for_test("system-caddy"));
@@ -1923,6 +2083,37 @@ app.localhost, http://api.localhost:8080 {
   }
 
   #[tokio::test]
+  async fn pinned_caddy_image_adapt_prevents_or_rejects_mutation_after_pinning() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_caddy = dir.path().join(fake_caddy_name_for_test());
+    write_fake_caddy(&fake_caddy);
+    let config_path = dir.path().join("Caddyfile");
+    fs::write(&config_path, "project.localhost { respond ok }").unwrap();
+    let mut registration = registration("project", &[]);
+    registration.source_config_path = SourcePath::new(
+      config_path.display().to_string(),
+      Some(config_path.canonicalize().unwrap().display().to_string()),
+    );
+    let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy.clone()));
+
+    let accepted = adapter.prepare(registration.clone()).await;
+    assert!(accepted.diagnostics.is_empty(), "{accepted:?}");
+    match fs::write(&fake_caddy, b"modified Caddy image") {
+      Ok(()) => {
+        let rejected = adapter.prepare(registration).await;
+        assert_eq!(rejected.diagnostics[0].code, "adapt-failed");
+        assert!(rejected.diagnostics[0].message.contains("digest changed"));
+      }
+      Err(error) => {
+        #[cfg(not(windows))]
+        panic!("unexpected image mutation failure: {error}");
+        #[cfg(windows)]
+        let _ = error;
+      }
+    }
+  }
+
+  #[tokio::test]
   async fn prepare_registration_commits_routes_on_success() {
     let dir = tempfile::tempdir().unwrap();
     let fake_caddy = dir.path().join(fake_caddy_name_for_test());
@@ -2000,8 +2191,15 @@ app.localhost, http://api.localhost:8080 {
     assert_eq!(failed.diagnostics[0].code, "adapt-failed");
     assert!(failed.diagnostics[0].message.contains("adapt failed"));
 
-    write_fake_caddy_with_adapt(&failing_caddy, "not-json", 0);
-    let invalid = adapter.prepare(registration).await;
+    let invalid_dir = dir.path().join("invalid");
+    fs::create_dir(&invalid_dir).unwrap();
+    let invalid_caddy = invalid_dir.join(fake_caddy_name_for_test());
+    write_fake_caddy_with_adapt(&invalid_caddy, "not-json", 0);
+    let invalid_adapter = CaddyConfigAdapter::new(RealCaddyResolver::with_executable_path(
+      Some(invalid_caddy.display().to_string()),
+      Some(dir.path().join(exe_name_for_test("cadderd"))),
+    ));
+    let invalid = invalid_adapter.prepare(registration).await;
     assert_eq!(invalid.diagnostics[0].code, "adapt-failed");
     assert!(invalid.diagnostics[0].message.contains("parse adapted"));
   }
