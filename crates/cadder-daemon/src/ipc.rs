@@ -3,6 +3,7 @@ use crate::{
   IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcPrincipal, IpcSecurityPolicy,
   LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile,
   ipc_client_error::LocalIpcErrorContext,
+  ipc_codec::{BoundedNdjsonCodec, IpcCodecError, encode_json_frame},
   ipc_security::{
     IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_bound_socket,
     secure_listener_options, send_peer_authentication_preface,
@@ -13,13 +14,15 @@ use anyhow::{Context, Result};
 use cadder_protocol::{
   HeartbeatEntrypointRequest, IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind,
   LogSeverity, LogStreamIdentity, OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass,
-  ProtocolError, ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest,
-  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
+  PROTOCOL_VERSION, ProtocolCapabilities, ProtocolError, ProtocolErrorCode, ProtocolErrorKind,
+  ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest, QueryLogsRequest,
+  QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
   SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
   ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest, UnregisterEntrypointRequest,
   ensure_compatible_protocol_version, message_types,
 };
 use fs4::{FileExt, TryLockError};
+use futures_util::StreamExt;
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{
@@ -37,11 +40,12 @@ use std::{
   time::Duration,
 };
 use tokio::{
-  io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+  io::{AsyncRead, AsyncWrite, AsyncWriteExt},
   process::Command,
   sync::watch,
   time::{sleep, timeout},
 };
+use tokio_util::codec::FramedRead;
 
 #[derive(Debug)]
 pub struct DaemonServer {
@@ -248,8 +252,7 @@ async fn handle_connection_loop(
   security: &ConnectionSecurityContext,
 ) -> Result<()> {
   let (read_half, mut write_half) = tokio::io::split(conn);
-  let mut reader = BufReader::new(read_half);
-  let mut line = String::new();
+  let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
   macro_rules! send_response {
     ($message_type:expr, $response:expr) => {
       write_envelope(&mut write_half, $message_type, &$response).await?;
@@ -265,13 +268,22 @@ async fn handle_connection_loop(
   }
 
   loop {
-    line.clear();
-    let read = reader.read_line(&mut line).await?;
-    if read == 0 {
-      break;
-    }
+    let line = match reader.next().await {
+      Some(Ok(line)) => line,
+      Some(Err(error)) => {
+        let response = ProtocolErrorResponse::rejected(None, invalid_request_frame_error());
+        let _ = write_envelope(
+          &mut write_half,
+          message_types::PROTOCOL_ERROR_RESPONSE,
+          &response,
+        )
+        .await;
+        return Err(error).context("read bounded IPC request frame");
+      }
+      None => break,
+    };
 
-    let envelope: IpcEnvelope = match serde_json::from_str(line.trim_end()) {
+    let envelope: IpcEnvelope = match serde_json::from_str(&line) {
       Ok(envelope) => envelope,
       Err(error) => {
         let response =
@@ -491,12 +503,45 @@ where
   W: AsyncWrite + Unpin,
   T: Serialize,
 {
-  let envelope = IpcEnvelope::new(message_type, payload)?;
-  let rendered = serde_json::to_string(&envelope)?;
-  writer.write_all(rendered.as_bytes()).await?;
-  writer.write_all(b"\n").await?;
+  let envelope = OutboundIpcEnvelope::new(message_type, payload);
+  let encoded = encode_json_frame(&envelope)?;
+  writer.write_all(&encoded).await?;
   writer.flush().await?;
   Ok(())
+}
+
+fn invalid_request_frame_error() -> ProtocolError {
+  ProtocolError::new(
+    ProtocolErrorKind::Frame,
+    ProtocolErrorCode::parse(ProtocolErrorKind::Frame.default_code())
+      .expect("built-in protocol error code is valid"),
+    "Cadder rejected an invalid or oversized local IPC request frame.",
+    Some(
+      "Send one UTF-8 JSON object terminated by LF and keep the frame at or below 1 MiB.".into(),
+    ),
+    false,
+  )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutboundIpcEnvelope<'a, T> {
+  protocol_version: u16,
+  capabilities: ProtocolCapabilities,
+  #[serde(rename = "type")]
+  message_type: &'a str,
+  payload: &'a T,
+}
+
+impl<'a, T> OutboundIpcEnvelope<'a, T> {
+  fn new(message_type: &'a str, payload: &'a T) -> Self {
+    Self {
+      protocol_version: PROTOCOL_VERSION,
+      capabilities: ProtocolCapabilities::current(),
+      message_type,
+      payload,
+    }
+  }
 }
 
 async fn decode_or_reject<T, W>(
@@ -637,9 +682,11 @@ impl CadderClient {
   }
 }
 
+type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
+
 #[derive(Debug)]
 pub struct CadderSession {
-  reader: Option<BufReader<tokio::io::ReadHalf<Stream>>>,
+  reader: Option<IpcFrameReader>,
   writer: Option<tokio::io::WriteHalf<Stream>>,
   deadlines: IpcClientDeadlines,
   usable: bool,
@@ -678,7 +725,7 @@ impl CadderSession {
       .map_err(peer_authentication_preface_error)?;
     let (read_half, writer) = tokio::io::split(conn);
     Ok(Self {
-      reader: Some(BufReader::new(read_half)),
+      reader: Some(FramedRead::new(read_half, BoundedNdjsonCodec::new())),
       writer: Some(writer),
       deadlines,
       usable: true,
@@ -822,7 +869,7 @@ impl Drop for SessionExchangeGuard<'_> {
 
 #[derive(Debug)]
 pub struct StateSubscription {
-  reader: Option<BufReader<tokio::io::ReadHalf<Stream>>>,
+  reader: Option<IpcFrameReader>,
   writer: Option<tokio::io::WriteHalf<Stream>>,
   context: ClientRequestContext,
   usable: bool,
@@ -937,11 +984,9 @@ impl PreparedClientRequest {
     if response_type != context.expected_response.as_ref() {
       return Err(response_contract_error(&context, response_type));
     }
-    let envelope = IpcEnvelope::new(operation, request)
-      .map_err(|error| request_encoding_error(&context, error))?;
-    let mut frame =
-      serde_json::to_vec(&envelope).map_err(|error| request_encoding_error(&context, error))?;
-    frame.push(b'\n');
+    let envelope = OutboundIpcEnvelope::new(operation, request);
+    let frame =
+      encode_json_frame(&envelope).map_err(|error| request_frame_error(&context, error))?;
     Ok(Self {
       context,
       frame: frame.into_boxed_slice(),
@@ -984,21 +1029,19 @@ where
 }
 
 async fn read_client_envelope<R>(
-  reader: &mut R,
+  reader: &mut FramedRead<R, BoundedNdjsonCodec>,
   request: &ClientRequestContext,
 ) -> IpcClientResult<IpcEnvelope>
 where
-  R: tokio::io::AsyncBufRead + Unpin,
+  R: AsyncRead + Unpin,
 {
-  let mut line = String::new();
-  reader
-    .read_line(&mut line)
-    .await
-    .map_err(|error| response_read_error(request, error))?;
-  if line.is_empty() {
-    return Err(response_eof_error(request));
-  }
-  serde_json::from_str(line.trim_end()).map_err(|error| response_decode_error(request, error))
+  let line = match reader.next().await {
+    Some(Ok(line)) => line,
+    Some(Err(IpcCodecError::Io(error))) => return Err(response_read_error(request, error)),
+    Some(Err(error)) => return Err(response_frame_error(request, error)),
+    None => return Err(response_eof_error(request)),
+  };
+  serde_json::from_str(&line).map_err(|error| response_decode_error(request, error))
 }
 
 fn decode_client_response<T>(
@@ -1237,16 +1280,14 @@ fn daemon_not_ready_error(kind: io::ErrorKind) -> bool {
   )
 }
 
-fn request_encoding_error(
-  request: &ClientRequestContext,
-  error: serde_json::Error,
-) -> IpcClientError {
+fn request_frame_error(request: &ClientRequestContext, error: IpcCodecError) -> IpcClientError {
   IpcClientError::local(LocalIpcErrorContext {
     kind: LocalIpcErrorKind::Transport,
     phase: IpcClientPhase::RequestEncode,
     code: LocalIpcErrorCode::Frame,
-    message: "Cadder could not encode the local request; nothing was sent.".into(),
-    guidance: Some("Report this Cadder client serialization error.".into()),
+    message: "Cadder rejected a request that does not fit one bounded IPC frame; nothing was sent."
+      .into(),
+    guidance: Some("Reduce the request payload below 1 MiB and retry the operation.".into()),
     retryable: false,
     request_id: Some(request.request_id.clone()),
     operation: Some(request.operation.clone()),
@@ -1302,6 +1343,24 @@ fn response_read_error(request: &ClientRequestContext, error: io::Error) -> IpcC
       .into(),
     guidance: Some("Check the current daemon state before retrying the operation.".into()),
     retryable: operation_retryable(&request.operation),
+    request_id: Some(request.request_id.clone()),
+    operation: Some(request.operation.clone()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn response_frame_error(request: &ClientRequestContext, error: IpcCodecError) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase: IpcClientPhase::ResponseRead,
+    code: LocalIpcErrorCode::Frame,
+    message: "Cadder rejected an invalid or oversized daemon response; the operation outcome is unknown."
+      .into(),
+    guidance: Some(
+      "Inspect daemon diagnostics and verify that the client and daemon use compatible framing limits."
+        .into(),
+    ),
+    retryable: false,
     request_id: Some(request.request_id.clone()),
     operation: Some(request.operation.clone()),
     source: Some(Box::new(error)),
@@ -1853,11 +1912,11 @@ mod tests {
   use cadder_protocol::{
     AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorCode,
     ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest, QueryIisBindingsResponse,
-    QueryStateRequest, message_types, new_request_id,
+    QueryStateRequest, QueryStateResponse, message_types, new_request_id,
   };
   use std::{env, ffi::OsString, fs, future::Future, future::pending};
   use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::{oneshot, watch},
     task::JoinHandle,
     time::{Duration, sleep, timeout},
@@ -1883,6 +1942,134 @@ mod tests {
     assert!(rendered.ends_with('\n'));
     assert_eq!(envelope.message_type, message_types::QUERY_STATE_REQUEST);
     assert_eq!(decoded.request_id, "state-1");
+  }
+
+  #[tokio::test]
+  async fn ipc_codec_writer_rejects_oversized_envelope_before_writing() {
+    #[derive(Serialize)]
+    struct OversizedPayload {
+      request_id: String,
+      value: String,
+    }
+
+    let (mut reader, mut writer) = tokio::io::duplex(64);
+    let error = write_envelope(
+      &mut writer,
+      "test.oversized",
+      &OversizedPayload {
+        request_id: "oversized-write-1".to_string(),
+        value: "x".repeat(crate::ipc_codec::MAX_IPC_FRAME_LENGTH),
+      },
+    )
+    .await
+    .unwrap_err();
+    drop(writer);
+
+    assert!(error.downcast_ref::<IpcCodecError>().is_some());
+    let mut written = Vec::new();
+    reader.read_to_end(&mut written).await.unwrap();
+    assert!(written.is_empty());
+  }
+
+  #[tokio::test]
+  async fn ipc_codec_client_rejects_oversized_response_and_keeps_correlation() {
+    let server = ScriptedIpcServer::start(|conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      writer
+        .write_all(&vec![b'x'; crate::ipc_codec::MAX_IPC_FRAME_LENGTH + 1])
+        .await
+        .unwrap();
+      writer.write_all(b"\n").await.unwrap();
+    });
+    let mut session = CadderSession::connect(&server.paths).await.unwrap();
+
+    let error = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "oversized-response-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseRead,
+      "frame",
+      Some("oversized-response-1"),
+    );
+    assert!(!error.retryable());
+
+    let retired = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "oversized-response-retry-1".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert_local_error(
+      &retired,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some("oversized-response-retry-1"),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_codec_daemon_dispatches_an_exact_limit_request() {
+    let daemon = RunningTestDaemon::start().await;
+    let mut conn = connect_authenticated(&daemon.paths).await;
+    let mut envelope = IpcEnvelope::new(
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "exact-limit-request-1".to_string(),
+      },
+    )
+    .unwrap();
+    envelope.payload.as_object_mut().unwrap().insert(
+      "padding".to_string(),
+      serde_json::Value::String(String::new()),
+    );
+    let baseline = serde_json::to_vec(&envelope).unwrap();
+    let padding_length = crate::ipc_codec::MAX_IPC_FRAME_LENGTH - baseline.len();
+    envelope.payload["padding"] = serde_json::Value::String("x".repeat(padding_length));
+    let mut frame = serde_json::to_vec(&envelope).unwrap();
+    assert_eq!(frame.len(), crate::ipc_codec::MAX_IPC_FRAME_LENGTH);
+    frame.push(b'\n');
+
+    conn.write_all(&frame).await.unwrap();
+    let response = read_raw_envelope(&mut conn).await;
+    let response: QueryStateResponse = response.decode().unwrap();
+
+    assert!(response.accepted);
+    assert_eq!(response.request_id, "exact-limit-request-1");
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_codec_daemon_returns_typed_errors_and_closes_invalid_frames() {
+    let daemon = RunningTestDaemon::start().await;
+
+    let mut oversized = connect_authenticated(&daemon.paths).await;
+    oversized
+      .write_all(&vec![b'x'; crate::ipc_codec::MAX_IPC_FRAME_LENGTH + 1])
+      .await
+      .unwrap();
+    oversized.write_all(b"\n").await.unwrap();
+    assert_typed_frame_error_then_eof(oversized).await;
+
+    let mut invalid_utf8 = connect_authenticated(&daemon.paths).await;
+    invalid_utf8.write_all(&[0xff, b'\n']).await.unwrap();
+    assert_typed_frame_error_then_eof(invalid_utf8).await;
+
+    daemon.stop().await;
   }
 
   #[test]
@@ -3647,6 +3834,85 @@ mod tests {
 
     assert!(background.starts_new_session);
     assert!(!foreground.starts_new_session);
+  }
+
+  struct RunningTestDaemon {
+    paths: RuntimePaths,
+    shutdown: watch::Sender<bool>,
+    task: JoinHandle<Result<()>>,
+    _temp: tempfile::TempDir,
+  }
+
+  impl RunningTestDaemon {
+    async fn start() -> Self {
+      let temp = tempfile::tempdir().unwrap();
+      let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+      let state = DaemonState::with_runtime_paths(
+        CaddyConfigCoordinator::new_mock(paths.clone()),
+        paths.clone(),
+      )
+      .await
+      .unwrap();
+      let (shutdown, shutdown_rx) = watch::channel(false);
+      let task = tokio::spawn(DaemonServer::new(paths.clone(), state).run_until(shutdown_rx));
+      wait_for_ready(&paths).await;
+      Self {
+        paths,
+        shutdown,
+        task,
+        _temp: temp,
+      }
+    }
+
+    async fn stop(self) {
+      self.shutdown.send(true).unwrap();
+      timeout(Duration::from_secs(2), self.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    }
+  }
+
+  async fn connect_authenticated(paths: &RuntimePaths) -> Stream {
+    let name = local_socket_name(paths).unwrap();
+    let mut conn = Stream::connect(name).await.unwrap();
+    send_peer_authentication_preface(&mut conn).await.unwrap();
+    conn
+  }
+
+  async fn read_raw_envelope(conn: &mut Stream) -> IpcEnvelope {
+    let mut reader = BufReader::new(conn);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(!line.is_empty(), "daemon did not return an IPC response");
+    serde_json::from_str(&line).unwrap()
+  }
+
+  async fn assert_typed_frame_error_then_eof(conn: Stream) {
+    let (mut reader, _writer) = tokio::io::split(conn);
+    let mut reader = BufReader::new(&mut reader);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(!line.is_empty(), "daemon did not return a frame error");
+    let envelope: IpcEnvelope = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+      envelope.message_type,
+      message_types::PROTOCOL_ERROR_RESPONSE
+    );
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert!(!response.accepted);
+    assert_eq!(response.request_id, "unknown");
+    assert_eq!(response.error.kind, ProtocolErrorKind::Frame);
+    assert_eq!(response.error.code.as_str(), "frame");
+    assert!(!response.error.retryable);
+
+    let mut trailing = Vec::new();
+    timeout(Duration::from_secs(1), reader.read_to_end(&mut trailing))
+      .await
+      .expect("daemon should close after a framing violation")
+      .unwrap();
+    assert!(trailing.is_empty());
   }
 
   struct ScriptedIpcServer {

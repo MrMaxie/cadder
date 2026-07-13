@@ -4,6 +4,7 @@ mod config;
 mod iis;
 mod ipc;
 mod ipc_client_error;
+mod ipc_codec;
 mod ipc_discovery;
 mod ipc_security;
 #[cfg(unix)]

@@ -415,11 +415,13 @@ name = "cadder-daemon"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "cadder-protocol",
  "chrono",
  "directories",
  "figment",
  "fs4",
+ "futures-util",
  "getrandom 0.4.2",
  "hex",
  "interprocess",
@@ -434,6 +436,7 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "widestring",
  "windows",
  "windows-sys 0.61.2",

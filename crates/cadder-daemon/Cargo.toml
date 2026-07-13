@@ -15,11 +15,13 @@ required-features = ["docker-e2e"]
 
 [dependencies]
 anyhow = "1.0.102"
+bytes = "=1.11.1"
 cadder-protocol = { version = "0.8.0", path = "../cadder-protocol" }
 chrono = { version = "0.4.45", features = ["serde"] }
 directories = "6.0.0"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 fs4 = "1.1.0"
+futures-util = "=0.3.32"
 getrandom = "=0.4.2"
 hex = "0.4.3"
 interprocess = { version = "2.4.2", features = ["tokio"] }
@@ -30,6 +32,7 @@ serde_json = "1.0.150"
 sha2 = "0.11.0"
 thiserror = "=2.0.17"
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = { version = "=0.7.18", features = ["codec"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
