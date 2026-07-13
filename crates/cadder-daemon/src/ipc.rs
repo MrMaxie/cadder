@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use cadder_protocol::{
   CLIENT_HELLO_OPERATION, CapabilityId, ClientHello, HeartbeatEntrypointRequest, IpcEnvelope,
   LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity, OPERATION_REGISTRY,
-  OperationAccess, OperationDeadlineClass, PROTOCOL_VERSION, ProtocolCapabilities, ProtocolError,
-  ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, ProtocolVersion,
+  OperationAccess, OperationDeadlineClass, OperationShape, PROTOCOL_VERSION, ProtocolCapabilities,
+  ProtocolError, ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, ProtocolVersion,
   ProtocolVersionRange, QueryAutostartRequest, QueryIisBindingsRequest, QueryLogsRequest,
   QueryStateRequest, RegisterEntrypointRequest, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
   ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
@@ -44,7 +44,7 @@ use tokio::{
   io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
   process::Command,
   sync::{Semaphore, watch},
-  time::{Instant, sleep, timeout_at},
+  time::{Instant, sleep, sleep_until, timeout_at},
 };
 use tokio_util::codec::FramedRead;
 
@@ -81,6 +81,12 @@ struct IpcLimits {
   first_frame_byte: Duration,
   frame_completion: Duration,
   write_no_progress: Duration,
+  ordinary_operation: Duration,
+  reload_operation: Duration,
+  stream_setup: Duration,
+  shutdown_operation: Duration,
+  #[cfg(test)]
+  dispatch_delay: Duration,
 }
 
 impl Default for IpcLimits {
@@ -90,7 +96,25 @@ impl Default for IpcLimits {
       first_frame_byte: Duration::from_secs(5),
       frame_completion: Duration::from_secs(30),
       write_no_progress: Duration::from_secs(5),
+      ordinary_operation: Duration::from_secs(30),
+      reload_operation: Duration::from_secs(120),
+      stream_setup: Duration::from_secs(30),
+      shutdown_operation: Duration::from_secs(30),
+      #[cfg(test)]
+      dispatch_delay: Duration::ZERO,
     }
+  }
+}
+
+impl IpcLimits {
+  fn operation_deadline(self, class: OperationDeadlineClass) -> Instant {
+    let duration = match class {
+      OperationDeadlineClass::Ordinary => self.ordinary_operation,
+      OperationDeadlineClass::Reload => self.reload_operation,
+      OperationDeadlineClass::Stream => self.stream_setup,
+      OperationDeadlineClass::Shutdown => self.shutdown_operation,
+    };
+    Instant::now() + duration
   }
 }
 
@@ -389,15 +413,6 @@ async fn handle_connection_loop(
       write_envelope(&mut write_half, $message_type, &$response).await?;
     };
   }
-  macro_rules! decode_request {
-    ($authorized:expr, $request:ty) => {
-      match decode_or_reject::<$request, _>(&mut write_half, $authorized).await? {
-        Some(request) => request,
-        None => continue,
-      }
-    };
-  }
-
   loop {
     let line = match reader.next().await {
       Some(Ok(line)) => line,
@@ -434,128 +449,470 @@ async fn handle_connection_loop(
         continue;
       }
     };
-    match authorized.definition().name() {
-      message_types::REGISTER_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&authorized, RegisterEntrypointRequest);
-        let nonce = request
-          .registration
-          .entrypoint_instance
-          .shim_session_nonce
-          .clone();
-        let response = state
-          .register(request.request_id, request.registration)
-          .await;
-        if let Some(id) = response
-          .registration_id
-          .as_ref()
-          .filter(|_| response.accepted)
-        {
-          owned.insert(id.clone(), nonce);
-        }
-        send_response!(message_types::REGISTER_ENTRYPOINT_RESPONSE, response);
+    let action = match authorized.definition().shape() {
+      OperationShape::Unary => {
+        supervise_unary_request(
+          &mut reader,
+          &mut write_half,
+          &state,
+          owned,
+          &authorized,
+          &envelope,
+          limits,
+        )
+        .await?
       }
-      message_types::UNREGISTER_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&authorized, UnregisterEntrypointRequest);
-        let response = state
-          .unregister(
-            request.request_id,
-            &request.registration_id,
-            &request.shim_session_nonce,
-          )
-          .await;
-        if response.accepted {
-          owned.remove(&request.registration_id);
-        }
-        send_response!(message_types::UNREGISTER_ENTRYPOINT_RESPONSE, response);
+      OperationShape::ServerStream => {
+        supervise_state_subscription(&mut reader, &mut write_half, &state, &authorized, limits)
+          .await?
       }
-      message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
-        let request = decode_request!(&authorized, HeartbeatEntrypointRequest);
-        let response = state.heartbeat(request).await;
-        send_response!(message_types::HEARTBEAT_ENTRYPOINT_RESPONSE, response);
-      }
-      message_types::QUERY_STATE_REQUEST => {
-        let request = decode_request!(&authorized, QueryStateRequest);
-        let response = state.query_state(request.request_id).await;
-        send_response!(message_types::QUERY_STATE_RESPONSE, response);
-      }
-      message_types::SET_ENTRYPOINT_ENABLED_REQUEST => {
-        let request = decode_request!(&authorized, SetEntrypointEnabledRequest);
-        let response = state.set_entrypoint_enabled(request).await;
-        send_response!(message_types::SET_ENTRYPOINT_ENABLED_RESPONSE, response);
-      }
-      message_types::SET_DOMAIN_ENABLED_REQUEST => {
-        let request = decode_request!(&authorized, SetDomainEnabledRequest);
-        let response = state.set_domain_enabled(request).await;
-        send_response!(message_types::SET_DOMAIN_ENABLED_RESPONSE, response);
-      }
-      message_types::QUERY_IIS_BINDINGS_REQUEST => {
-        let request = decode_request!(&authorized, QueryIisBindingsRequest);
-        let response = state.query_iis_bindings(request.request_id).await;
-        send_response!(message_types::QUERY_IIS_BINDINGS_RESPONSE, response);
-      }
-      message_types::SET_IIS_HANDOFF_REQUEST => {
-        let request = decode_request!(&authorized, SetIisHandoffRequest);
-        let response = state.set_iis_handoff(request).await;
-        send_response!(message_types::SET_IIS_HANDOFF_RESPONSE, response);
-      }
-      message_types::QUERY_LOGS_REQUEST => {
-        let request = decode_request!(&authorized, QueryLogsRequest);
-        let response = state.query_logs(request).await;
-        send_response!(message_types::QUERY_LOGS_RESPONSE, response);
-      }
-      message_types::QUERY_HISTORY_REQUEST => {
-        let request = decode_request!(&authorized, cadder_protocol::QueryHistoryRequest);
-        let response = state.query_history(request).await;
-        send_response!(message_types::QUERY_HISTORY_RESPONSE, response);
-      }
-      message_types::QUERY_AUTOSTART_REQUEST => {
-        let request = decode_request!(&authorized, QueryAutostartRequest);
-        let response = state.query_autostart(request.request_id).await;
-        send_response!(message_types::QUERY_AUTOSTART_RESPONSE, response);
-      }
-      message_types::SET_AUTOSTART_REQUEST => {
-        let request = decode_request!(&authorized, SetAutostartRequest);
-        let response = state.set_autostart(request).await;
-        send_response!(message_types::SET_AUTOSTART_RESPONSE, response);
-      }
-      message_types::SUBSCRIBE_STATE_REQUEST => {
-        let request = decode_request!(&authorized, SubscribeStateRequest);
-        let snapshot = state.snapshot().await;
-        let initial = cadder_protocol::StateChangedEvent {
-          request_id: request.request_id.clone(),
-          sequence_number: 0,
-          change_kind: cadder_protocol::StateChangeKind::Snapshot,
-          snapshot,
-          registration_id: None,
-        };
-        send_response!(message_types::STATE_CHANGED_EVENT, initial);
-        let mut subscription = state.subscribe();
-        while let Ok(mut event) = subscription.recv().await {
-          event.request_id = request.request_id.clone();
-          send_response!(message_types::STATE_CHANGED_EVENT, event);
-        }
-      }
-      message_types::SHUTDOWN_DAEMON_REQUEST => {
-        let request = decode_request!(&authorized, ShutdownDaemonRequest);
-        let mut response = state.shutdown().await;
-        response.request_id = request.request_id;
-        send_response!(message_types::SHUTDOWN_DAEMON_RESPONSE, response);
-        break;
-      }
-      other => {
-        let response = ProtocolErrorResponse::rejected(
-          request_id_from_payload(&envelope),
-          ProtocolError::unsupported_capability(
-            format!("message-type:{other}"),
-            cadder_protocol::current_capabilities(),
-          ),
-        );
-        send_response!(message_types::PROTOCOL_ERROR_RESPONSE, response);
-      }
+    };
+    if action == ConnectionAction::Close {
+      break;
     }
   }
 
   Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionAction {
+  Continue,
+  Close,
+}
+
+enum ConcurrentRead {
+  Pipelined(Option<RequestId>),
+  Closed,
+}
+
+async fn supervise_unary_request<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  state: &DaemonState,
+  owned: &mut ConnectionRegistrations,
+  authorized: &AuthorizedLegacyEnvelope<'_>,
+  envelope: &IpcEnvelope,
+  limits: IpcLimits,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  let definition = authorized.definition();
+  let deadline = limits.operation_deadline(definition.deadline());
+  let request_id = authorized.request_id();
+  let mut handler = Box::pin(dispatch_authorized_request(
+    writer, state, owned, authorized, envelope, deadline, limits,
+  ));
+  let mut next_frame = Box::pin(reader.next());
+
+  enum First<T> {
+    Handler(T),
+    Reader(ConcurrentRead),
+    Timeout,
+  }
+
+  let first = tokio::select! {
+    biased;
+    frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
+    _ = sleep_until(deadline) => First::Timeout,
+    result = &mut handler => First::Handler(result),
+  };
+
+  match first {
+    First::Handler(result) => {
+      let action = result?;
+      drop(handler);
+      drop(next_frame);
+      if reader.read_buffer().is_empty() {
+        Ok(action)
+      } else {
+        send_pipelined_error(writer, None, limits).await?;
+        Ok(ConnectionAction::Close)
+      }
+    }
+    First::Reader(concurrent) => {
+      drop(next_frame);
+      let handler_result = tokio::select! {
+        biased;
+        _ = sleep_until(deadline) => None,
+        result = &mut handler => Some(result),
+      };
+      drop(handler);
+
+      if let Some(result) = handler_result {
+        result?;
+      } else {
+        send_operation_timeout(writer, request_id, definition, limits).await?;
+      }
+      if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
+        send_pipelined_error(writer, pipelined_request_id, limits).await?;
+      }
+      Ok(ConnectionAction::Close)
+    }
+    First::Timeout => {
+      drop(handler);
+      drop(next_frame);
+      send_operation_timeout(writer, request_id, definition, limits).await?;
+      Ok(ConnectionAction::Close)
+    }
+  }
+}
+
+async fn supervise_state_subscription<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  state: &DaemonState,
+  authorized: &AuthorizedLegacyEnvelope<'_>,
+  limits: IpcLimits,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  let definition = authorized.definition();
+  let deadline = limits.operation_deadline(definition.deadline());
+  let request_id = authorized.request_id();
+  let mut setup = Box::pin(prepare_state_subscription(
+    writer, state, authorized, deadline, limits,
+  ));
+  let mut next_frame = Box::pin(reader.next());
+
+  enum SetupFirst<T> {
+    Setup(T),
+    Reader(ConcurrentRead),
+    Timeout,
+  }
+
+  let first = tokio::select! {
+    biased;
+    frame = &mut next_frame => SetupFirst::Reader(classify_concurrent_read(frame)),
+    _ = sleep_until(deadline) => SetupFirst::Timeout,
+    result = &mut setup => SetupFirst::Setup(result),
+  };
+  drop(next_frame);
+
+  let Some((stream_request_id, mut subscription)) = (match first {
+    SetupFirst::Setup(result) => {
+      let prepared = result?;
+      drop(setup);
+      if !reader.read_buffer().is_empty() {
+        send_pipelined_error(writer, None, limits).await?;
+        return Ok(ConnectionAction::Close);
+      }
+      prepared
+    }
+    SetupFirst::Reader(concurrent) => {
+      let setup_result = tokio::select! {
+        biased;
+        _ = sleep_until(deadline) => None,
+        result = &mut setup => Some(result),
+      };
+      drop(setup);
+      if let Some(result) = setup_result {
+        result?;
+      } else {
+        send_operation_timeout(writer, request_id, definition, limits).await?;
+      }
+      if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
+        send_pipelined_error(writer, pipelined_request_id, limits).await?;
+      }
+      return Ok(ConnectionAction::Close);
+    }
+    SetupFirst::Timeout => {
+      drop(setup);
+      send_operation_timeout(writer, request_id, definition, limits).await?;
+      return Ok(ConnectionAction::Close);
+    }
+  }) else {
+    return Ok(ConnectionAction::Continue);
+  };
+
+  loop {
+    tokio::select! {
+      biased;
+      frame = reader.next() => {
+        if let ConcurrentRead::Pipelined(pipelined_request_id) = classify_concurrent_read(frame) {
+          send_pipelined_error(writer, pipelined_request_id, limits).await?;
+        }
+        return Ok(ConnectionAction::Close);
+      }
+      event = subscription.recv() => {
+        let Ok(mut event) = event else {
+          return Ok(ConnectionAction::Close);
+        };
+        event.request_id = stream_request_id.clone();
+        write_envelope_until(
+          writer,
+          message_types::STATE_CHANGED_EVENT,
+          &event,
+          Instant::now() + limits.frame_completion,
+          limits.write_no_progress,
+        )
+        .await?;
+      }
+    }
+  }
+}
+
+async fn prepare_state_subscription<W>(
+  writer: &mut W,
+  state: &DaemonState,
+  authorized: &AuthorizedLegacyEnvelope<'_>,
+  deadline: Instant,
+  limits: IpcLimits,
+) -> Result<Option<(String, tokio::sync::broadcast::Receiver<StateChangedEvent>)>>
+where
+  W: AsyncWrite + Unpin,
+{
+  #[cfg(test)]
+  sleep(limits.dispatch_delay).await;
+
+  let Some(request) =
+    decode_or_reject_until::<SubscribeStateRequest, _>(writer, authorized, deadline, limits)
+      .await?
+  else {
+    return Ok(None);
+  };
+  let request_id = request.request_id;
+  let initial = StateChangedEvent {
+    request_id: request_id.clone(),
+    sequence_number: 0,
+    change_kind: cadder_protocol::StateChangeKind::Snapshot,
+    snapshot: state.snapshot().await,
+    registration_id: None,
+  };
+  write_envelope_until(
+    writer,
+    message_types::STATE_CHANGED_EVENT,
+    &initial,
+    deadline,
+    limits.write_no_progress,
+  )
+  .await?;
+  Ok(Some((request_id, state.subscribe())))
+}
+
+fn classify_concurrent_read(
+  frame: Option<std::result::Result<String, IpcCodecError>>,
+) -> ConcurrentRead {
+  match frame {
+    Some(Ok(line)) => ConcurrentRead::Pipelined(pipelined_request_id(&line)),
+    Some(Err(_)) => ConcurrentRead::Pipelined(None),
+    None => ConcurrentRead::Closed,
+  }
+}
+
+fn pipelined_request_id(line: &str) -> Option<RequestId> {
+  serde_json::from_str::<IpcEnvelope>(line)
+    .ok()
+    .and_then(|envelope| request_id_from_payload(&envelope))
+}
+
+async fn send_operation_timeout<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  definition: &cadder_protocol::OperationDefinition,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  let error = ProtocolError::new(
+    ProtocolErrorKind::Timeout,
+    ProtocolErrorCode::parse("timeout").expect("built-in error code is valid"),
+    format!(
+      "Cadder did not finish `{}` before its local operation deadline; the outcome is unknown.",
+      definition.name()
+    ),
+    Some("Check the current daemon state before retrying the operation.".into()),
+    definition.timeout_retryable(),
+  );
+  send_late_protocol_error(writer, request_id, error, limits).await
+}
+
+async fn send_pipelined_error<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  let error = ProtocolError::new(
+    ProtocolErrorKind::ProtocolViolation,
+    ProtocolErrorCode::parse("pipelined_request").expect("built-in error code is valid"),
+    "Cadder accepts one active request per local IPC connection.",
+    Some("Wait for the current response before sending the next request.".into()),
+    false,
+  );
+  send_late_protocol_error(writer, request_id, error, limits).await
+}
+
+async fn send_late_protocol_error<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  error: ProtocolError,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  let response = ProtocolErrorResponse::rejected(request_id, error);
+  write_envelope_until(
+    writer,
+    message_types::PROTOCOL_ERROR_RESPONSE,
+    &response,
+    Instant::now() + limits.write_no_progress,
+    limits.write_no_progress,
+  )
+  .await
+}
+
+async fn dispatch_authorized_request<W>(
+  writer: &mut W,
+  state: &DaemonState,
+  owned: &mut ConnectionRegistrations,
+  authorized: &AuthorizedLegacyEnvelope<'_>,
+  envelope: &IpcEnvelope,
+  deadline: Instant,
+  limits: IpcLimits,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  macro_rules! send_response {
+    ($message_type:expr, $response:expr) => {
+      write_envelope_until(
+        writer,
+        $message_type,
+        &$response,
+        deadline,
+        limits.write_no_progress,
+      )
+      .await?;
+    };
+  }
+  macro_rules! decode_request {
+    ($request:ty) => {
+      match decode_or_reject_until::<$request, _>(writer, authorized, deadline, limits).await? {
+        Some(request) => request,
+        None => return Ok(ConnectionAction::Continue),
+      }
+    };
+  }
+
+  #[cfg(test)]
+  sleep(limits.dispatch_delay).await;
+
+  match authorized.definition().name() {
+    message_types::REGISTER_ENTRYPOINT_REQUEST => {
+      let request = decode_request!(RegisterEntrypointRequest);
+      let nonce = request
+        .registration
+        .entrypoint_instance
+        .shim_session_nonce
+        .clone();
+      let response = state
+        .register(request.request_id, request.registration)
+        .await;
+      if let Some(id) = response
+        .registration_id
+        .as_ref()
+        .filter(|_| response.accepted)
+      {
+        owned.insert(id.clone(), nonce);
+      }
+      send_response!(message_types::REGISTER_ENTRYPOINT_RESPONSE, response);
+    }
+    message_types::UNREGISTER_ENTRYPOINT_REQUEST => {
+      let request = decode_request!(UnregisterEntrypointRequest);
+      let response = state
+        .unregister(
+          request.request_id,
+          &request.registration_id,
+          &request.shim_session_nonce,
+        )
+        .await;
+      if response.accepted {
+        owned.remove(&request.registration_id);
+      }
+      send_response!(message_types::UNREGISTER_ENTRYPOINT_RESPONSE, response);
+    }
+    message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
+      let request = decode_request!(HeartbeatEntrypointRequest);
+      let response = state.heartbeat(request).await;
+      send_response!(message_types::HEARTBEAT_ENTRYPOINT_RESPONSE, response);
+    }
+    message_types::QUERY_STATE_REQUEST => {
+      let request = decode_request!(QueryStateRequest);
+      let response = state.query_state(request.request_id).await;
+      send_response!(message_types::QUERY_STATE_RESPONSE, response);
+    }
+    message_types::SET_ENTRYPOINT_ENABLED_REQUEST => {
+      let request = decode_request!(SetEntrypointEnabledRequest);
+      let response = state.set_entrypoint_enabled(request).await;
+      send_response!(message_types::SET_ENTRYPOINT_ENABLED_RESPONSE, response);
+    }
+    message_types::SET_DOMAIN_ENABLED_REQUEST => {
+      let request = decode_request!(SetDomainEnabledRequest);
+      let response = state.set_domain_enabled(request).await;
+      send_response!(message_types::SET_DOMAIN_ENABLED_RESPONSE, response);
+    }
+    message_types::QUERY_IIS_BINDINGS_REQUEST => {
+      let request = decode_request!(QueryIisBindingsRequest);
+      let response = state.query_iis_bindings(request.request_id).await;
+      send_response!(message_types::QUERY_IIS_BINDINGS_RESPONSE, response);
+    }
+    message_types::SET_IIS_HANDOFF_REQUEST => {
+      let request = decode_request!(SetIisHandoffRequest);
+      let response = state.set_iis_handoff(request).await;
+      send_response!(message_types::SET_IIS_HANDOFF_RESPONSE, response);
+    }
+    message_types::QUERY_LOGS_REQUEST => {
+      let request = decode_request!(QueryLogsRequest);
+      let response = state.query_logs(request).await;
+      send_response!(message_types::QUERY_LOGS_RESPONSE, response);
+    }
+    message_types::QUERY_HISTORY_REQUEST => {
+      let request = decode_request!(cadder_protocol::QueryHistoryRequest);
+      let response = state.query_history(request).await;
+      send_response!(message_types::QUERY_HISTORY_RESPONSE, response);
+    }
+    message_types::QUERY_AUTOSTART_REQUEST => {
+      let request = decode_request!(QueryAutostartRequest);
+      let response = state.query_autostart(request.request_id).await;
+      send_response!(message_types::QUERY_AUTOSTART_RESPONSE, response);
+    }
+    message_types::SET_AUTOSTART_REQUEST => {
+      let request = decode_request!(SetAutostartRequest);
+      let response = state.set_autostart(request).await;
+      send_response!(message_types::SET_AUTOSTART_RESPONSE, response);
+    }
+    message_types::SUBSCRIBE_STATE_REQUEST => {
+      return Err(anyhow::anyhow!(
+        "state subscription reached the unary IPC dispatcher"
+      ));
+    }
+    message_types::SHUTDOWN_DAEMON_REQUEST => {
+      let request = decode_request!(ShutdownDaemonRequest);
+      let mut response = state.shutdown().await;
+      response.request_id = request.request_id;
+      send_response!(message_types::SHUTDOWN_DAEMON_RESPONSE, response);
+      return Ok(ConnectionAction::Close);
+    }
+    other => {
+      let response = ProtocolErrorResponse::rejected(
+        request_id_from_payload(envelope),
+        ProtocolError::unsupported_capability(
+          format!("message-type:{other}"),
+          cadder_protocol::current_capabilities(),
+        ),
+      );
+      send_response!(message_types::PROTOCOL_ERROR_RESPONSE, response);
+    }
+  }
+
+  Ok(ConnectionAction::Continue)
 }
 
 async fn accept_client_handshake<W>(
@@ -969,6 +1326,22 @@ where
   Ok(())
 }
 
+async fn write_envelope_until<W, T>(
+  writer: &mut W,
+  message_type: &str,
+  payload: &T,
+  terminal_deadline: Instant,
+  no_progress: Duration,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+  T: Serialize,
+{
+  let encoded = encode_envelope(message_type, payload)?;
+  write_frame_until(writer, &encoded, terminal_deadline, no_progress).await?;
+  Ok(())
+}
+
 fn encode_envelope<T>(
   message_type: &str,
   payload: &T,
@@ -1060,9 +1433,11 @@ impl<'a, T> OutboundIpcEnvelope<'a, T> {
   }
 }
 
-async fn decode_or_reject<T, W>(
+async fn decode_or_reject_until<T, W>(
   writer: &mut W,
   envelope: &AuthorizedLegacyEnvelope<'_>,
+  deadline: Instant,
+  limits: IpcLimits,
 ) -> Result<Option<T>>
 where
   T: DeserializeOwned,
@@ -1072,7 +1447,14 @@ where
     Ok(request) => Ok(Some(request)),
     Err(error) => {
       let response = ProtocolErrorResponse::rejected(envelope.request_id(), error);
-      write_envelope(writer, message_types::PROTOCOL_ERROR_RESPONSE, &response).await?;
+      write_envelope_until(
+        writer,
+        message_types::PROTOCOL_ERROR_RESPONSE,
+        &response,
+        deadline,
+        limits.write_no_progress,
+      )
+      .await?;
       Ok(None)
     }
   }
@@ -3019,6 +3401,253 @@ mod tests {
     drop(accepted);
     let replacement = connect_session_eventually(&daemon.paths).await;
     drop(replacement);
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_reject_pipelining_after_the_first_response() {
+    let daemon = RunningTestDaemon::start().await;
+    let conn = connect_authenticated(&daemon.paths).await;
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    let first = encode_envelope(
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "ipc-limits-pipeline-first".to_string(),
+      },
+    )
+    .unwrap();
+    let second = encode_envelope(
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "ipc-limits-pipeline-second".to_string(),
+      },
+    )
+    .unwrap();
+    writer.write_all(&[first, second].concat()).await.unwrap();
+
+    let first: IpcEnvelope = serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(first.message_type, message_types::QUERY_STATE_RESPONSE);
+    let violation: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    let violation: ProtocolErrorResponse = violation.decode().unwrap();
+    assert_eq!(violation.request_id, "ipc-limits-pipeline-second");
+    assert_eq!(violation.error.kind, ProtocolErrorKind::ProtocolViolation);
+    assert_eq!(violation.error.code.as_str(), "pipelined_request");
+    assert!(reader.next().await.is_none());
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_reject_a_partial_pipelined_frame_after_the_first_response() {
+    let daemon = RunningTestDaemon::start().await;
+    let conn = connect_authenticated(&daemon.paths).await;
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    let first = encode_envelope(
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "ipc-limits-partial-pipeline-first".to_string(),
+      },
+    )
+    .unwrap();
+    writer
+      .write_all(&[first.as_slice(), b"{"].concat())
+      .await
+      .unwrap();
+
+    let first: IpcEnvelope = serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(first.message_type, message_types::QUERY_STATE_RESPONSE);
+    let violation: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    let violation: ProtocolErrorResponse = violation.decode().unwrap();
+    assert_eq!(violation.request_id, "unknown");
+    assert_eq!(violation.error.code.as_str(), "pipelined_request");
+    assert!(reader.next().await.is_none());
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_return_retryable_ordinary_operation_timeout() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      ordinary_operation: Duration::from_millis(25),
+      dispatch_delay: Duration::from_millis(100),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut session = CadderSession::connect(&daemon.paths).await.unwrap();
+
+    let error = session
+      .request::<QueryStateRequest>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "ipc-limits-ordinary-timeout".to_string(),
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Timeout,
+      "timeout",
+      "ipc-limits-ordinary-timeout",
+      "Cadder did not finish `query-state-request` before its local operation deadline; the outcome is unknown.",
+      Some("Check the current daemon state before retrying the operation."),
+      true,
+    );
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_return_non_retryable_reload_timeout() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      reload_operation: Duration::from_millis(25),
+      dispatch_delay: Duration::from_millis(100),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut session = CadderSession::connect(&daemon.paths).await.unwrap();
+
+    let error = session
+      .request::<SetEntrypointEnabledRequest>(
+        message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
+        message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
+        &SetEntrypointEnabledRequest {
+          request_id: "ipc-limits-reload-timeout".to_string(),
+          registration_id: "missing".to_string(),
+          shim_session_nonce: None,
+          enabled: false,
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Timeout,
+      "timeout",
+      "ipc-limits-reload-timeout",
+      "Cadder did not finish `set-entrypoint-enabled-request` before its local operation deadline; the outcome is unknown.",
+      Some("Check the current daemon state before retrying the operation."),
+      false,
+    );
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_allow_reload_past_the_ordinary_budget() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      ordinary_operation: Duration::from_millis(25),
+      reload_operation: Duration::from_millis(250),
+      dispatch_delay: Duration::from_millis(75),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut session = CadderSession::connect(&daemon.paths).await.unwrap();
+
+    let response: BasicResponse = session
+      .request::<SetEntrypointEnabledRequest>(
+        message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
+        message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
+        &SetEntrypointEnabledRequest {
+          request_id: "ipc-limits-reload-extended".to_string(),
+          registration_id: "missing".to_string(),
+          shim_session_nonce: None,
+          enabled: false,
+        },
+      )
+      .await
+      .unwrap();
+
+    assert!(!response.accepted);
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_stream_setup_deadline_does_not_end_an_active_stream() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      stream_setup: Duration::from_millis(25),
+      ..IpcLimits::default()
+    })
+    .await;
+    let conn = connect_authenticated(&daemon.paths).await;
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    write_envelope(
+      &mut writer,
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      &SubscribeStateRequest {
+        request_id: "ipc-limits-stream".to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    let initial: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(initial.message_type, message_types::STATE_CHANGED_EVENT);
+
+    sleep(Duration::from_millis(75)).await;
+    write_envelope(
+      &mut writer,
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "ipc-limits-stream-pipeline".to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    let violation: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    let violation: ProtocolErrorResponse = violation.decode().unwrap();
+    assert_eq!(violation.request_id, "ipc-limits-stream-pipeline");
+    assert_eq!(violation.error.code.as_str(), "pipelined_request");
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_stream_pipeline_preserves_initial_response_order() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      stream_setup: Duration::from_millis(250),
+      dispatch_delay: Duration::from_millis(75),
+      ..IpcLimits::default()
+    })
+    .await;
+    let conn = connect_authenticated(&daemon.paths).await;
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    let subscription = encode_envelope(
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      &SubscribeStateRequest {
+        request_id: "ipc-limits-stream-ordered".to_string(),
+      },
+    )
+    .unwrap();
+    let pipelined = encode_envelope(
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: "ipc-limits-stream-ordered-pipeline".to_string(),
+      },
+    )
+    .unwrap();
+    writer
+      .write_all(&[subscription, pipelined].concat())
+      .await
+      .unwrap();
+
+    let initial: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(initial.message_type, message_types::STATE_CHANGED_EVENT);
+    let violation: IpcEnvelope =
+      serde_json::from_str(&reader.next().await.unwrap().unwrap()).unwrap();
+    let violation: ProtocolErrorResponse = violation.decode().unwrap();
+    assert_eq!(violation.request_id, "ipc-limits-stream-ordered-pipeline");
+    assert_eq!(violation.error.code.as_str(), "pipelined_request");
+
     daemon.stop().await;
   }
 
