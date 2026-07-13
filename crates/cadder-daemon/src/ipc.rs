@@ -53,8 +53,7 @@ use tokio::{
   sync::{Semaphore, watch},
   time::{Instant, sleep, sleep_until, timeout_at},
 };
-use tokio_util::codec::FramedRead;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{codec::FramedRead, sync::CancellationToken, task::TaskTracker};
 
 type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
 
@@ -77,6 +76,22 @@ struct ServerHandshakeIdentity {
   daemon_instance_id: Box<str>,
   supported_versions: ProtocolVersionRange,
   capabilities: Box<[CapabilityId]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownOrigin {
+  IpcRequest,
+  ExternalSignal,
+}
+
+#[derive(Debug, Clone)]
+struct AcceptedConnectionContext {
+  state: DaemonState,
+  owner_principal: IpcPrincipal,
+  policy: IpcSecurityPolicy,
+  peer_identity_resolver: IpcPeerIdentityResolver,
+  handshake_identity: ServerHandshakeIdentity,
+  control: ConnectionControl,
 }
 
 impl From<&IpcEndpointMetadata> for ServerHandshakeIdentity {
@@ -211,13 +226,17 @@ impl DaemonServer {
     let shutdown_signal = self.state.shutdown_signal();
     let connection_permits = Arc::new(Semaphore::new(self.limits.max_connections));
     let stream_cancellation = CancellationToken::new();
+    let connection_cancellation = CancellationToken::new();
+    let connection_tasks = TaskTracker::new();
 
-    loop {
+    let shutdown_origin = loop {
       tokio::select! {
-          _ = shutdown_signal.wait() => break,
+          _ = shutdown_signal.wait() => break ShutdownOrigin::IpcRequest,
           changed = shutdown.changed() => {
-              if changed.is_ok() && *shutdown.borrow() {
-                  break;
+              match changed {
+                Ok(()) if *shutdown.borrow() => break ShutdownOrigin::ExternalSignal,
+                Ok(()) => {}
+                Err(_) => break ShutdownOrigin::ExternalSignal,
               }
           }
           accepted = listener.accept() => {
@@ -235,34 +254,24 @@ impl DaemonServer {
                       let peer_identity_resolver = self.peer_identity_resolver.clone();
                       let handshake_identity = handshake_identity.clone();
                       let stream_cancellation = stream_cancellation.clone();
+                      let connection_cancellation = connection_cancellation.child_token();
                       let limits = self.limits;
-                      tokio::spawn(async move {
+                      connection_tasks.spawn(async move {
                           let _connection_permit = connection_permit;
-                          match timeout_at(
-                            accepted_at + limits.first_frame_byte,
-                            authenticate_accepted_connection(
-                              conn,
-                              owner_principal,
-                              policy,
-                              peer_identity_resolver,
-                            ),
-                          ).await {
-                            Ok(Ok((conn, security))) => {
-                              let _ = handle_connection(
-                                conn,
-                                state,
-                                security,
-                                handshake_identity,
-                                ConnectionControl {
-                                  accepted_at,
-                                  limits,
-                                  stream_cancellation,
-                                },
-                              ).await;
-                            }
-                            Ok(Err(error)) => log_peer_authentication_denial(&state, &error),
-                            Err(_) => {}
-                          }
+                          serve_accepted_connection(conn, AcceptedConnectionContext {
+                            state,
+                            owner_principal,
+                            policy,
+                            peer_identity_resolver,
+                            handshake_identity,
+                            control: ConnectionControl {
+                              accepted_at,
+                              limits,
+                              stream_cancellation,
+                              connection_cancellation,
+                            },
+                          })
+                          .await;
                       });
                   }
                   Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -270,12 +279,29 @@ impl DaemonServer {
               }
           }
       }
-    }
+    };
 
+    self.state.begin_operation_drain();
+    drop(listener);
+    connection_tasks.close();
     stream_cancellation.cancel();
-    endpoint_publication
+    connection_cancellation.cancel();
+    connection_tasks.wait().await;
+    let runtime_shutdown = if shutdown_origin == ShutdownOrigin::ExternalSignal {
+      Some(self.state.prepare_shutdown().await)
+    } else {
+      None
+    };
+    let cleanup = endpoint_publication
       .cleanup()
-      .context("remove the current IPC discovery generation")?;
+      .context("remove the current IPC discovery generation");
+    if let Some(response) = runtime_shutdown
+      && !response.accepted
+    {
+      cleanup?;
+      anyhow::bail!(response.message);
+    }
+    cleanup?;
     Ok(())
   }
 }
@@ -368,6 +394,36 @@ async fn authenticate_accepted_connection(
   Ok((conn, security))
 }
 
+async fn serve_accepted_connection(conn: Stream, context: AcceptedConnectionContext) {
+  let AcceptedConnectionContext {
+    state,
+    owner_principal,
+    policy,
+    peer_identity_resolver,
+    handshake_identity,
+    control,
+  } = context;
+  let authenticated = tokio::select! {
+    _ = control.connection_cancellation.cancelled() => return,
+    authenticated = timeout_at(
+      control.accepted_at + control.limits.first_frame_byte,
+      authenticate_accepted_connection(
+        conn,
+        owner_principal,
+        policy,
+        peer_identity_resolver,
+      ),
+    ) => authenticated,
+  };
+  match authenticated {
+    Ok(Ok((conn, security))) => {
+      let _ = handle_connection(conn, state, security, handshake_identity, control).await;
+    }
+    Ok(Err(error)) => log_peer_authentication_denial(&state, &error),
+    Err(_) => {}
+  }
+}
+
 fn log_peer_authentication_denial(state: &DaemonState, error: &PeerAuthenticationError) {
   state.logs().append(
     LogStreamIdentity::runtime_control(),
@@ -393,6 +449,7 @@ struct ConnectionControl {
   accepted_at: Instant,
   limits: IpcLimits,
   stream_cancellation: CancellationToken,
+  connection_cancellation: CancellationToken,
 }
 
 async fn handle_connection(
@@ -403,15 +460,17 @@ async fn handle_connection(
   control: ConnectionControl,
 ) -> Result<()> {
   let mut owned = ConnectionRegistrations::default();
-  let result = handle_connection_loop(
-    conn,
-    state.clone(),
-    &mut owned,
-    &security,
-    &handshake_identity,
-    &control,
-  )
-  .await;
+  let result = tokio::select! {
+    _ = control.connection_cancellation.cancelled() => Ok(()),
+    result = handle_connection_loop(
+      conn,
+      state.clone(),
+      &mut owned,
+      &security,
+      &handshake_identity,
+      &control,
+    ) => result,
+  };
   for (id, nonce) in owned.into_entries() {
     state.unregister_for_ipc_disconnect(&id, &nonce).await;
   }
@@ -517,6 +576,30 @@ async fn handle_connection_loop(
 enum ConnectionAction {
   Continue,
   Close,
+}
+
+struct PendingShutdownSignal<'a> {
+  state: &'a DaemonState,
+  armed: bool,
+}
+
+impl<'a> PendingShutdownSignal<'a> {
+  fn new(state: &'a DaemonState) -> Self {
+    Self { state, armed: true }
+  }
+
+  fn fire(mut self) {
+    self.state.request_shutdown();
+    self.armed = false;
+  }
+}
+
+impl Drop for PendingShutdownSignal<'_> {
+  fn drop(&mut self) {
+    if self.armed {
+      self.state.request_shutdown();
+    }
+  }
 }
 
 enum ConcurrentRead {
@@ -1365,9 +1448,15 @@ where
     }
     message_types::SHUTDOWN_DAEMON_REQUEST => {
       let request = decode_request!(ShutdownDaemonRequest);
-      let mut response = state.shutdown().await;
+      let mut response = state.prepare_shutdown().await;
       response.request_id = request.request_id;
-      send_response!(message_types::SHUTDOWN_DAEMON_RESPONSE, response);
+      let pending_shutdown = response.accepted.then(|| PendingShutdownSignal::new(state));
+      let write_result =
+        write_envelope(writer, message_types::SHUTDOWN_DAEMON_RESPONSE, &response).await;
+      if let Some(pending_shutdown) = pending_shutdown {
+        pending_shutdown.fire();
+      }
+      write_result?;
       return Ok(ConnectionAction::Close);
     }
     other => {
@@ -3452,6 +3541,64 @@ mod tests {
         .lookup(message_types::SHUTDOWN_DAEMON_REQUEST)
         .unwrap()
     ));
+  }
+
+  #[tokio::test]
+  async fn operation_fence_external_shutdown_drains_tracked_connections_before_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let observed_state = state.clone();
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      DaemonServer::new(server_paths, state)
+        .run_until(shutdown_rx)
+        .await
+    });
+    wait_for_ready(&paths).await;
+    let mut connection = connect_authenticated(&paths).await;
+
+    shutdown.send(true).unwrap();
+    timeout(Duration::from_secs(2), server)
+      .await
+      .expect("server should join tracked connections during drain")
+      .unwrap()
+      .unwrap();
+
+    assert_eq!(
+      observed_state.issue_operation_fence().unwrap_err(),
+      CommitRejection::Draining
+    );
+    assert!(discover_ipc_endpoint(&paths).is_err());
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(1), connection.read(&mut byte))
+      .await
+      .expect("drained connection should close")
+      .unwrap();
+    assert_eq!(read, 0);
+  }
+
+  #[tokio::test]
+  async fn shutdown_signal_guard_requests_shutdown_when_response_future_is_cancelled() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state =
+      DaemonState::with_runtime_paths(CaddyConfigCoordinator::new_mock(paths.clone()), paths)
+        .await
+        .unwrap();
+    let shutdown = state.shutdown_signal();
+
+    drop(PendingShutdownSignal::new(&state));
+
+    timeout(Duration::from_secs(1), shutdown.wait())
+      .await
+      .expect("cancelled shutdown response must still wake the server");
   }
 
   #[tokio::test]

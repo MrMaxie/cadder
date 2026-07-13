@@ -205,18 +205,18 @@ impl DaemonState {
     registration_id: &str,
     shim_session_nonce: &str,
   ) {
-    let response = match self.issue_operation_fence() {
-      Ok(fence) => self
-        .unregister_fenced(
-          "pipe-disconnect".to_string(),
-          registration_id,
-          shim_session_nonce,
-          &fence,
-        )
-        .await
-        .ok(),
-      Err(_) => None,
+    let Ok(fence) = self.issue_operation_fence() else {
+      return;
     };
+    let response = self
+      .unregister_fenced(
+        "pipe-disconnect".to_string(),
+        registration_id,
+        shim_session_nonce,
+        &fence,
+      )
+      .await
+      .ok();
     if !response.as_ref().is_some_and(|response| response.accepted) {
       self.logs.append(
         LogStreamIdentity::runtime_control(),

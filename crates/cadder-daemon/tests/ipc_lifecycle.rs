@@ -360,11 +360,25 @@ async fn shutdown_daemon_request_reports_stop_timeout_and_keeps_server_available
     )
     .await
     .unwrap();
+  let heartbeat: BasicResponse = harness
+    .client
+    .request(
+      message_types::HEARTBEAT_ENTRYPOINT_REQUEST,
+      message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
+      &HeartbeatEntrypointRequest {
+        request_id: new_request_id("after-failed-shutdown"),
+        registration_id: "shim-1".to_string(),
+        shim_session_nonce: "nonce-1".to_string(),
+      },
+    )
+    .await
+    .unwrap();
   let snapshot = query_state(&harness.client).await;
   let history = query_history(&harness.client, cadder_protocol::HistoryKind::Runtime).await;
 
   assert!(!response.accepted);
   assert!(response.message.contains("timed out"));
+  assert!(heartbeat.accepted, "{}", heartbeat.message);
   assert_eq!(snapshot.registrations.len(), 1);
   assert!(
     history

@@ -74,6 +74,10 @@ impl DaemonState {
     self.operation_fences.issue()
   }
 
+  pub(crate) fn begin_operation_drain(&self) -> u64 {
+    self.operation_fences.begin_drain()
+  }
+
   pub fn logs(&self) -> CaddyLogStore {
     self.logs.clone()
   }

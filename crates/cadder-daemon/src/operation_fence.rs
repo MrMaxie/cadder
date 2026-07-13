@@ -57,15 +57,11 @@ impl OperationFenceAuthority {
     })
   }
 
-  #[cfg_attr(
-    not(test),
-    expect(
-      dead_code,
-      reason = "the shutdown coordinator consumes this lifecycle transition in task 3.5"
-    )
-  )]
   pub(crate) fn begin_drain(&self) -> u64 {
     let mut lifecycle = self.lifecycle.lock().expect("lifecycle lock poisoned");
+    if lifecycle.phase == LifecyclePhase::Draining {
+      return lifecycle.number;
+    }
     lifecycle.phase = LifecyclePhase::Draining;
     lifecycle.number = lifecycle
       .number
@@ -142,6 +138,15 @@ mod tests {
 
     assert!(old.cancellation().is_cancelled());
     assert_eq!(old.commit(|| ()).unwrap_err(), CommitRejection::StaleEpoch);
+    assert_eq!(authority.issue().unwrap_err(), CommitRejection::Draining);
+  }
+
+  #[test]
+  fn operation_fence_drain_is_idempotent() {
+    let authority = OperationFenceAuthority::default();
+
+    assert_eq!(authority.begin_drain(), 1);
+    assert_eq!(authority.begin_drain(), 1);
     assert_eq!(authority.issue().unwrap_err(), CommitRejection::Draining);
   }
 
