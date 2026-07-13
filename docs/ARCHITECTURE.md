@@ -66,22 +66,24 @@ Supported v1.0 public messages include:
 
 ## Caddy Integration
 
-Real Caddy resolution is layered and recursion-safe. The effective command is selected in this order:
+Real Caddy resolution is layered and recursion-safe. The daemon selects one executable for its lifetime in this order:
 
-1. CLI override.
-2. `cadder.toml` in the current working directory.
-3. `cadder.toml` next to the executable.
-4. Environment variables, including `CADDER_CADDY_REAL_COMMAND`.
-5. `caddy` on PATH as the final fallback.
+1. An absolute `--real-caddy` daemon-start override.
+2. The selected profile and then `defaults` in the standard per-user `cadder.toml`.
+3. The selected profile and then `defaults` in the administrator-owned system `cadder.toml`.
+4. A trusted native `caddy` executable on PATH.
 
 The TOML schema is:
 
 ```toml
-[caddy]
-real_command = "/absolute/path/to/caddy"
+[defaults]
+real_caddy = "/absolute/path/to/caddy"
+
+[profiles.dev]
+real_caddy = "/absolute/path/to/development/caddy"
 ```
 
-PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`, so Cadder does not resolve its own shim as real Caddy.
+Project files, registration working directories, executable-adjacent files, environment selectors, and shim flags never select real Caddy. Cadder validates owner and mutation permissions for the file and its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
 
 For each registration, Cadder runs:
 

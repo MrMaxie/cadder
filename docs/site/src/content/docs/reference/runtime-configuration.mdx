@@ -83,21 +83,17 @@ Supported platforms use native startup mechanisms and remove Cadder daemon start
 
 ## Configuration Sources
 
-Cadder supports real Caddy resolution through:
+Cadder resolves real Caddy through:
 
-- CLI overrides;
-- `cadder.toml` in the project working directory;
-- `cadder.toml` next to the Cadder executable;
-- environment variables;
-- safe `PATH` fallback.
+- an absolute daemon-start override;
+- the selected profile and `defaults` in the standard per-user `cadder.toml`;
+- the selected profile and `defaults` in the administrator-owned system `cadder.toml`;
+- a trusted native `caddy` on `PATH`.
 
 The user-facing TOML format is documented in [cadder.toml](../../user-guide/cadder-toml/).
 
-## Environment Aliases
+## Environment boundaries
 
-Cadder accepts both environment variable names below for the same value:
+`CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND` do not select an executable. Project processes and shim invocations therefore cannot replace the daemon's trusted real-Caddy source through inherited environment variables.
 
-- `CADDER_CADDY_REAL_COMMAND`
-- `CADDER_CADDY__REAL_COMMAND`
-
-When both are set, `CADDER_CADDY_REAL_COMMAND` wins. Prefer `cadder.toml` for normal user setups because environment variables are easier to lose across shells and terminals.
+`CADDER_RUNTIME_DIR` remains an explicit advanced runtime-location override. It changes where one Cadder profile stores and discovers its own runtime; it does not select a program to execute.

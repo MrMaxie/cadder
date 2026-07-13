@@ -18,17 +18,17 @@ Repository: [github.com/MrMaxie/cadder](https://github.com/MrMaxie/cadder)
 - The `caddy` shim keeps `caddy run` usable for project workflows.
 - `cadder` gives scripts and agents a non-interactive CLI.
 - `cadder` also provides the interactive TUI operator surface.
-- `cadder.toml` points Cadder at the real Caddy binary without replacing it.
+- Per-user `cadder.toml` profiles select a trusted real Caddy executable without allowing project overrides.
 - Domains can be enabled or disabled without killing unrelated project sessions.
 - Cadder avoids owning Caddy processes it did not start.
 
 ## Binaries
 
-- `caddy` is the Caddy-compatible shim.
+- `cadder-caddy` is the installed Caddy-compatible shim; `cadder setup shim` manages the optional `caddy` alias.
 - `cadderd` is the daemon.
 - `cadder` is the CLI and TUI operator executable.
 
-Runtime installers and portable archives contain `caddy`, `cadderd`, `cadder`, and `cadder.toml`. Each binary supports `--help` and `--version`. See [Releases and downloads](reference/releases/) for artifact names and checksums.
+Runtime installers and portable archives contain `cadder-caddy`, `cadderd`, `cadder`, and a `cadder.toml` template. Each binary supports `--help` and `--version`. See [Releases and downloads](reference/releases/) for artifact names and checksums.
 
 ## Runtime Installer
 
@@ -79,6 +79,6 @@ Runtime installers and portable archives contain `caddy`, `cadderd`, `cadder`, a
 <script src="cadder-downloads.js"></script>
 
 1. Download either the runtime installer or the portable runtime archive for your operating system.
-2. Create `cadder.toml` with the path to the real Caddy binary.
-3. Start `cadderd`, then run Cadder's `caddy` shim instead of the real `caddy` command.
+2. Copy the `cadder.toml` template to the per-user configuration directory and set an absolute real-Caddy path, or use a trusted `caddy` on `PATH`.
+3. Run `cadder setup shim`, start `cadderd`, then use the optional `caddy` alias for managed projects.
 4. Use `cadder` for CLI automation or TUI operation.

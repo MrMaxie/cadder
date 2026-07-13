@@ -50,7 +50,7 @@ cargo xtask check
 - Cadder is cross-platform by default. OS-specific code must sit behind a small abstraction and keep Windows, Linux, and macOS behavior explicit.
 - Runtime state is per user and rooted in `directories::ProjectDirs`, with `CADDER_RUNTIME_DIR` available for tests and custom deployments.
 - IPC is versioned newline-delimited JSON over a per-user local socket via `interprocess`.
-- The `caddy` shim must never recursively execute itself when Cadder needs real Caddy. Real Caddy resolution checks `CADDER_CADDY_REAL_COMMAND` before PATH.
+- The `caddy` shim must never recursively execute itself when Cadder needs real Caddy. Real Caddy comes only from an explicit daemon override, trusted per-user or system configuration, or a safe PATH that excludes the shim by file identity.
 - The daemon owns only the real Caddy process it starts. It must not enumerate or kill unrelated Caddy processes.
 - Normal operation must work at user privilege. Elevated behavior is limited to explicit IIS handoff or an explicitly elevated daemon, and user-level clients must retain controlled access to that daemon through documented local IPC policy.
 

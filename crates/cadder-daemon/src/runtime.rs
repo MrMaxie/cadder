@@ -31,13 +31,13 @@ use crate::caddy::RealCaddyResolver;
 
 #[derive(Debug, Clone)]
 pub enum CaddyRuntime {
-  Real(ProcessRuntime),
+  Real(Box<ProcessRuntime>),
   Mock(MockCaddyRuntime),
 }
 
 impl CaddyRuntime {
   pub fn real(resolver: RealCaddyResolver, paths: RuntimePaths) -> Self {
-    Self::Real(ProcessRuntime::new(resolver, paths))
+    Self::Real(Box::new(ProcessRuntime::new(resolver, paths)))
   }
 
   pub fn mock(paths: RuntimePaths) -> Self {
@@ -84,12 +84,12 @@ impl CaddyRuntime {
       Self::Real(runtime) => {
         let (receipt, outcome) = runtime.begin_apply_config(rendered, logs).await?;
         Ok(RuntimeApplyAttempt {
-          receipt: RuntimeApplyReceipt::Real(receipt),
+          receipt: RuntimeApplyReceipt::Real(Box::new(receipt)),
           outcome,
         })
       }
       Self::Mock(runtime) => Ok(RuntimeApplyAttempt {
-        receipt: RuntimeApplyReceipt::Mock(runtime.begin_apply_config(rendered).await?),
+        receipt: RuntimeApplyReceipt::Mock(Box::new(runtime.begin_apply_config(rendered).await?)),
         outcome: Ok(()),
       }),
     }
@@ -121,12 +121,12 @@ impl CaddyRuntime {
       Self::Real(runtime) => {
         let (receipt, outcome) = runtime.begin_stop(logs).await?;
         Ok(RuntimeStopAttempt {
-          receipt: RuntimeStopReceipt::Real(receipt),
+          receipt: RuntimeStopReceipt::Real(Box::new(receipt)),
           outcome,
         })
       }
       Self::Mock(runtime) => Ok(RuntimeStopAttempt {
-        receipt: RuntimeStopReceipt::Mock(runtime.begin_stop().await?),
+        receipt: RuntimeStopReceipt::Mock(Box::new(runtime.begin_stop().await?)),
         outcome: Ok(()),
       }),
     }
@@ -175,8 +175,8 @@ impl RuntimeStopAttempt {
 
 #[derive(Debug)]
 pub(crate) enum RuntimeStopReceipt {
-  Real(ProcessRuntimeStopReceipt),
-  Mock(MockRuntimeStopReceipt),
+  Real(Box<ProcessRuntimeStopReceipt>),
+  Mock(Box<MockRuntimeStopReceipt>),
 }
 
 impl RuntimeStopReceipt {
@@ -201,8 +201,8 @@ impl RuntimeStopReceipt {
 
 #[derive(Debug)]
 pub(crate) enum RuntimeApplyReceipt {
-  Real(ProcessRuntimeApplyReceipt),
-  Mock(MockRuntimeApplyReceipt),
+  Real(Box<ProcessRuntimeApplyReceipt>),
+  Mock(Box<MockRuntimeApplyReceipt>),
 }
 
 impl RuntimeApplyReceipt {
@@ -237,7 +237,7 @@ impl RuntimeApplyReceipt {
 
 impl From<ProcessRuntime> for CaddyRuntime {
   fn from(runtime: ProcessRuntime) -> Self {
-    Self::Real(runtime)
+    Self::Real(Box::new(runtime))
   }
 }
 
@@ -1128,7 +1128,7 @@ mod tests {
     let command_log = temp.path().join("fake-caddy.log");
     let run_exit_file = temp.path().join("fake-caddy.exit");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, mode);
-    let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
+    let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
     let runtime = ProcessRuntime::with_timeouts(resolver, paths, short_timeouts());
 
     RuntimeFixture {

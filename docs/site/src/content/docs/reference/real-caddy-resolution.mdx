@@ -1,68 +1,45 @@
 ---
 title: Real Caddy resolution
-description: Exact precedence used when Cadder finds the real Caddy binary.
+description: Trusted sources, precedence, validation, and recursion protection for real Caddy.
 ---
 
-Cadder never embeds Caddy. For normal use, configure `[caddy].real_command` in `cadder.toml` next to the Cadder binaries. Use a project-local `cadder.toml` when a project needs its own real Caddy path. Use CLI flags, environment variables, and PATH fallback as advanced or temporary overrides.
+Cadder does not embed Caddy. The daemon resolves one trusted Caddy executable when it starts and keeps that path for the daemon lifetime. Project registration never changes the selected executable.
 
-## Actual resolver precedence
+## Precedence
 
-The resolver uses this exact order:
+The daemon uses this exact order:
 
-1. CLI override: `--real-caddy-command` for `cadderd` and `cadder` daemon launch, or `--cadder-real-caddy-command` for the shim.
-2. `[caddy].real_command` in `cadder.toml` in the current working directory.
-3. `[caddy].real_command` in `cadder.toml` next to the executable.
-4. Environment variables, including `CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND`.
-5. A safe real `caddy` executable on `PATH`.
+1. An absolute `--real-caddy` daemon-start override.
+2. `profiles.<profile>.real_caddy` in the standard per-user `cadder.toml`.
+3. `defaults.real_caddy` in the per-user file.
+4. `profiles.<profile>.real_caddy` in the administrator-owned system file.
+5. `defaults.real_caddy` in the system file.
+6. A trusted native executable named `caddy` on `PATH`.
 
-This differs from the recommended setup order because explicit per-command and per-project overrides must win at runtime.
+An invalid higher-priority value stops resolution. Cadder does not hide a broken or unsafe configuration by selecting a lower-priority executable.
 
-## Shim recovery for `caddy run`
+Project files, registration working directories, files next to Cadder executables, `CADDER_CADDY_REAL_COMMAND`, and shim options do not participate in this chain.
 
-When the PATH-facing shim handles `caddy run`, it first tries to attach to the configured Cadder runtime. If no daemon is available, recovery stays inside Cadder's daemon ownership boundary:
+## Path validation
 
-1. Start the missing daemon through Cadder's detached background launch contract.
-2. Attach to `cadderd` and register the project definition through the Cadder protocol.
-3. Print a terminal error that includes the original attach failure, daemon-start result, and concrete retry guidance.
+Every configured value is an absolute path. Cadder canonicalizes the executable, requires a regular native executable, and validates its owner and parent directories without changing their permissions.
 
-The shim does not run `caddy run` as an unmanaged real Caddy fallback. The resolver described above is used by `cadderd` to find the real Caddy execution target after the daemon accepts managed state.
+On Windows, the owner is the runtime account, `SYSTEM`, `Administrators`, or `TrustedInstaller`, according to the source. A less-trusted access-control entry cannot grant write, delete, rename, owner-change, or DACL-change authority. Reparse points and `.bat` or `.cmd` scripts are rejected.
 
-Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` may still delegate to the safely resolved real Caddy binary. If `cadderd` is unavailable, the shim labels stderr so the command output is understood as real-Caddy inspection, not Cadder runtime state.
+On Linux and macOS, the owner is the runtime account or `root`, according to the source. Group-writable and world-writable components, symbolic links, and files without an executable bit are rejected.
 
-## Mock backend for development
+Configuration files pass the same provenance checks and are read through the validated file handle. This binds validation to the bytes Cadder parses.
 
-Set `CADDER_CADDY_BACKEND=mock` or pass `--caddy-backend mock` to use Cadder's development mock backend. In this mode the daemon does not resolve or execute a real Caddy binary, does not run `caddy adapt`, and does not bind HTTP or HTTPS ports. It records deterministic runtime state and effective config for local UI and operator workflows.
+## PATH and recursion safety
 
-`--real-caddy-command` cannot be combined with `--caddy-backend mock`. Leave the backend unset for normal use; the default is `real`.
+PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that fail the same trust policy.
 
-## TOML schema
+Cadder compares operating-system file identity, not just path text, when excluding its shim. A symlink or hardlink to `cadder-caddy` is therefore skipped even when it appears under the name `caddy`.
 
-```toml
-[caddy]
-real_command = "/absolute/path/to/caddy"
-```
+## Shim behavior
 
-The configured command can be:
+The shim does not accept a real-Caddy selector. `caddy run` attaches only to the running Cadder daemon; it never starts an unmanaged Caddy process as recovery.
 
-- an absolute path, such as `/opt/caddy/caddy` or `C:\Tools\Caddy\caddy.exe`;
-- a relative path with a path separator, such as `./tools/caddy`, resolved relative to the `cadder.toml` file that contains it;
-- a plain command, such as `caddy`, resolved through `PATH`.
+Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` use the same per-user/system/PATH resolver. Their stderr notice identifies the output as real-Caddy inspection rather than Cadder runtime state.
 
-`caddy-real` is not a built-in default. It works only when you configure it explicitly through CLI, `cadder.toml`, or an environment variable.
-
-## Environment aliases
-
-Both environment variable names set the same value:
-
-```sh
-CADDER_CADDY_REAL_COMMAND=/absolute/path/to/caddy
-CADDER_CADDY__REAL_COMMAND=/absolute/path/to/caddy
-```
-
-If both are present, `CADDER_CADDY_REAL_COMMAND` has precedence. Prefer `cadder.toml` for stable user setups and reserve environment variables for scripts or temporary overrides.
-
-## Recursion safety
-
-PATH fallback excludes the current executable and the known shim path from `CADDER_CADDY_SHIM_PATH`. When the shim starts the daemon, it passes its own path through that environment variable so the daemon does not select the shim as real Caddy.
-
-If no safe binary can be found, Cadder prints resolution help and asks you to configure the real Caddy command through one of the precedence layers above.
+If resolution fails, the error names the rejected source and the action that restores a trusted setup.

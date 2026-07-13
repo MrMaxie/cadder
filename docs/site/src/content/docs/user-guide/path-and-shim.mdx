@@ -1,35 +1,35 @@
 ---
 title: PATH and shim strategy
-description: Use Cadder with direct paths, a user-managed PATH directory, or an explicit shim copy without implying automatic PATH mutation.
+description: Invoke cadder-caddy directly or manage the optional caddy alias safely.
 ---
 
-Cadder's `caddy` binary is a compatibility shim. It is useful when you want existing `caddy run` habits to register projects with Cadder, while keeping daemon ownership in `cadderd`.
+`cadder-caddy` is Cadder's compatibility shim. It keeps existing `caddy run` habits available while daemon ownership remains in `cadderd`.
 
-Cadder does not need to own your shell setup. Use direct paths, put the shim on `PATH`, or wrap it in your own tooling.
+Cadder changes PATH-facing behavior only through the explicit `cadder setup shim` command.
 
 ## Direct invocation
 
 Use a direct path when you want to be explicit:
 
 ```powershell
-<path-to-cadder>\caddy run
+<path-to-cadder>\cadder-caddy run
 ```
 
 ```sh
-/path/to/cadder/caddy run
+/path/to/cadder/cadder-caddy run
 ```
 
 ## User-managed PATH
 
-If you want `caddy run` to go through Cadder, copy or symlink the Cadder shim into a directory you control under the name `caddy`, then put that directory before the real Caddy directory on `PATH`.
+Run `cadder setup shim` to create the optional `caddy` alias in a user-controlled directory. Cadder checks for collisions and records the alias provenance so `cadder setup shim --remove` removes only the alias it created.
 
 The real Caddy binary still needs to be resolvable by Cadder. The recommended place is [cadder.toml](../cadder-toml/).
 
-For `caddy run`, the shim is attach-first. If the Cadder daemon is missing, recovery stays inside Cadder's daemon ownership boundary:
+For `caddy run`, the shim is attach-only. If the Cadder daemon is missing, recovery stays explicit:
 
-1. Start `cadderd` through Cadder's detached background launch contract.
-2. Attach to `cadderd` and register the project definition through the Cadder protocol.
-3. Return a terminal error with next actions if daemon startup or attach fails.
+1. The shim states that no runtime state changed.
+2. It names `cadder daemon start` as the next action.
+3. It exits without starting real Caddy or a daemon.
 
 The shim does not run `caddy run` as an unmanaged real Caddy fallback. Real Caddy is started only by `cadderd` as the managed execution target after the daemon accepts the registration.
 
@@ -53,6 +53,6 @@ The practical idea is simple:
 
 - the `caddy` found by your shell is Cadder's shim;
 - the real Caddy executable is somewhere else;
-- `cadder.toml` points to that real executable.
+- the per-user `cadder.toml` or trusted PATH entry points to that real executable.
 
 For exact resolver precedence, see [Real Caddy resolution](../../reference/real-caddy-resolution/).

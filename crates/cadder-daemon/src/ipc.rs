@@ -4149,9 +4149,8 @@ fn daemon_readiness_timeout(message: &'static str) -> IpcClientError {
 pub struct DaemonLaunchOptions {
   pub explicit_daemon: Option<PathBuf>,
   pub runtime_profile: Option<RuntimeProfile>,
-  pub real_caddy_command: Option<String>,
+  pub real_caddy_override: Option<PathBuf>,
   pub caddy_backend: Option<CaddyBackendMode>,
-  pub shim_path: Option<PathBuf>,
   pub launch_mode: DaemonLaunchMode,
 }
 
@@ -4308,11 +4307,11 @@ pub async fn ensure_daemon_running_with_options(
         Some(error.into_boxed_dyn_error()),
       )
     })?;
-  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_command.is_some() {
+  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_override.is_some() {
     return Err(daemon_launch_error(
       LocalIpcErrorCode::InvalidInput,
       "Cadder rejected incompatible daemon launch options; no daemon was started.",
-      "Remove either the real-Caddy command or the mock backend option, then retry.",
+      "Remove either the real-Caddy override or the mock backend option, then retry.",
       None,
     ));
   }
@@ -4328,14 +4327,11 @@ pub async fn ensure_daemon_running_with_options(
     .arg(paths.runtime_dir())
     .arg("--detach-ready");
   process_config.configure_stdio(&mut command);
-  if let Some(real_caddy_command) = options.real_caddy_command {
-    command.arg("--real-caddy-command").arg(real_caddy_command);
+  if let Some(real_caddy_override) = options.real_caddy_override {
+    command.arg("--real-caddy").arg(real_caddy_override);
   }
   if caddy_backend != CaddyBackendMode::Real {
     command.arg("--caddy-backend").arg(caddy_backend.as_str());
-  }
-  if let Some(shim_path) = options.shim_path {
-    command.env("CADDER_CADDY_SHIM_PATH", shim_path);
   }
   command.env("CADDER_RUNTIME_DIR", paths.runtime_dir());
   let mut child = command.spawn().map_err(|error| {
@@ -8014,8 +8010,7 @@ mod tests {
       &server.paths,
       DaemonLaunchOptions {
         explicit_daemon: Some(PathBuf::from("missing-cadderd")),
-        real_caddy_command: Some("real-caddy".to_string()),
-        shim_path: Some(PathBuf::from("shim")),
+        real_caddy_override: Some(PathBuf::from("real-caddy")),
         ..DaemonLaunchOptions::default()
       },
     )
@@ -8040,8 +8035,7 @@ mod tests {
       &paths,
       DaemonLaunchOptions {
         explicit_daemon: Some(PathBuf::from("missing-cadderd")),
-        real_caddy_command: None,
-        shim_path: None,
+        real_caddy_override: None,
         ..DaemonLaunchOptions::default()
       },
     )
@@ -8070,8 +8064,7 @@ mod tests {
       &paths,
       DaemonLaunchOptions {
         explicit_daemon: Some(missing_daemon),
-        real_caddy_command: None,
-        shim_path: None,
+        real_caddy_override: None,
         ..DaemonLaunchOptions::default()
       },
     )
@@ -8155,8 +8148,7 @@ mod tests {
       &paths,
       DaemonLaunchOptions {
         explicit_daemon: Some(missing_daemon),
-        real_caddy_command: Some("real-caddy".to_string()),
-        shim_path: Some(temp.path().join("shim")),
+        real_caddy_override: Some(PathBuf::from("real-caddy")),
         ..DaemonLaunchOptions::default()
       },
     )
@@ -8187,7 +8179,7 @@ mod tests {
       &paths,
       DaemonLaunchOptions {
         explicit_daemon: Some(missing_daemon),
-        real_caddy_command: Some("real-caddy".to_string()),
+        real_caddy_override: Some(PathBuf::from("real-caddy")),
         caddy_backend: Some(CaddyBackendMode::Mock),
         ..DaemonLaunchOptions::default()
       },

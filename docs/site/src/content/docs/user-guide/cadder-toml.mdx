@@ -1,38 +1,42 @@
 ---
 title: cadder.toml
-description: Configure the real Caddy binary Cadder should run.
+description: Configure the real Caddy executable for each Cadder profile.
 ---
 
-Cadder needs to know which executable is the real Caddy server. The usual place to put that is `cadder.toml` next to the Cadder binaries.
+Cadder reads `cadder.toml` from its standard per-user configuration directory. `cadder doctor` reports the exact directory for the current account and platform.
 
 ```toml
-[caddy]
-real_command = "/absolute/path/to/caddy"
+[defaults]
+real_caddy = "/absolute/path/to/caddy"
+
+[profiles.dev]
+real_caddy = "/absolute/path/to/a-development-caddy"
 ```
 
-For Windows paths, use a literal TOML string if you want to write backslashes naturally:
+The profile value overrides `defaults` in the same file. A profile without its own value inherits `defaults`.
+
+For Windows paths, a literal TOML string keeps backslashes readable:
 
 ```toml
-[caddy]
-real_command = 'C:\Program Files\Caddy\caddy.exe'
+[defaults]
+real_caddy = 'C:\Program Files\Caddy\caddy.exe'
 ```
 
-## Recommended order
+`real_caddy` is always an absolute path to a native executable. Cadder rejects relative paths, command names, Windows batch scripts, symbolic-link substitutions, and files or parent directories that a less-trusted account can modify.
 
-1. Put `cadder.toml` next to the Cadder binaries for the default machine setup.
-2. Add a project-local `cadder.toml` only when one project needs a different real Caddy binary.
-3. Use CLI flags, environment variables, or `PATH` fallback for scripts and temporary overrides.
+## Configuration scope
 
-The runtime resolver has a stricter precedence order so explicit command-line and project-level overrides can win. See [Real Caddy resolution](../../reference/real-caddy-resolution/) for every supported source.
+Cadder uses this order:
 
-## Find the real Caddy path
+1. An absolute `--real-caddy` value supplied when the daemon starts.
+2. The selected profile in the per-user configuration.
+3. `defaults` in the per-user configuration.
+4. The selected profile in the administrator-owned system configuration.
+5. `defaults` in the system configuration.
+6. A trusted native `caddy` executable on `PATH`.
 
-Use whichever command matches how Caddy is installed on your machine:
+Project directories, project `cadder.toml` files, environment variables, files next to Cadder binaries, and shim flags never select an executable. A malformed or unsafe higher-priority configuration fails closed instead of silently falling through to another source.
 
-```text
-which caddy
-where caddy
-caddy version
-```
+The system configuration is optional. Administrators place it in `%ProgramData%\Cadder\cadder.toml` on Windows, `/etc/cadder/cadder.toml` on Linux, or `/Library/Application Support/Cadder/cadder.toml` on macOS.
 
-The configured command can be an absolute path, a relative path with a path separator, or a plain command resolved through `PATH`. Absolute paths are the least surprising option.
+See [Real Caddy resolution](../../reference/real-caddy-resolution/) for path validation and shim-recursion behavior.

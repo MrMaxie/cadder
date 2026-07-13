@@ -199,11 +199,14 @@ const CANONICAL_ASSET_COPIES: [(&str, &str, &str); 2] = [
   ),
 ];
 const OBSOLETE_SCAFFOLD_ASSETS: [(&str, &str); 0] = [];
-const SAMPLE_CADDER_TOML: &str = r#"# Cadder portable configuration.
-# Uncomment and set this when the real Caddy binary is not the first safe `caddy` on PATH.
-#
-# [caddy]
-# real_command = "/absolute/path/to/caddy"
+const SAMPLE_CADDER_TOML: &str = r#"# Cadder configuration template.
+# Copy this file to the standard per-user Cadder configuration directory.
+
+[defaults]
+# real_caddy = "/absolute/path/to/caddy"
+
+# [profiles.dev]
+# real_caddy = "/absolute/path/to/caddy"
 "#;
 
 #[derive(Debug, Clone, Copy)]

@@ -1,5 +1,6 @@
 mod autostart;
 mod caddy;
+mod caddy_path_trust;
 mod config;
 mod iis;
 mod ipc;
@@ -27,7 +28,7 @@ pub use caddy::{
   CaddyBackendMode, CaddyConfigAdapter, CaddyConfigCoordinator, CaddyRegistrationAdapter,
   RealCaddyResolver,
 };
-pub use config::{CONFIG_FILE_NAME, CadderConfig, CaddyRuntimeConfig};
+pub use config::{CONFIG_FILE_NAME, CadderConfig, RuntimeConfig};
 pub use iis::{IisBindingRecord, IisMetadataStore, IisProvider};
 pub use ipc::{
   CadderClient, CadderSession, DaemonLaunchMode, DaemonLaunchOptions, DaemonServer,
@@ -68,7 +69,7 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 pub struct DaemonOptions {
   pub runtime_dir: Option<PathBuf>,
   pub runtime_profile: Option<RuntimeProfile>,
-  pub real_caddy_command: Option<String>,
+  pub real_caddy_override: Option<PathBuf>,
   pub caddy_backend: Option<CaddyBackendMode>,
 }
 
@@ -86,12 +87,14 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
   let caddy_backend = options
     .caddy_backend
     .map_or_else(CaddyBackendMode::from_env, Ok)?;
-  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_command.is_some() {
-    bail!("--real-caddy-command cannot be combined with --caddy-backend mock");
+  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_override.is_some() {
+    bail!("--real-caddy cannot be combined with --caddy-backend mock");
   }
   let coordinator = match caddy_backend {
     CaddyBackendMode::Real => {
-      let real_caddy = RealCaddyResolver::new(options.real_caddy_command);
+      let real_caddy =
+        RealCaddyResolver::for_daemon(options.real_caddy_override, paths.runtime_profile());
+      real_caddy.resolve()?;
       let adapter = CaddyConfigAdapter::new(real_caddy.clone());
       let runtime = ProcessRuntime::new(real_caddy, paths.clone());
       CaddyConfigCoordinator::new(adapter, runtime)
@@ -201,9 +204,9 @@ mod tests {
     let daemon = tokio::spawn(run_daemon(
       DaemonOptions {
         runtime_dir: Some(runtime_dir),
-        real_caddy_command: Some("caddy".to_string()),
+        real_caddy_override: None,
         runtime_profile: None,
-        caddy_backend: None,
+        caddy_backend: Some(CaddyBackendMode::Mock),
       },
       shutdown_rx,
     ));
@@ -230,7 +233,7 @@ mod tests {
     let daemon = tokio::spawn(run_daemon(
       DaemonOptions {
         runtime_dir: Some(runtime_dir),
-        real_caddy_command: None,
+        real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
       },
@@ -314,7 +317,7 @@ mod tests {
     let daemon = tokio::spawn(run_daemon(
       DaemonOptions {
         runtime_dir: Some(runtime_dir.clone()),
-        real_caddy_command: None,
+        real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
       },
@@ -328,7 +331,7 @@ mod tests {
       run_daemon(
         DaemonOptions {
           runtime_dir: Some(runtime_dir),
-          real_caddy_command: None,
+          real_caddy_override: None,
           runtime_profile: None,
           caddy_backend: Some(CaddyBackendMode::Mock),
         },
@@ -383,7 +386,7 @@ mod tests {
     let daemon = tokio::spawn(run_daemon(
       DaemonOptions {
         runtime_dir: Some(runtime_dir),
-        real_caddy_command: None,
+        real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
       },

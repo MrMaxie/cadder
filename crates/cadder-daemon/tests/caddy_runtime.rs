@@ -21,9 +21,7 @@ async fn adapter_uses_raw_config_path_and_shim_adapter_metadata() {
   let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::LongRunning);
   let config_path = temp.path().join("Caddyfile.json");
   fs::write(&config_path, r#"{"apps":{}}"#).unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
   let mut registration = registration("adapter", "nonce", &config_path);
   registration.source_working_directory = SourcePath::new(temp.path().display().to_string(), None);
   registration.source_config_path = SourcePath::new(config_path.display().to_string(), None);
@@ -59,30 +57,6 @@ async fn adapter_uses_raw_config_path_and_shim_adapter_metadata() {
   );
 }
 
-#[test]
-fn resolver_anchors_relative_command_from_working_directory_config() {
-  let temp = tempfile::tempdir().unwrap();
-  let bin_dir = temp.path().join("bin");
-  fs::create_dir_all(&bin_dir).unwrap();
-  let command_name = if cfg!(windows) {
-    "real-caddy.cmd"
-  } else {
-    "real-caddy"
-  };
-  let command = bin_dir.join(command_name);
-  fs::write(&command, "").unwrap();
-  fs::write(
-    temp.path().join("cadder.toml"),
-    format!("[caddy]\nreal_command = \"bin/{command_name}\"\n"),
-  )
-  .unwrap();
-  let resolver = RealCaddyResolver::new(None);
-
-  let resolved = resolver.resolve_for_working_directory(temp.path()).unwrap();
-
-  assert_eq!(resolved, command.canonicalize().unwrap());
-}
-
 #[tokio::test]
 async fn adapter_reports_nonzero_adapt_failures() {
   let temp = tempfile::tempdir().unwrap();
@@ -90,9 +64,7 @@ async fn adapter_reports_nonzero_adapt_failures() {
   let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::FailAdapt);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "broken.localhost { respond ok }").unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
 
   let prepared = adapter
     .prepare(registration("broken", "nonce", &config_path))
@@ -115,9 +87,7 @@ async fn adapter_reports_invalid_adapt_json() {
   let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::InvalidAdaptJson);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "invalid-json.localhost { respond ok }").unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
 
   let prepared = adapter
     .prepare(registration("invalid-json", "nonce", &config_path))
@@ -141,7 +111,7 @@ async fn adapter_reports_adapt_timeout() {
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "slow.localhost { respond ok }").unwrap();
   let adapter = CaddyConfigAdapter::with_command_timeout(
-    RealCaddyResolver::new(Some(fake_caddy.display().to_string())),
+    RealCaddyResolver::for_test_fixture(fake_caddy),
     Duration::from_millis(50),
   );
 
@@ -165,7 +135,7 @@ async fn process_runtime_starts_reports_running_reloads_and_stops() {
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
   paths.ensure_dirs().unwrap();
   let runtime = ProcessRuntime::with_timeouts(
-    RealCaddyResolver::new(Some(fake_caddy.display().to_string())),
+    RealCaddyResolver::for_test_fixture(fake_caddy),
     paths,
     RuntimeTimeouts {
       start_check: Duration::from_millis(150),
@@ -204,7 +174,7 @@ async fn coordinator_apply_tracks_runtime_success_failure_and_idle_stop() {
   fs::write(&config_path, "coordinator.localhost { respond ok }").unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
   paths.ensure_dirs().unwrap();
-  let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
+  let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
   let runtime = ProcessRuntime::with_timeouts(
     resolver.clone(),
     paths,

@@ -2221,7 +2221,7 @@ impl Harness {
     let command_log_path = temp.path().join("fake-caddy-commands.log");
     let fake_caddy_path = write_fake_caddy(temp.path(), &command_log_path, fake_caddy);
 
-    let resolver = RealCaddyResolver::new(Some(fake_caddy_path.display().to_string()));
+    let resolver = RealCaddyResolver::for_test_fixture(fake_caddy_path);
     let adapter = fake_caddy
       .adapt_timeout
       .map(|timeout| CaddyConfigAdapter::with_command_timeout(resolver.clone(), timeout))

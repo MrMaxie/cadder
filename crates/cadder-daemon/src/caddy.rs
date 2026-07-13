@@ -1,7 +1,10 @@
 use crate::{
-  config::{CONFIG_FILE_NAME, CadderConfig, configured_real_caddy_command},
+  caddy_path_trust::{
+    CaddyPathProvenance, same_file_identity, validate_trusted_config, validate_trusted_executable,
+  },
+  config::{CONFIG_FILE_NAME, CadderConfig},
   logs::CaddyLogStore,
-  paths::RuntimePaths,
+  paths::{RuntimePaths, RuntimeProfile},
   process_tree::ProcessTreeChild,
   runtime::{CaddyRuntime, ProcessRuntime},
 };
@@ -19,6 +22,7 @@ use std::{
   path::{Path, PathBuf},
   process::Stdio,
   str::FromStr,
+  sync::{Arc, OnceLock},
   time::Duration,
 };
 use tokio::process::Command;
@@ -73,214 +77,396 @@ impl FromStr for CaddyBackendMode {
 
 #[derive(Debug, Clone)]
 pub struct RealCaddyResolver {
-  configured_command: Option<String>,
+  explicit_override: Option<PathBuf>,
+  profile: RuntimeProfile,
+  config_paths: TrustedConfigPaths,
   executable_path: Option<PathBuf>,
+  trust_policy: CaddyTrustPolicy,
+  resolved: Arc<OnceLock<PathBuf>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaddyTrustPolicy {
+  Enforce,
+  #[cfg(any(test, debug_assertions))]
+  TestFixture,
 }
 
 impl RealCaddyResolver {
-  pub fn new(configured_command: Option<String>) -> Self {
+  pub fn from_trusted_sources(profile: RuntimeProfile) -> Self {
+    Self::for_daemon(None, profile)
+  }
+
+  pub(crate) fn for_daemon(explicit_override: Option<PathBuf>, profile: RuntimeProfile) -> Self {
     Self {
-      configured_command,
+      explicit_override,
+      profile,
+      config_paths: TrustedConfigPaths::platform_defaults(),
       executable_path: env::current_exe().ok(),
+      trust_policy: CaddyTrustPolicy::Enforce,
+      resolved: Arc::new(OnceLock::new()),
+    }
+  }
+
+  #[cfg(test)]
+  fn with_sources(
+    explicit_override: Option<PathBuf>,
+    profile: RuntimeProfile,
+    config_paths: TrustedConfigPaths,
+    executable_path: Option<PathBuf>,
+  ) -> Self {
+    Self {
+      explicit_override,
+      profile,
+      config_paths,
+      executable_path,
+      trust_policy: CaddyTrustPolicy::Enforce,
+      resolved: Arc::new(OnceLock::new()),
     }
   }
 
   #[cfg(test)]
   fn with_executable_path(
-    configured_command: Option<String>,
+    explicit_override: Option<String>,
     executable_path: Option<PathBuf>,
   ) -> Self {
-    Self {
-      configured_command,
+    let mut resolver = Self::with_sources(
+      explicit_override.map(PathBuf::from),
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
       executable_path,
-    }
+    );
+    resolver.trust_policy = CaddyTrustPolicy::TestFixture;
+    resolver
+  }
+
+  #[cfg(test)]
+  fn with_test_sources(
+    explicit_override: Option<PathBuf>,
+    profile: RuntimeProfile,
+    config_paths: TrustedConfigPaths,
+    executable_path: Option<PathBuf>,
+  ) -> Self {
+    let mut resolver =
+      Self::with_sources(explicit_override, profile, config_paths, executable_path);
+    resolver.trust_policy = CaddyTrustPolicy::TestFixture;
+    resolver
+  }
+
+  #[cfg(debug_assertions)]
+  #[doc(hidden)]
+  pub fn for_test_fixture(path: PathBuf) -> Self {
+    let mut resolver = Self::for_daemon(Some(path), RuntimeProfile::Default);
+    resolver.config_paths = TrustedConfigPaths {
+      user: None,
+      system: None,
+    };
+    resolver.executable_path = None;
+    resolver.trust_policy = CaddyTrustPolicy::TestFixture;
+    resolver
   }
 
   pub fn resolve(&self) -> Result<PathBuf> {
-    let cwd = env::current_dir().context("resolve current directory for Cadder configuration")?;
-    self.resolve_for_working_directory(&cwd)
+    if let Some(resolved) = self.resolved.get() {
+      return Ok(resolved.clone());
+    }
+    let selected = self.resolve_uncached()?;
+    let _ = self.resolved.set(selected);
+    Ok(
+      self
+        .resolved
+        .get()
+        .expect("resolved Caddy path is initialized")
+        .clone(),
+    )
   }
 
-  pub fn resolve_for_working_directory(&self, cwd: &Path) -> Result<PathBuf> {
-    let selected = self.selected_command(cwd)?;
-    let excluded = shim_exclusions();
-    if let Some(selected) = selected {
-      return resolve_command(&selected.command, &excluded).with_context(|| {
-        format!(
-          "resolve real Caddy command `{}` from {}",
-          selected.command, selected.source
-        )
-      });
+  fn resolve_uncached(&self) -> Result<PathBuf> {
+    let shim_candidates = self.shim_candidates();
+    if let Some(path) = &self.explicit_override {
+      return self.resolve_selected(
+        path,
+        "explicit daemon override",
+        CaddyPathProvenance::UserOwned,
+        &shim_candidates,
+      );
     }
 
-    resolve_command("caddy", &excluded).context(
-      "could not resolve a safe real Caddy binary. Configure it with a CLI override, \
-       [caddy].real_command in cadder.toml, CADDER_CADDY_REAL_COMMAND, or make a real \
-       caddy executable available on PATH",
+    if let Some(path) = &self.config_paths.user
+      && let Some(selected) = self.selection_from_config(
+        path,
+        "per-user configuration",
+        CaddyPathProvenance::UserOwned,
+      )?
+    {
+      return self.resolve_selected(
+        &selected,
+        "per-user configuration",
+        CaddyPathProvenance::UserOwned,
+        &shim_candidates,
+      );
+    }
+
+    if let Some(path) = &self.config_paths.system
+      && let Some(selected) = self.selection_from_config(
+        path,
+        "system configuration",
+        CaddyPathProvenance::SystemOwned,
+      )?
+    {
+      return self.resolve_selected(
+        &selected,
+        "system configuration",
+        CaddyPathProvenance::SystemOwned,
+        &shim_candidates,
+      );
+    }
+
+    resolve_caddy_on_path(&shim_candidates, self.trust_policy).context(
+      "could not resolve a trusted real Caddy executable. Pass an absolute daemon override, \
+       configure an absolute path in the per-user or system Cadder configuration, or install \
+       a trusted caddy executable on PATH",
     )
   }
 
   pub fn resolution_help(error: &anyhow::Error) -> String {
     format!(
-      "Cadder could not resolve a safe real Caddy binary.\n\n\
+      "Cadder could not resolve a trusted real Caddy executable.\n\n\
        Cause: {error}\n\n\
-       Configure the real Caddy command with one of these options, in precedence order:\n\
-       - CLI override: --real-caddy-command for cadderd/cadder or --cadder-real-caddy-command for the shim\n\
-       - [caddy].real_command in cadder.toml in the project working directory\n\
-       - [caddy].real_command in cadder.toml next to the Cadder executable\n\
-       - CADDER_CADDY_REAL_COMMAND environment variable\n\
-       - A real caddy executable on PATH that is not Cadder's shim"
+       Configure real Caddy with one of these trusted sources, in precedence order:\n\
+       - an absolute --real-caddy daemon-start override\n\
+       - defaults.real_caddy or profiles.<profile>.real_caddy in the per-user Cadder configuration\n\
+       - the same key in the administrator-owned system Cadder configuration\n\
+       - a trusted real caddy executable on PATH\n\n\
+       Project files, registration working directories, environment selectors, and shim flags never select the executable."
     )
   }
 
-  fn selected_command(&self, cwd: &Path) -> Result<Option<SelectedCaddyCommand>> {
-    if let Some(command) = trimmed(self.configured_command.as_deref()) {
-      return Ok(Some(SelectedCaddyCommand::new(
-        command,
-        "CLI override".to_string(),
-      )));
+  fn selection_from_config(
+    &self,
+    path: &Path,
+    source: &str,
+    provenance: CaddyPathProvenance,
+  ) -> Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(path) {
+      Ok(_) => {}
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+      Err(error) => {
+        return Err(error).with_context(|| format!("inspect {source} at {}", path.display()));
+      }
     }
-
-    let cwd_config = cwd.join(CONFIG_FILE_NAME);
-    if let Some(command) = command_from_config_file(&cwd_config)? {
-      return Ok(Some(SelectedCaddyCommand::new(
-        command,
-        format!("{} in the current working directory", cwd_config.display()),
-      )));
-    }
-
-    if let Some(executable_config) = self.executable_config_path()
-      && executable_config != cwd_config
-      && let Some(command) = command_from_config_file(&executable_config)?
+    let config = match self.trust_policy {
+      CaddyTrustPolicy::Enforce => {
+        let trusted = validate_trusted_config(path, provenance)
+          .with_context(|| format!("validate {source} at {}", path.display()))?;
+        let canonical_path = trusted.canonical_path().to_path_buf();
+        CadderConfig::from_reader(trusted.into_file(), &canonical_path)?
+      }
+      #[cfg(any(test, debug_assertions))]
+      CaddyTrustPolicy::TestFixture => {
+        path
+          .canonicalize()
+          .with_context(|| format!("canonicalize test configuration {}", path.display()))?;
+        CadderConfig::from_file(path)?
+      }
+    };
+    let selected = config
+      .real_caddy_for_profile(self.profile)
+      .map(PathBuf::from);
+    if let Some(selected) = &selected
+      && !selected.is_absolute()
     {
-      return Ok(Some(SelectedCaddyCommand::new(
-        command,
-        format!("{} next to the executable", executable_config.display()),
-      )));
+      return Err(anyhow!(
+        "{source} {} selects relative real-Caddy path {}; use an absolute path",
+        path.display(),
+        selected.display()
+      ));
     }
-
-    let environment_config = CadderConfig::from_environment()?;
-    if let Some(command) = configured_real_caddy_command(&environment_config) {
-      return Ok(Some(SelectedCaddyCommand::new(
-        command,
-        "environment variables".to_string(),
-      )));
-    }
-
-    Ok(None)
+    Ok(selected)
   }
 
-  fn executable_config_path(&self) -> Option<PathBuf> {
-    self
-      .executable_path
-      .as_ref()
-      .and_then(|path| path.parent())
-      .map(|dir| dir.join(CONFIG_FILE_NAME))
+  fn resolve_selected(
+    &self,
+    path: &Path,
+    source: &str,
+    provenance: CaddyPathProvenance,
+    shim_candidates: &[PathBuf],
+  ) -> Result<PathBuf> {
+    if !path.is_absolute() {
+      return Err(anyhow!(
+        "{source} selects relative real-Caddy path {}; use an absolute path",
+        path.display()
+      ));
+    }
+    let canonical = match self.trust_policy {
+      CaddyTrustPolicy::Enforce => validate_trusted_executable(path, provenance)
+        .with_context(|| format!("validate real Caddy from {source}: {}", path.display()))?,
+      #[cfg(any(test, debug_assertions))]
+      CaddyTrustPolicy::TestFixture => path
+        .canonicalize()
+        .with_context(|| format!("canonicalize test Caddy fixture {}", path.display()))?,
+    };
+    reject_shim_identity(&canonical, shim_candidates)?;
+    Ok(canonical)
+  }
+
+  fn shim_candidates(&self) -> Vec<PathBuf> {
+    let Some(executable) = &self.executable_path else {
+      return Vec::new();
+    };
+    let mut candidates = vec![executable.clone()];
+    if let Some(parent) = executable.parent() {
+      for name in shim_binary_names() {
+        candidates.push(parent.join(name));
+      }
+    }
+    candidates
   }
 }
 
 #[derive(Debug, Clone)]
-struct SelectedCaddyCommand {
-  command: String,
-  source: String,
+struct TrustedConfigPaths {
+  user: Option<PathBuf>,
+  system: Option<PathBuf>,
 }
 
-impl SelectedCaddyCommand {
-  fn new(command: String, source: String) -> Self {
-    Self { command, source }
-  }
-}
-
-fn command_from_config_file(path: &Path) -> Result<Option<String>> {
-  if !path.is_file() {
-    return Ok(None);
-  }
-  let config = CadderConfig::from_file(path)?;
-  Ok(configured_real_caddy_command(&config).map(|command| {
-    path
-      .parent()
-      .map(|base| anchor_configured_command(&command, base))
-      .unwrap_or(command)
-  }))
-}
-
-fn anchor_configured_command(command: &str, base: &Path) -> String {
-  let path = Path::new(command);
-  if path.is_absolute() || path.components().count() <= 1 {
-    command.to_string()
-  } else {
-    base.join(path).display().to_string()
-  }
-}
-
-fn trimmed(value: Option<&str>) -> Option<String> {
-  value
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(ToOwned::to_owned)
-}
-
-fn shim_exclusions() -> BTreeSet<PathBuf> {
-  let mut excluded = BTreeSet::new();
-  if let Ok(path) = env::current_exe().and_then(|path| path.canonicalize()) {
-    excluded.insert(path);
-  }
-  if let Some(path) = env::var_os("CADDER_CADDY_SHIM_PATH")
-    && let Ok(path) = PathBuf::from(path).canonicalize()
-  {
-    excluded.insert(path);
-  }
-  excluded
-}
-
-fn resolve_command(command: &str, excluded: &BTreeSet<PathBuf>) -> Result<PathBuf> {
-  let path = PathBuf::from(command);
-  if path.components().count() > 1 || path.is_absolute() {
-    let canonical = path
-      .canonicalize()
-      .with_context(|| format!("canonicalize {}", path.display()))?;
-    if excluded.contains(&canonical) {
-      return Err(anyhow!("resolved command points at the Cadder shim"));
+impl TrustedConfigPaths {
+  fn platform_defaults() -> Self {
+    let user = directories::ProjectDirs::from("dev", "Cadder", "Cadder")
+      .map(|dirs| dirs.config_dir().join(CONFIG_FILE_NAME));
+    Self {
+      user,
+      system: system_config_path(),
     }
-    return Ok(canonical);
   }
-
-  let path_var = env::var_os("PATH").ok_or_else(|| anyhow!("PATH is not set"))?;
-  resolve_command_with_path(command, excluded, &path_var)
 }
 
-fn resolve_command_with_path(
-  command: &str,
-  excluded: &BTreeSet<PathBuf>,
-  path_var: &std::ffi::OsStr,
+#[cfg(windows)]
+fn system_config_path() -> Option<PathBuf> {
+  use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr::null_mut, slice};
+  use windows_sys::Win32::{
+    Foundation::S_OK,
+    System::Com::CoTaskMemFree,
+    UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath},
+  };
+
+  let mut raw_path = null_mut();
+  let folder_id = FOLDERID_ProgramData;
+  // SAFETY: The known-folder identifier and output pointer follow the Windows API contract. The
+  // returned buffer is released with `CoTaskMemFree` on every path.
+  let result = unsafe { SHGetKnownFolderPath(&raw const folder_id, 0, null_mut(), &mut raw_path) };
+  if result != S_OK || raw_path.is_null() {
+    // SAFETY: `CoTaskMemFree` accepts the pointer returned by `SHGetKnownFolderPath`, including null.
+    unsafe { CoTaskMemFree(raw_path.cast()) };
+    return None;
+  }
+
+  let mut length = 0;
+  // SAFETY: A successful `SHGetKnownFolderPath` returns a NUL-terminated UTF-16 buffer.
+  unsafe {
+    while *raw_path.add(length) != 0 {
+      length += 1;
+    }
+  }
+  // SAFETY: The scan above found the terminator within the Windows-owned buffer.
+  let path = PathBuf::from(OsString::from_wide(unsafe {
+    slice::from_raw_parts(raw_path, length)
+  }));
+  // SAFETY: `SHGetKnownFolderPath` allocated this buffer for the caller.
+  unsafe { CoTaskMemFree(raw_path.cast()) };
+  Some(path.join("Cadder").join(CONFIG_FILE_NAME))
+}
+
+#[cfg(target_os = "macos")]
+fn system_config_path() -> Option<PathBuf> {
+  Some(PathBuf::from("/Library/Application Support/Cadder").join(CONFIG_FILE_NAME))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn system_config_path() -> Option<PathBuf> {
+  Some(PathBuf::from("/etc/cadder").join(CONFIG_FILE_NAME))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn system_config_path() -> Option<PathBuf> {
+  None
+}
+
+fn resolve_caddy_on_path(
+  shim_candidates: &[PathBuf],
+  trust_policy: CaddyTrustPolicy,
 ) -> Result<PathBuf> {
-  for dir in env::split_paths(path_var) {
-    for candidate in executable_candidates(&dir, command) {
-      if candidate.is_file() {
-        let canonical = candidate.canonicalize().unwrap_or(candidate);
-        if !excluded.contains(&canonical) {
-          return Ok(canonical);
+  let path_var = env::var_os("PATH").ok_or_else(|| anyhow!("PATH is not set"))?;
+  for dir in env::split_paths(&path_var) {
+    if !dir.is_absolute() {
+      continue;
+    }
+    for candidate in executable_candidates(&dir) {
+      if !candidate.is_file() {
+        continue;
+      }
+      let canonical = match trust_policy {
+        CaddyTrustPolicy::Enforce => {
+          let Ok(canonical) =
+            validate_trusted_executable(&candidate, CaddyPathProvenance::UserOwned)
+          else {
+            continue;
+          };
+          canonical
         }
+        #[cfg(any(test, debug_assertions))]
+        CaddyTrustPolicy::TestFixture => {
+          let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+          };
+          canonical
+        }
+      };
+      if reject_shim_identity(&canonical, shim_candidates).is_ok() {
+        return Ok(canonical);
       }
     }
   }
-  Err(anyhow!("command `{command}` not found on PATH"))
+  Err(anyhow!("trusted executable `caddy` not found on PATH"))
 }
 
-fn executable_candidates(dir: &Path, command: &str) -> Vec<PathBuf> {
+fn reject_shim_identity(candidate: &Path, shim_candidates: &[PathBuf]) -> Result<()> {
+  for shim in shim_candidates.iter().filter(|path| path.is_file()) {
+    if same_file_identity(candidate, shim).with_context(|| {
+      format!(
+        "compare real-Caddy candidate {} with Cadder shim {}",
+        candidate.display(),
+        shim.display()
+      )
+    })? {
+      return Err(anyhow!("resolved executable is the Cadder Caddy shim"));
+    }
+  }
+  Ok(())
+}
+
+#[cfg(windows)]
+fn shim_binary_names() -> [&'static str; 2] {
+  ["cadder-caddy.exe", "caddy.exe"]
+}
+
+#[cfg(not(windows))]
+fn shim_binary_names() -> [&'static str; 2] {
+  ["cadder-caddy", "caddy"]
+}
+
+fn executable_candidates(dir: &Path) -> Vec<PathBuf> {
   #[cfg(windows)]
   {
-    let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    let mut candidates = vec![dir.join(command)];
-    for ext in pathext.split(';').filter(|ext| !ext.is_empty()) {
-      candidates.push(dir.join(format!("{command}{ext}")));
-    }
-    candidates
+    vec![dir.join("caddy.exe")]
   }
 
   #[cfg(not(windows))]
   {
-    vec![dir.join(command)]
+    vec![dir.join("caddy")]
   }
 }
 
@@ -341,14 +527,7 @@ impl CaddyConfigAdapter {
   }
 
   async fn adapt(&self, registration: &EntrypointRegistration) -> Result<Value> {
-    let working_directory = registration
-      .source_working_directory
-      .canonical
-      .as_deref()
-      .unwrap_or(&registration.source_working_directory.raw);
-    let binary = self
-      .resolver
-      .resolve_for_working_directory(Path::new(working_directory))?;
+    let binary = self.resolver.resolve()?;
     let config_path = registration
       .source_config_path
       .canonical
@@ -1122,8 +1301,6 @@ mod tests {
   use chrono::Utc;
   use std::{ffi::OsString, fs};
 
-  const ENV_KEYS: [&str; 2] = ["CADDER_CADDY__REAL_COMMAND", "CADDER_CADDY_REAL_COMMAND"];
-
   struct EnvSnapshot {
     values: Vec<(&'static str, Option<OsString>)>,
   }
@@ -1191,23 +1368,33 @@ mod tests {
 
   fn write_file(path: &Path) {
     fs::write(path, "fake caddy").unwrap();
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+  }
+
+  fn write_real_caddy_config(path: &Path, default: &Path, dev: Option<&Path>) {
+    let escape = |value: &Path| {
+      value
+        .display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+    };
+    let mut config = format!("[defaults]\nreal_caddy = \"{}\"\n", escape(default));
+    if let Some(dev) = dev {
+      config.push_str(&format!(
+        "[profiles.dev]\nreal_caddy = \"{}\"\n",
+        escape(dev)
+      ));
+    }
+    fs::write(path, config).unwrap();
   }
 
   fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap()
-  }
-
-  #[test]
-  fn resolve_command_reports_missing_path_variable() {
-    let _guard = lock_env();
-    let _env = EnvSnapshot::capture(&["PATH"]);
-    unsafe {
-      env::remove_var("PATH");
-    }
-
-    let error = resolve_command("caddy", &BTreeSet::new()).unwrap_err();
-
-    assert!(error.to_string().contains("PATH is not set"));
   }
 
   #[test]
@@ -1442,158 +1629,212 @@ exit 1
   }
 
   #[test]
-  fn resolver_prefers_cli_override_over_working_directory_config() {
+  fn trusted_caddy_source_explicit_override_precedes_user_and_system_configuration() {
     let dir = tempfile::tempdir().unwrap();
-    let cli_caddy = dir.path().join("cli-caddy");
-    let cwd_caddy = dir.path().join("cwd-caddy");
-    write_file(&cli_caddy);
-    write_file(&cwd_caddy);
-    fs::write(
-      dir.path().join(CONFIG_FILE_NAME),
-      format!(
-        "[caddy]\nreal_command = \"{}\"\n",
-        cwd_caddy.display().to_string().replace('\\', "\\\\")
-      ),
-    )
-    .unwrap();
-
-    let resolver = RealCaddyResolver::with_executable_path(
-      Some(cli_caddy.display().to_string()),
-      Some(dir.path().join("cadderd")),
-    );
-
-    assert_eq!(
-      resolver.resolve_for_working_directory(dir.path()).unwrap(),
-      canonical(&cli_caddy)
-    );
-  }
-
-  #[test]
-  fn resolver_prefers_working_directory_config_over_executable_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("project");
-    let bin = dir.path().join("bin");
-    fs::create_dir_all(&cwd).unwrap();
-    fs::create_dir_all(&bin).unwrap();
-    let cwd_caddy = cwd.join("cwd-caddy");
-    let exe_caddy = bin.join("exe-caddy");
-    write_file(&cwd_caddy);
-    write_file(&exe_caddy);
-    fs::write(
-      cwd.join(CONFIG_FILE_NAME),
-      "[caddy]\nreal_command = \"./cwd-caddy\"\n",
-    )
-    .unwrap();
-    fs::write(
-      bin.join(CONFIG_FILE_NAME),
-      "[caddy]\nreal_command = \"./exe-caddy\"\n",
-    )
-    .unwrap();
-
-    let resolver =
-      RealCaddyResolver::with_executable_path(None, Some(bin.join(exe_name_for_test("cadderd"))));
-
-    assert_eq!(
-      resolver.resolve_for_working_directory(&cwd).unwrap(),
-      canonical(&cwd_caddy)
-    );
-  }
-
-  #[test]
-  fn resolver_uses_executable_config_when_working_directory_config_is_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("project");
-    let bin = dir.path().join("bin");
-    fs::create_dir_all(&cwd).unwrap();
-    fs::create_dir_all(&bin).unwrap();
-    let exe_caddy = bin.join("exe-caddy");
-    write_file(&exe_caddy);
-    fs::write(
-      bin.join(CONFIG_FILE_NAME),
-      "[caddy]\nreal_command = \"./exe-caddy\"\n",
-    )
-    .unwrap();
-
-    let resolver =
-      RealCaddyResolver::with_executable_path(None, Some(bin.join(exe_name_for_test("cadderd"))));
-
-    assert_eq!(
-      resolver.resolve_for_working_directory(&cwd).unwrap(),
-      canonical(&exe_caddy)
-    );
-  }
-
-  #[test]
-  fn resolver_uses_environment_real_command_when_no_file_config_exists() {
-    let _guard = lock_env();
-    let _snapshot = EnvSnapshot::capture(&ENV_KEYS);
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("project");
-    let bin = dir.path().join("bin");
-    fs::create_dir_all(&cwd).unwrap();
-    fs::create_dir_all(&bin).unwrap();
-    let env_caddy = bin.join("env-caddy");
-    write_file(&env_caddy);
-    unsafe {
-      env::remove_var("CADDER_CADDY__REAL_COMMAND");
-      env::set_var("CADDER_CADDY_REAL_COMMAND", env_caddy.display().to_string());
+    let explicit = dir.path().join(exe_name_for_test("explicit-caddy"));
+    let user = dir.path().join(exe_name_for_test("user-caddy"));
+    let system = dir.path().join(exe_name_for_test("system-caddy"));
+    for path in [&explicit, &user, &system] {
+      write_file(path);
     }
-    let resolver = RealCaddyResolver::with_executable_path(
+    let user_config = dir.path().join("user.toml");
+    let system_config = dir.path().join("system.toml");
+    write_real_caddy_config(&user_config, &user, None);
+    write_real_caddy_config(&system_config, &system, None);
+    let resolver = RealCaddyResolver::with_test_sources(
+      Some(explicit.clone()),
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: Some(user_config),
+        system: Some(system_config),
+      },
       None,
-      Some(dir.path().join(exe_name_for_test("cadderd"))),
     );
 
-    assert_eq!(
-      resolver.resolve_for_working_directory(&cwd).unwrap(),
-      canonical(&env_caddy)
-    );
+    assert_eq!(resolver.resolve().unwrap(), canonical(&explicit));
   }
 
-  #[tokio::test]
-  async fn adapter_resolves_real_caddy_from_registration_working_directory_config() {
+  #[test]
+  fn trusted_caddy_source_profile_and_file_precedence_is_stable() {
     let dir = tempfile::tempdir().unwrap();
-    let daemon_cwd = dir.path().join("daemon");
-    let project_cwd = dir.path().join("project");
-    fs::create_dir_all(&daemon_cwd).unwrap();
-    fs::create_dir_all(&project_cwd).unwrap();
-    let fake_caddy = project_cwd.join(fake_caddy_name_for_test());
-    write_fake_caddy(&fake_caddy);
-    fs::write(
-      project_cwd.join(CONFIG_FILE_NAME),
-      format!(
-        "[caddy]\nreal_command = \"./{}\"\n",
-        fake_caddy_name_for_test()
-      ),
-    )
-    .unwrap();
-    let config_path = project_cwd.join("Caddyfile");
-    fs::write(&config_path, "project.localhost { respond ok }").unwrap();
-    let mut registration = registration("project", &[]);
-    registration.source_working_directory = SourcePath::new(
-      project_cwd.display().to_string(),
-      Some(project_cwd.display().to_string()),
-    );
-    registration.source_config_path = SourcePath::new(
-      config_path.display().to_string(),
-      Some(config_path.display().to_string()),
-    );
+    let user_default = dir.path().join(exe_name_for_test("user-default"));
+    let user_dev = dir.path().join(exe_name_for_test("user-dev"));
+    let system_default = dir.path().join(exe_name_for_test("system-default"));
+    for path in [&user_default, &user_dev, &system_default] {
+      write_file(path);
+    }
+    let user_config = dir.path().join("user.toml");
+    let system_config = dir.path().join("system.toml");
+    write_real_caddy_config(&user_config, &user_default, Some(&user_dev));
+    write_real_caddy_config(&system_config, &system_default, None);
+    let paths = TrustedConfigPaths {
+      user: Some(user_config),
+      system: Some(system_config),
+    };
 
-    let adapter = CaddyConfigAdapter::new(RealCaddyResolver::with_executable_path(
+    let dev = RealCaddyResolver::with_test_sources(None, RuntimeProfile::Dev, paths.clone(), None);
+    let default = RealCaddyResolver::with_test_sources(None, RuntimeProfile::Default, paths, None);
+
+    assert_eq!(dev.resolve().unwrap(), canonical(&user_dev));
+    assert_eq!(default.resolve().unwrap(), canonical(&user_default));
+  }
+
+  #[test]
+  fn trusted_caddy_source_uses_system_profile_and_default_after_empty_user_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let system_default = dir.path().join(exe_name_for_test("system-default"));
+    let system_dev = dir.path().join(exe_name_for_test("system-dev"));
+    write_file(&system_default);
+    write_file(&system_dev);
+    let user_config = dir.path().join("user.toml");
+    let system_config = dir.path().join("system.toml");
+    fs::write(&user_config, "[defaults]\n").unwrap();
+    write_real_caddy_config(&system_config, &system_default, Some(&system_dev));
+    let paths = TrustedConfigPaths {
+      user: Some(user_config),
+      system: Some(system_config),
+    };
+
+    let dev = RealCaddyResolver::with_test_sources(None, RuntimeProfile::Dev, paths.clone(), None);
+    let default = RealCaddyResolver::with_test_sources(None, RuntimeProfile::Default, paths, None);
+
+    assert_eq!(dev.resolve().unwrap(), canonical(&system_dev));
+    assert_eq!(default.resolve().unwrap(), canonical(&system_default));
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn trusted_caddy_source_system_configuration_ignores_program_data_environment_override() {
+    let _lock = lock_env();
+    let _snapshot = EnvSnapshot::capture(&["ProgramData"]);
+    let expected = system_config_path().expect("Windows exposes the ProgramData known folder");
+    unsafe { env::set_var("ProgramData", r"C:\untrusted-program-data") };
+
+    assert_eq!(system_config_path(), Some(expected));
+  }
+
+  #[test]
+  fn trusted_caddy_source_invalid_higher_priority_config_fails_without_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let system = dir.path().join(exe_name_for_test("system-caddy"));
+    write_file(&system);
+    let user_config = dir.path().join("user.toml");
+    let system_config = dir.path().join("system.toml");
+    fs::write(&user_config, "[defaults]\nreal_caddy = 'relative-caddy'\n").unwrap();
+    write_real_caddy_config(&system_config, &system, None);
+    let resolver = RealCaddyResolver::with_test_sources(
       None,
-      Some(daemon_cwd.join(exe_name_for_test("cadderd"))),
-    ));
-    let prepared = adapter.prepare(registration).await;
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: Some(user_config),
+        system: Some(system_config),
+      },
+      None,
+    );
 
-    assert!(
-      prepared.diagnostics.is_empty(),
-      "{:?}",
-      prepared.diagnostics
+    let error = resolver.resolve().unwrap_err();
+
+    assert!(format!("{error:#}").contains("relative real-Caddy path"));
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn trusted_caddy_source_broken_user_config_link_fails_without_fallback() {
+    use std::os::windows::fs::symlink_file;
+
+    let dir = tempfile::tempdir().unwrap();
+    let system = dir.path().join(exe_name_for_test("system-caddy"));
+    write_file(&system);
+    let user_config = dir.path().join("user.toml");
+    let missing_target = dir.path().join("missing-user.toml");
+    symlink_file(&missing_target, &user_config).expect("create broken config link fixture");
+    let system_config = dir.path().join("system.toml");
+    write_real_caddy_config(&system_config, &system, None);
+    let resolver = RealCaddyResolver::with_test_sources(
+      None,
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: Some(user_config),
+        system: Some(system_config),
+      },
+      None,
     );
-    assert_eq!(prepared.registration.registered_domains.len(), 1);
-    assert_eq!(
-      prepared.registration.registered_domains[0].name.canonical,
-      "project.localhost"
+
+    let error = resolver.resolve().unwrap_err();
+
+    assert!(format!("{error:#}").contains("canonicalize test configuration"));
+  }
+
+  #[test]
+  fn trusted_caddy_source_is_pinned_after_first_resolution() {
+    let _guard = lock_env();
+    let _snapshot = EnvSnapshot::capture(&["PATH"]);
+    let dir = tempfile::tempdir().unwrap();
+    let first_dir = dir.path().join("first");
+    let second_dir = dir.path().join("second");
+    fs::create_dir_all(&first_dir).unwrap();
+    fs::create_dir_all(&second_dir).unwrap();
+    let first = first_dir.join(exe_name_for_test("caddy"));
+    let second = second_dir.join(exe_name_for_test("caddy"));
+    write_file(&first);
+    write_file(&second);
+    unsafe {
+      env::set_var("PATH", &first_dir);
+    }
+    let resolver = RealCaddyResolver::with_test_sources(
+      None,
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
+      None,
     );
+
+    assert_eq!(resolver.resolve().unwrap(), canonical(&first));
+    unsafe {
+      env::set_var("PATH", &second_dir);
+    }
+    assert_eq!(resolver.resolve().unwrap(), canonical(&first));
+  }
+
+  #[test]
+  fn trusted_caddy_source_ignores_project_executable_adjacent_and_environment_selectors() {
+    let _guard = lock_env();
+    let _snapshot = EnvSnapshot::capture(&[
+      "PATH",
+      "CADDER_CADDY_REAL_COMMAND",
+      "CADDER_CADDY__REAL_COMMAND",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    let bin = dir.path().join("bin");
+    let path_dir = dir.path().join("path");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&path_dir).unwrap();
+    let rejected = dir.path().join(exe_name_for_test("rejected"));
+    let selected = path_dir.join(exe_name_for_test("caddy"));
+    write_file(&rejected);
+    write_file(&selected);
+    write_real_caddy_config(&project.join(CONFIG_FILE_NAME), &rejected, None);
+    write_real_caddy_config(&bin.join(CONFIG_FILE_NAME), &rejected, None);
+    unsafe {
+      env::set_var("CADDER_CADDY_REAL_COMMAND", &rejected);
+      env::set_var("CADDER_CADDY__REAL_COMMAND", &rejected);
+      env::set_var("PATH", env::join_paths([path_dir]).unwrap());
+    }
+    let resolver = RealCaddyResolver::with_test_sources(
+      None,
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
+      Some(bin.join(exe_name_for_test("cadderd"))),
+    );
+
+    assert_eq!(resolver.resolve().unwrap(), canonical(&selected));
   }
 
   #[tokio::test]
@@ -1669,9 +1910,7 @@ app.localhost, http://api.localhost:8080 {
       Some(config_path.canonicalize().unwrap().display().to_string()),
     );
 
-    let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-      fake_caddy.display().to_string(),
-    )));
+    let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
     let prepared = adapter.prepare(registration).await;
 
     assert!(prepared.diagnostics.is_empty(), "{prepared:?}");
@@ -1717,7 +1956,7 @@ app.localhost, http://api.localhost:8080 {
   }
 
   #[tokio::test]
-  async fn adapter_reports_missing_real_caddy_command() {
+  async fn adapter_reports_invalid_real_caddy_override() {
     let dir = tempfile::tempdir().unwrap();
     let mut registration = registration("project", &[]);
     registration.source_config_path = SourcePath::new(
@@ -1735,7 +1974,7 @@ app.localhost, http://api.localhost:8080 {
     assert!(
       prepared.diagnostics[0]
         .message
-        .contains("resolve real Caddy command")
+        .contains("relative real-Caddy path")
     );
     assert!(prepared.routes.is_empty());
   }
@@ -1798,38 +2037,36 @@ app.localhost, http://api.localhost:8080 {
   }
 
   #[test]
-  fn resolver_resolution_help_and_path_edges_are_stable() {
-    let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("missing-caddy");
-    let error = resolve_command(&missing.display().to_string(), &BTreeSet::new()).unwrap_err();
+  fn trusted_caddy_source_resolution_help_names_only_trusted_sources() {
+    let resolver = RealCaddyResolver::with_test_sources(
+      Some(PathBuf::from("relative-caddy")),
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
+      None,
+    );
+    let error = resolver.resolve().unwrap_err();
     let help = RealCaddyResolver::resolution_help(&error);
 
-    assert!(help.contains("Cadder could not resolve"));
-    assert_eq!(anchor_configured_command("caddy", dir.path()), "caddy");
-    assert!(anchor_configured_command("./bin/caddy", dir.path()).contains("bin"));
-    assert_eq!(trimmed(Some("  caddy  ")).as_deref(), Some("caddy"));
-    assert_eq!(trimmed(Some("   ")), None);
+    assert!(help.contains("absolute --real-caddy daemon-start override"));
+    assert!(help.contains("Project files"));
+    assert!(!help.contains("CADDER_CADDY_REAL_COMMAND"));
   }
 
   #[test]
-  fn resolver_reports_no_selected_command_when_no_source_is_configured() {
+  fn trusted_caddy_source_reports_missing_path_without_implicit_alias() {
     let _guard = lock_env();
-    let _snapshot = EnvSnapshot::capture(&ENV_KEYS);
+    let _snapshot = EnvSnapshot::capture(&["PATH"]);
     unsafe {
-      env::remove_var("CADDER_CADDY__REAL_COMMAND");
-      env::remove_var("CADDER_CADDY_REAL_COMMAND");
+      env::remove_var("PATH");
     }
-    let dir = tempfile::tempdir().unwrap();
     let resolver = RealCaddyResolver::with_executable_path(None, None);
 
-    let selected = resolver.selected_command(dir.path()).unwrap();
-    let explicit = SelectedCaddyCommand::new("caddy".to_string(), "test".to_string());
+    let error = resolver.resolve().unwrap_err();
 
-    assert!(selected.is_none());
-    assert_eq!(resolver.executable_config_path(), None);
-    assert_eq!(explicit.command, "caddy");
-    assert_eq!(explicit.source, "test");
-    assert!(format!("{explicit:?}").contains("SelectedCaddyCommand"));
+    assert!(format!("{error:#}").contains("PATH is not set"));
   }
 
   #[tokio::test]
@@ -1875,57 +2112,46 @@ app.localhost, http://api.localhost:8080 {
   }
 
   #[test]
-  fn resolve_command_rejects_configured_shim_path() {
+  fn trusted_caddy_source_rejects_explicit_shim_by_file_identity() {
     let dir = tempfile::tempdir().unwrap();
     let shim = dir.path().join(exe_name_for_test("caddy"));
     write_file(&shim);
-    let excluded = BTreeSet::from([canonical(&shim)]);
+    let resolver = RealCaddyResolver::with_test_sources(
+      Some(shim.clone()),
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
+      Some(shim),
+    );
 
-    let error = resolve_command(&shim.display().to_string(), &excluded).unwrap_err();
+    let error = resolver.resolve().unwrap_err();
 
-    assert!(error.to_string().contains("Cadder shim"));
+    assert!(error.to_string().contains("Cadder Caddy shim"));
   }
 
   #[test]
-  fn path_fallback_uses_caddy_without_implicit_caddy_real_default() {
+  fn trusted_caddy_source_path_uses_only_the_caddy_executable_name() {
+    let _guard = lock_env();
+    let _snapshot = EnvSnapshot::capture(&["PATH"]);
     let dir = tempfile::tempdir().unwrap();
     let caddy_real = dir.path().join(exe_name_for_test("caddy-real"));
     write_file(&caddy_real);
-    let excluded = BTreeSet::new();
+    unsafe {
+      env::set_var("PATH", dir.path());
+    }
+    let resolver = RealCaddyResolver::with_executable_path(None, None);
 
-    let error = resolve_command_with_path("caddy", &excluded, dir.path().as_os_str()).unwrap_err();
+    let error = resolver.resolve().unwrap_err();
 
-    assert!(error.to_string().contains("command `caddy` not found"));
+    assert!(format!("{error:#}").contains("trusted executable `caddy` not found"));
   }
 
   #[test]
-  fn path_resolution_skips_excluded_shim_and_uses_next_caddy_candidate() {
-    let dir = tempfile::tempdir().unwrap();
-    let shim_dir = dir.path().join("shim");
-    let real_dir = dir.path().join("real");
-    fs::create_dir_all(&shim_dir).unwrap();
-    fs::create_dir_all(&real_dir).unwrap();
-    let shim = shim_dir.join(exe_name_for_test("caddy"));
-    let real = real_dir.join(exe_name_for_test("caddy"));
-    write_file(&shim);
-    write_file(&real);
-    let path_var = env::join_paths([shim_dir.as_path(), real_dir.as_path()]).unwrap();
-
-    let resolved =
-      resolve_command_with_path("caddy", &BTreeSet::from([canonical(&shim)]), &path_var).unwrap();
-
-    assert_eq!(resolved, canonical(&real));
-  }
-
-  #[test]
-  fn resolver_honors_caddy_shim_path_exclusion_when_searching_path() {
+  fn trusted_caddy_source_path_skips_shim_identity_and_uses_next_candidate() {
     let _guard = lock_env();
-    let _snapshot = EnvSnapshot::capture(&[
-      "PATH",
-      "CADDER_CADDY_SHIM_PATH",
-      "CADDER_CADDY_REAL_COMMAND",
-      "CADDER_CADDY__REAL_COMMAND",
-    ]);
+    let _snapshot = EnvSnapshot::capture(&["PATH"]);
     let dir = tempfile::tempdir().unwrap();
     let shim_dir = dir.path().join("shim");
     let real_dir = dir.path().join("real");
@@ -1937,17 +2163,37 @@ app.localhost, http://api.localhost:8080 {
     write_file(&real);
     let path_var = env::join_paths([shim_dir.as_path(), real_dir.as_path()]).unwrap();
     unsafe {
-      env::remove_var("CADDER_CADDY_REAL_COMMAND");
-      env::remove_var("CADDER_CADDY__REAL_COMMAND");
-      env::set_var("CADDER_CADDY_SHIM_PATH", shim.display().to_string());
       env::set_var("PATH", path_var);
     }
-    let resolver = RealCaddyResolver::with_executable_path(
+    let resolver = RealCaddyResolver::with_test_sources(
       None,
-      Some(dir.path().join(exe_name_for_test("cadderd"))),
+      RuntimeProfile::Default,
+      TrustedConfigPaths {
+        user: None,
+        system: None,
+      },
+      Some(shim),
     );
 
-    let resolved = resolver.resolve_for_working_directory(dir.path()).unwrap();
+    let resolved = resolver.resolve().unwrap();
+
+    assert_eq!(resolved, canonical(&real));
+  }
+
+  #[test]
+  fn trusted_caddy_source_ignores_legacy_shim_path_environment_override() {
+    let _guard = lock_env();
+    let _snapshot = EnvSnapshot::capture(&["PATH", "CADDER_CADDY_SHIM_PATH"]);
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join(exe_name_for_test("caddy"));
+    write_file(&real);
+    unsafe {
+      env::set_var("CADDER_CADDY_SHIM_PATH", &real);
+      env::set_var("PATH", dir.path());
+    }
+    let resolver = RealCaddyResolver::with_executable_path(None, None);
+
+    let resolved = resolver.resolve().unwrap();
 
     assert_eq!(resolved, canonical(&real));
   }
@@ -2221,7 +2467,7 @@ app.localhost, http://api.localhost:8080 {
 
   #[tokio::test]
   async fn public_control_types_keep_clone_debug_and_accessor_contracts() {
-    let resolver = RealCaddyResolver::new(None);
+    let resolver = RealCaddyResolver::from_trusted_sources(RuntimeProfile::Default);
     let adapter = CaddyConfigAdapter::new(resolver.clone());
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().to_path_buf())).unwrap();

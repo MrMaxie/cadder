@@ -13,22 +13,23 @@ See [Releases and downloads](../../reference/releases/) if you are deciding betw
 
 ## Configure Real Caddy
 
-Create `cadder.toml` next to the Cadder binaries and set the real Caddy command there. See [cadder.toml](../../user-guide/cadder-toml/) for Windows path syntax, project overrides, environment aliases, and the full set of supported command forms.
+Copy the provided `cadder.toml` template to the standard per-user Cadder configuration directory and set an absolute `defaults.real_caddy` path. You can skip this step when a trusted native `caddy` is already on `PATH`. See [cadder.toml](../../user-guide/cadder-toml/) for profiles and platform syntax.
 
 ## Run A Project
 
 ```sh
+cadder setup shim
 cadderd
 cadder daemon status
 caddy run
 ```
 
-The shim attaches to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running. If the backend is unavailable, Cadder tries to start the missing daemon and then prints recovery steps if startup or attach fails. It does not run `caddy run` as an unmanaged real Caddy fallback.
+`cadder setup shim` creates the optional `caddy` alias after checking for an existing command. The shim attaches to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running. If the daemon is unavailable, the shim names the `cadder daemon start` recovery action and exits without starting unmanaged Caddy.
 
 Inspect Cadder with CLI or TUI:
 
 ```sh
-cadder entrypoints list --output json
+cadder entrypoint list --output json
 cadder logs show --limit 20 domain app.localhost --registration shim-1
 cadder tui
 ```

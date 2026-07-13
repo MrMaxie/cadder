@@ -29,10 +29,10 @@ struct Args {
   runtime_profile: Option<RuntimeProfile>,
 
   #[arg(
-    long,
-    help = "Command or path used when Cadder starts the real Caddy binary"
+    long = "real-caddy",
+    help = "Absolute trusted path used when Cadder starts the real Caddy executable"
   )]
-  real_caddy_command: Option<String>,
+  real_caddy_override: Option<PathBuf>,
 
   #[arg(
     long,
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     DaemonOptions {
       runtime_dir: args.runtime_dir,
       runtime_profile: args.runtime_profile,
-      real_caddy_command: args.real_caddy_command,
+      real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,
     },
     shutdown_rx,
@@ -87,9 +87,8 @@ async fn launch_background_daemon(args: Args) -> Result<()> {
     DaemonLaunchOptions {
       explicit_daemon: Some(current_exe),
       runtime_profile: args.runtime_profile,
-      real_caddy_command: args.real_caddy_command,
+      real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,
-      shim_path: None,
       launch_mode: DaemonLaunchMode::Background,
     },
   )
@@ -133,8 +132,8 @@ mod tests {
       "long help output should describe --runtime-dir: {help}"
     );
     assert!(
-      help.contains("Command or path used when Cadder starts the real Caddy binary"),
-      "long help output should describe --real-caddy-command: {help}"
+      help.contains("Absolute trusted path used when Cadder starts the real Caddy executable"),
+      "long help output should describe --real-caddy: {help}"
     );
     assert!(
       help.contains("Runtime profile used when --runtime-dir"),

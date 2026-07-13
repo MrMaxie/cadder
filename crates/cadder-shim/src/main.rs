@@ -48,7 +48,7 @@ struct ShimArgs {
   daemon_path: Option<PathBuf>,
 
   #[arg(long = "cadder-real-caddy-command", hide = true)]
-  real_caddy_command: Option<String>,
+  rejected_real_caddy_selector: Option<String>,
 
   #[arg(
     long = "cadder-caddy-backend",
@@ -227,6 +227,13 @@ async fn main() -> Result<ExitCode> {
     return Ok(ExitCode::SUCCESS);
   }
 
+  if args.rejected_real_caddy_selector.is_some() {
+    eprintln!(
+      "Cadder did not run real Caddy.\nThe shim cannot select the executable, and no daemon or Caddy state changed.\nNext: Configure an absolute path in the per-user Cadder configuration, or start the daemon with --real-caddy."
+    );
+    return Ok(ExitCode::FAILURE);
+  }
+
   let caddy_backend = args
     .caddy_backend
     .map_or_else(CaddyBackendMode::from_env, Ok)?;
@@ -242,7 +249,7 @@ async fn main() -> Result<ExitCode> {
     if command_policy.kind == ShimCommandPolicyKind::ReadOnlyInspection {
       write_read_only_real_caddy_inspection_notice(&args, command_policy).await;
     }
-    delegate_to_real_caddy(args.real_caddy_command, &args.caddy_args).await
+    delegate_to_real_caddy(&args).await
   }
 }
 
@@ -521,9 +528,8 @@ async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> IpcClien
     DaemonLaunchOptions {
       explicit_daemon: args.daemon_path.clone(),
       runtime_profile: args.runtime_profile,
-      real_caddy_command: args.real_caddy_command.clone(),
+      real_caddy_override: None,
       caddy_backend: args.caddy_backend,
-      shim_path: env::current_exe().ok(),
       ..DaemonLaunchOptions::default()
     },
   )
@@ -722,11 +728,8 @@ fn parse_run_args(args: &[String], cwd: &std::path::Path) -> (PathBuf, Option<St
   (config.unwrap_or_else(|| cwd.join("Caddyfile")), adapter)
 }
 
-async fn delegate_to_real_caddy(
-  real_caddy_command: Option<String>,
-  args: &[String],
-) -> Result<ExitCode> {
-  match run_real_caddy_fallback(real_caddy_command, args).await {
+async fn delegate_to_real_caddy(args: &ShimArgs) -> Result<ExitCode> {
+  match run_real_caddy_fallback(args).await {
     Ok(code) => Ok(code),
     Err(error) => {
       eprintln!("{}", RealCaddyResolver::resolution_help(&error));
@@ -735,14 +738,12 @@ async fn delegate_to_real_caddy(
   }
 }
 
-async fn run_real_caddy_fallback(
-  real_caddy_command: Option<String>,
-  args: &[String],
-) -> Result<ExitCode> {
-  let resolver = RealCaddyResolver::new(real_caddy_command);
+async fn run_real_caddy_fallback(args: &ShimArgs) -> Result<ExitCode> {
+  let profile = real_caddy_profile(args)?;
+  let resolver = RealCaddyResolver::from_trusted_sources(profile);
   let binary = resolver.resolve()?;
   let status = Command::new(binary)
-    .args(args)
+    .args(&args.caddy_args)
     .stdin(Stdio::inherit())
     .stdout(Stdio::inherit())
     .stderr(Stdio::inherit())
@@ -750,6 +751,13 @@ async fn run_real_caddy_fallback(
     .await
     .context("delegate command to real Caddy")?;
   Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+fn real_caddy_profile(args: &ShimArgs) -> Result<RuntimeProfile> {
+  Ok(
+    RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)?
+      .runtime_profile(),
+  )
 }
 
 #[cfg(test)]
@@ -931,15 +939,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn delegate_to_real_caddy_returns_failure_when_resolution_fails() {
-    let code = delegate_to_real_caddy(Some("definitely-missing-caddy-binary".to_string()), &[])
-      .await
-      .unwrap();
-
-    assert_eq!(code, ExitCode::FAILURE);
-  }
-
-  #[tokio::test]
   async fn typed_error_managed_backend_unavailable_message_explains_manual_start() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
@@ -1091,7 +1090,7 @@ mod tests {
       runtime_dir: Some(runtime_dir),
       runtime_profile: None,
       daemon_path: Some(missing_daemon),
-      real_caddy_command: None,
+      rejected_real_caddy_selector: None,
       caddy_backend: Some(CaddyBackendMode::Mock),
       caddy_args: vec!["run".to_string()],
     })
@@ -1099,6 +1098,21 @@ mod tests {
     .unwrap();
 
     assert_eq!(code, ExitCode::FAILURE);
+  }
+
+  #[test]
+  fn real_caddy_delegation_uses_the_requested_runtime_profile() {
+    let temp = tempfile::tempdir().unwrap();
+    let args = ShimArgs {
+      runtime_dir: Some(temp.path().join("runtime")),
+      runtime_profile: Some(RuntimeProfile::Dev),
+      daemon_path: None,
+      rejected_real_caddy_selector: None,
+      caddy_backend: None,
+      caddy_args: vec!["version".to_string()],
+    };
+
+    assert_eq!(real_caddy_profile(&args).unwrap(), RuntimeProfile::Dev);
   }
 
   #[tokio::test]
@@ -1112,7 +1126,7 @@ mod tests {
       runtime_dir: Some(paths.runtime_dir().to_path_buf()),
       runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
-      real_caddy_command: Some(fake_caddy.display().to_string()),
+      rejected_real_caddy_selector: Some(fake_caddy.display().to_string()),
       caddy_backend: None,
       caddy_args: vec!["run".to_string()],
     })
@@ -1134,7 +1148,7 @@ mod tests {
       runtime_dir: Some(paths.runtime_dir().to_path_buf()),
       runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
-      real_caddy_command: None,
+      rejected_real_caddy_selector: None,
       caddy_backend: Some(CaddyBackendMode::Mock),
       caddy_args: vec!["run".to_string()],
     };
@@ -1179,7 +1193,7 @@ mod tests {
       runtime_dir: Some(paths.runtime_dir().to_path_buf()),
       runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
-      real_caddy_command: Some("definitely-missing-caddy-binary".to_string()),
+      rejected_real_caddy_selector: Some("definitely-missing-caddy-binary".to_string()),
       caddy_backend: None,
       caddy_args: vec!["run".to_string()],
     };
@@ -1267,7 +1281,7 @@ mod tests {
       "app.localhost { respond ok }",
     )
     .unwrap();
-    let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
+    let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
     let state = DaemonState::new(CaddyConfigCoordinator::new(
       CaddyConfigAdapter::new(resolver.clone()),
       ProcessRuntime::new(resolver, paths.clone()),
@@ -1285,7 +1299,7 @@ mod tests {
         runtime_dir: Some(paths.runtime_dir().to_path_buf()),
         runtime_profile: None,
         daemon_path: None,
-        real_caddy_command: None,
+        rejected_real_caddy_selector: None,
         caddy_backend: None,
         caddy_args: vec![
           "run".to_string(),

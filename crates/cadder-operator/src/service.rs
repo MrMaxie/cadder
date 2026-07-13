@@ -453,8 +453,7 @@ mod tests {
       Some(runtime_dir.clone()),
       DaemonLaunchOptions {
         explicit_daemon: Some(daemon_path.clone()),
-        real_caddy_command: Some("caddy-real".to_string()),
-        shim_path: Some(temp.path().join("caddy.exe")),
+        real_caddy_override: Some(PathBuf::from("caddy-real")),
         launch_mode: cadder_daemon::DaemonLaunchMode::ForegroundDiagnostic,
         ..DaemonLaunchOptions::default()
       },
@@ -467,10 +466,9 @@ mod tests {
       Some(daemon_path.as_path())
     );
     assert_eq!(
-      context.launch_options().real_caddy_command.as_deref(),
-      Some("caddy-real")
+      context.launch_options().real_caddy_override.as_deref(),
+      Some(std::path::Path::new("caddy-real"))
     );
-    assert!(context.launch_options().shim_path.is_some());
     assert_eq!(
       context.launch_options().launch_mode,
       cadder_daemon::DaemonLaunchMode::ForegroundDiagnostic

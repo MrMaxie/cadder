@@ -43,7 +43,10 @@ impl std::ops::DerefMut for StateFixture {
 fn state() -> StateFixture {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().to_path_buf())).unwrap();
-  let resolver = RealCaddyResolver::new(Some("definitely-missing-caddy".to_string()));
+  let resolver = RealCaddyResolver::for_daemon(
+    Some(temp.path().join("definitely-missing-caddy")),
+    paths.runtime_profile(),
+  );
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let runtime = ProcessRuntime::new(resolver, paths);
   StateFixture {
@@ -71,7 +74,10 @@ async fn shutdown_coordinator_prepare_shutdown_bounds_config_operation_wait() {
 fn state_with_iis(provider: IisProvider) -> StateFixture {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().to_path_buf())).unwrap();
-  let resolver = RealCaddyResolver::new(Some("definitely-missing-caddy".to_string()));
+  let resolver = RealCaddyResolver::for_daemon(
+    Some(temp.path().join("definitely-missing-caddy")),
+    paths.runtime_profile(),
+  );
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let runtime = ProcessRuntime::new(resolver, paths);
   StateFixture {
@@ -91,7 +97,7 @@ fn state_with_fake_caddy_paths(
 ) -> (StateFixture, RuntimePaths) {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().to_path_buf())).unwrap();
-  let resolver = RealCaddyResolver::new(Some(caddy.display().to_string()));
+  let resolver = RealCaddyResolver::for_test_fixture(caddy.to_path_buf());
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let runtime = ProcessRuntime::new(resolver, paths.clone());
   (
@@ -1338,7 +1344,7 @@ async fn runtime_paths_hydrate_iis_proxy_routes_from_metadata() {
     )
     .await
     .unwrap();
-  let resolver = RealCaddyResolver::new(Some(caddy.display().to_string()));
+  let resolver = RealCaddyResolver::for_test_fixture(caddy.to_path_buf());
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let runtime = ProcessRuntime::new(resolver, paths.clone());
   let state =
@@ -1858,7 +1864,7 @@ async fn iis_restore_reports_metadata_clear_failure_after_iis_restore() {
   write_fake_caddy(&caddy);
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
   paths.ensure_dirs().unwrap();
-  let resolver = RealCaddyResolver::new(Some(caddy.display().to_string()));
+  let resolver = RealCaddyResolver::for_test_fixture(caddy.to_path_buf());
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let runtime = ProcessRuntime::new(resolver, paths.clone());
   let binding = iis_binding("Default Web Site", "http", "*:80:app.localhost");

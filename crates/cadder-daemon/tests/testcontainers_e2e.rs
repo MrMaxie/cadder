@@ -306,8 +306,6 @@ impl E2eHarness {
       .arg(&self.runtime_dir)
       .arg("--cadder-daemon-path")
       .arg(&self.daemon_path)
-      .arg("--cadder-real-caddy-command")
-      .arg(&self.proxy_command)
       .arg("run")
       .arg("--config")
       .arg(&project.config_path)
@@ -536,7 +534,7 @@ async fn spawn_daemon(
   command
     .arg("--runtime-dir")
     .arg(runtime_dir)
-    .arg("--real-caddy-command")
+    .arg("--real-caddy")
     .arg(proxy_command)
     .stdin(Stdio::null())
     .stdout(Stdio::null())

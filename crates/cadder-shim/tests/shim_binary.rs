@@ -88,7 +88,7 @@ fn shim_info_flag_ignores_invalid_backend_env() {
 }
 
 #[test]
-fn delegated_command_reports_real_caddy_resolution_failure() {
+fn shim_real_caddy_selector_is_rejected() {
   let output = run_shim(&[
     "--cadder-real-caddy-command",
     "definitely-missing-caddy",
@@ -98,21 +98,21 @@ fn delegated_command_reports_real_caddy_resolution_failure() {
   assert_eq!(output.status.code(), Some(1));
   let stderr = String::from_utf8(output.stderr).unwrap();
   assert!(
-    stderr.contains("could not resolve a safe real Caddy binary"),
+    stderr.contains("shim cannot select the executable"),
     "{stderr}"
   );
 }
 
 #[test]
-fn delegated_command_propagates_real_caddy_exit_code() {
+fn shim_real_caddy_selector_never_executes_the_selected_program() {
   let fake_caddy = write_fake_real_caddy("delegated-exit", 7);
   let fake_caddy_arg = fake_caddy.display().to_string();
 
   let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "version"]);
 
-  assert_eq!(output.status.code(), Some(7));
+  assert_eq!(output.status.code(), Some(1));
   assert!(
-    String::from_utf8(output.stdout)
+    !String::from_utf8(output.stdout)
       .unwrap()
       .contains("delegated version")
   );
@@ -121,10 +121,7 @@ fn delegated_command_propagates_real_caddy_exit_code() {
 
 #[test]
 fn unsupported_command_does_not_delegate_to_real_caddy() {
-  let fake_caddy = write_fake_real_caddy("unsupported-start", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "start"]);
+  let output = run_shim(&["--cadder-caddy-backend", "mock", "start"]);
 
   assert_eq!(output.status.code(), Some(1));
   assert!(
@@ -137,7 +134,6 @@ fn unsupported_command_does_not_delegate_to_real_caddy() {
     stderr.contains("Cadder shim does not support `caddy start`"),
     "{stderr}"
   );
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }
 
 #[test]
@@ -180,16 +176,11 @@ fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
     "missing-cadderd"
   });
   let missing_daemon_arg = missing_daemon.display().to_string();
-  let fake_caddy = write_fake_real_caddy("managed-no-delegate", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
   let output = run_shim(&[
     "--cadder-runtime-dir",
     &runtime_dir_arg,
     "--cadder-daemon-path",
     &missing_daemon_arg,
-    "--cadder-real-caddy-command",
-    &fake_caddy_arg,
     "run",
   ]);
 
@@ -205,36 +196,4 @@ fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
     "{stderr}"
   );
   let _ = fs::remove_dir_all(runtime_dir);
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
-}
-
-#[test]
-fn read_only_command_labels_real_caddy_inspection_when_daemon_is_missing() {
-  let runtime_dir = unique_runtime_dir("read-only-no-daemon");
-  let runtime_dir_arg = runtime_dir.display().to_string();
-  let fake_caddy = write_fake_real_caddy("read-only-no-daemon", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
-    "--cadder-real-caddy-command",
-    &fake_caddy_arg,
-    "version",
-  ]);
-
-  assert_eq!(output.status.code(), Some(0));
-  assert!(
-    String::from_utf8(output.stdout)
-      .unwrap()
-      .contains("delegated version")
-  );
-  let stderr = String::from_utf8(output.stderr).unwrap();
-  assert!(
-    stderr.contains("real-Caddy inspection, not Cadder runtime state"),
-    "{stderr}"
-  );
-  assert!(stderr.contains("cadder daemon start"), "{stderr}");
-  let _ = fs::remove_dir_all(runtime_dir);
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }
