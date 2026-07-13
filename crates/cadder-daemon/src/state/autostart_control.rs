@@ -15,29 +15,54 @@ impl DaemonState {
   }
 
   pub async fn set_autostart(&self, request: SetAutostartRequest) -> SetAutostartResponse {
-    let view = self.autostart.set(request.mode);
-    self.store.record_history(
-      HistoryKind::Autostart,
-      format!("Set autostart mode to {:?}.", request.mode),
-      None,
-      None,
-      &serde_json::json!({
-        "mode": request.mode,
-        "status": view.status,
-        "target": view.target
-      }),
-    );
-    SetAutostartResponse {
+    let request_id = request.request_id.clone();
+    let mode = request.mode;
+    let fence = match self.issue_operation_fence() {
+      Ok(fence) => fence,
+      Err(error) => return autostart_mutation_rejected(request_id, mode, error),
+    };
+    self
+      .set_autostart_fenced(request, &fence)
+      .await
+      .unwrap_or_else(|error| autostart_mutation_rejected(request_id, mode, error))
+  }
+
+  pub(crate) async fn set_autostart_fenced(
+    &self,
+    request: SetAutostartRequest,
+    fence: &OperationFence,
+  ) -> Result<SetAutostartResponse, CommitRejection> {
+    fence.commit_final(|| ())?;
+    Ok(SetAutostartResponse {
       request_id: request.request_id,
-      accepted: matches!(
-        view.status,
-        cadder_protocol::AutostartStatus::Disabled | cadder_protocol::AutostartStatus::Enabled
-      ),
-      message: "Autostart mode updated.".to_string(),
-      mode: view.mode,
-      status: view.status,
-      target: view.target,
-      diagnostics: view.diagnostics,
-    }
+      accepted: false,
+      message: "Autostart changes are unavailable on this installation.".to_string(),
+      mode: request.mode,
+      status: cadder_protocol::AutostartStatus::Unsupported,
+      target: None,
+      diagnostics: vec![cadder_protocol::AutostartDiagnostic {
+        code: "autostart-update-unavailable".to_string(),
+        message: "Configure startup manually, or retry after upgrading Cadder.".to_string(),
+      }],
+    })
+  }
+}
+
+fn autostart_mutation_rejected(
+  request_id: String,
+  mode: cadder_protocol::AutostartMode,
+  error: CommitRejection,
+) -> SetAutostartResponse {
+  SetAutostartResponse {
+    request_id,
+    accepted: false,
+    message: format!("Daemon mutation rejected: {error}."),
+    mode,
+    status: cadder_protocol::AutostartStatus::Unknown,
+    target: None,
+    diagnostics: vec![cadder_protocol::AutostartDiagnostic {
+      code: "autostart-update-rejected".to_string(),
+      message: "Cadder did not change the autostart configuration.".to_string(),
+    }],
   }
 }

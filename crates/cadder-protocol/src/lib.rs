@@ -432,6 +432,7 @@ mod tests {
     roundtrip(
       &[
         IisIssueKind::IisUnavailable,
+        IisIssueKind::HandoffUnavailable,
         IisIssueKind::InsufficientPrivileges,
         IisIssueKind::ElevationRequired,
         IisIssueKind::ElevationDenied,

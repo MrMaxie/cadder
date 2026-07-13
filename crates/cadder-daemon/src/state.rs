@@ -3,8 +3,8 @@ use crate::{
   autostart::AutostartManager,
   caddy::{CaddyApplyAction, IisProxyBackendProtocol},
   iis::{
-    IisBindingRecord, IisMetadataStore, IisMutation, IisProvider, IisRestoreRecord,
-    binding_to_view, unsupported_binding_issue,
+    IisBindingRecord, IisMetadataStore, IisProvider, IisRestoreRecord, binding_to_view,
+    unsupported_binding_issue,
   },
   logs::{CaddyLogStore, LogQuery},
   operation_fence::{CommitRejection, OperationFence, OperationFenceAuthority},
@@ -13,10 +13,9 @@ use crate::{
 };
 use anyhow::Result;
 use cadder_protocol::{
-  ActivationState, BasicResponse, ConfigApplyStatus, ConfigState, EntrypointRegistration,
-  GuiStateSnapshot, HeartbeatEntrypointRequest, HistoryKind, IisBinding, IisElevationApproval,
-  IisFollowUpAction, IisHandoffState, IisIssue, IisIssueKind, IisOperationStep,
-  IisOperationStepStatus, LogAttributionKind, LogSeverity, LogStreamIdentity,
+  ActivationState, BasicResponse, ConfigState, EntrypointRegistration, GuiStateSnapshot,
+  HeartbeatEntrypointRequest, HistoryKind, IisBinding, IisFollowUpAction, IisHandoffState,
+  IisIssue, IisIssueKind, IisOperationStep, LogAttributionKind, LogSeverity, LogStreamIdentity,
   QueryAutostartResponse, QueryHistoryResponse, QueryIisBindingsResponse, QueryLogsResponse,
   QueryStateResponse, RegisterEntrypointResponse, SetAutostartRequest, SetAutostartResponse,
   SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
@@ -31,6 +30,11 @@ use std::{
   },
 };
 use tokio::sync::{Mutex, Notify, Semaphore, broadcast};
+
+#[cfg(test)]
+use crate::iis::IisMutation;
+#[cfg(test)]
+use cadder_protocol::{ConfigApplyStatus, IisElevationApproval, IisOperationStepStatus};
 
 mod autostart_control;
 mod config_apply;
@@ -57,6 +61,7 @@ pub struct DaemonState {
   autostart: AutostartManager,
   iis_provider: IisProvider,
   iis_store: IisMetadataStore,
+  #[cfg(test)]
   iis_operation: Arc<Mutex<()>>,
   shutdown_signal: ShutdownSignal,
   operation_fences: OperationFenceAuthority,

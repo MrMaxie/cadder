@@ -18,6 +18,7 @@ impl DaemonState {
       autostart: AutostartManager::disabled(),
       iis_provider: IisProvider::system(),
       iis_store: IisMetadataStore::memory(),
+      #[cfg(test)]
       iis_operation: Arc::new(Mutex::new(())),
       shutdown_signal: ShutdownSignal::default(),
       operation_fences: OperationFenceAuthority::default(),

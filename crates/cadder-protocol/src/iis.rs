@@ -25,6 +25,7 @@ pub enum IisHandoffState {
 #[serde(rename_all = "camelCase")]
 pub enum IisIssueKind {
   IisUnavailable,
+  HandoffUnavailable,
   InsufficientPrivileges,
   ElevationRequired,
   ElevationDenied,

@@ -1,6 +1,7 @@
 use super::*;
 
 impl DaemonState {
+  #[cfg(test)]
   pub(super) async fn apply_registrations(
     &self,
     registrations: Vec<EntrypointRegistration>,

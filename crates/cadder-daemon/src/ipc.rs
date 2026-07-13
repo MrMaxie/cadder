@@ -964,6 +964,8 @@ fn owned_mutation_uses_worker(message_type: &str) -> bool {
       | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
       | message_types::SET_ENTRYPOINT_ENABLED_REQUEST
       | message_types::SET_DOMAIN_ENABLED_REQUEST
+      | message_types::SET_AUTOSTART_REQUEST
+      | message_types::SET_IIS_HANDOFF_REQUEST
   )
 }
 
@@ -1024,6 +1026,12 @@ where
       SetDomainEnabledRequest,
       OwnedMutationRequest::SetDomainEnabled
     ),
+    message_types::SET_AUTOSTART_REQUEST => {
+      decode_owned_request!(SetAutostartRequest, OwnedMutationRequest::SetAutostart)
+    }
+    message_types::SET_IIS_HANDOFF_REQUEST => {
+      decode_owned_request!(SetIisHandoffRequest, OwnedMutationRequest::SetIisHandoff)
+    }
     _ => unreachable!("owned mutation supervisor called for an untracked operation"),
   };
   let request_id = authorized.request_id();
@@ -1058,7 +1066,7 @@ where
 
   match first {
     First::Worker(result) => {
-      let response = result.context("registration mutation worker failed")??;
+      let response = result.context("owned mutation worker failed")??;
       let wrote_response = write_owned_mutation_result(
         writer,
         &response,
@@ -1093,7 +1101,7 @@ where
       };
 
       if let Some(result) = worker_result {
-        let response = result.context("registration mutation worker failed")??;
+        let response = result.context("owned mutation worker failed")??;
         let _ = write_owned_mutation_result(
           writer,
           &response,
@@ -1116,7 +1124,7 @@ where
           RevokeOutcome::Finalized => {
             let response = (&mut worker)
               .await
-              .context("registration mutation worker failed")??;
+              .context("owned mutation worker failed")??;
             write_envelope_until(
               writer,
               response_type,
@@ -1137,9 +1145,7 @@ where
     First::Cancelled => {
       match fence.try_revoke() {
         RevokeOutcome::Finalized => {
-          let response = worker
-            .await
-            .context("registration mutation worker failed")??;
+          let response = worker.await.context("owned mutation worker failed")??;
           write_envelope_until(
             writer,
             response_type,
@@ -1162,9 +1168,7 @@ where
           send_operation_timeout(writer, request_id, authorized.definition(), limits).await?;
         }
         RevokeOutcome::Finalized => {
-          let response = worker
-            .await
-            .context("registration mutation worker failed")??;
+          let response = worker.await.context("owned mutation worker failed")??;
           write_envelope_until(
             writer,
             response_type,
@@ -1225,6 +1229,8 @@ enum OwnedMutationRequest {
   Heartbeat(HeartbeatEntrypointRequest),
   SetEntrypointEnabled(SetEntrypointEnabledRequest),
   SetDomainEnabled(SetDomainEnabledRequest),
+  SetAutostart(SetAutostartRequest),
+  SetIisHandoff(SetIisHandoffRequest),
 }
 
 impl OwnedMutationRequest {
@@ -1235,6 +1241,8 @@ impl OwnedMutationRequest {
       Self::Heartbeat(_) => message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
       Self::SetEntrypointEnabled(_) => message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
       Self::SetDomainEnabled(_) => message_types::SET_DOMAIN_ENABLED_RESPONSE,
+      Self::SetAutostart(_) => message_types::SET_AUTOSTART_RESPONSE,
+      Self::SetIisHandoff(_) => message_types::SET_IIS_HANDOFF_RESPONSE,
     }
   }
 
@@ -1287,6 +1295,12 @@ impl OwnedMutationRequest {
       Self::SetDomainEnabled(request) => Ok(OwnedMutationResponse::Basic(
         state.set_domain_enabled_fenced(request, &fence).await?,
       )),
+      Self::SetAutostart(request) => Ok(OwnedMutationResponse::Autostart(
+        state.set_autostart_fenced(request, &fence).await?,
+      )),
+      Self::SetIisHandoff(request) => Ok(OwnedMutationResponse::Iis(Box::new(
+        state.set_iis_handoff_fenced(request, &fence).await?,
+      ))),
     }
   }
 }
@@ -1296,6 +1310,8 @@ impl OwnedMutationRequest {
 enum OwnedMutationResponse {
   Register(cadder_protocol::RegisterEntrypointResponse),
   Basic(cadder_protocol::BasicResponse),
+  Autostart(cadder_protocol::SetAutostartResponse),
+  Iis(Box<cadder_protocol::SetIisHandoffResponse>),
 }
 
 fn operation_uses_fence(definition: &cadder_protocol::OperationDefinition) -> bool {
@@ -1798,7 +1814,9 @@ where
     }
     message_types::SET_IIS_HANDOFF_REQUEST => {
       let request = decode_request!(SetIisHandoffRequest);
-      let response = state.set_iis_handoff(request).await;
+      let response = state
+        .set_iis_handoff_fenced(request, mutation_fence(operation_fence)?)
+        .await?;
       send_response!(message_types::SET_IIS_HANDOFF_RESPONSE, response);
     }
     message_types::QUERY_LOGS_REQUEST => {
@@ -1818,7 +1836,9 @@ where
     }
     message_types::SET_AUTOSTART_REQUEST => {
       let request = decode_request!(SetAutostartRequest);
-      let response = state.set_autostart(request).await;
+      let response = state
+        .set_autostart_fenced(request, mutation_fence(operation_fence)?)
+        .await?;
       send_response!(message_types::SET_AUTOSTART_RESPONSE, response);
     }
     message_types::SUBSCRIBE_STATE_REQUEST => {
@@ -3952,6 +3972,12 @@ mod tests {
     assert!(owned_mutation_uses_worker(
       message_types::SET_DOMAIN_ENABLED_REQUEST
     ));
+    assert!(owned_mutation_uses_worker(
+      message_types::SET_AUTOSTART_REQUEST
+    ));
+    assert!(owned_mutation_uses_worker(
+      message_types::SET_IIS_HANDOFF_REQUEST
+    ));
     assert!(!owned_mutation_uses_worker(
       message_types::QUERY_STATE_REQUEST
     ));
@@ -5044,6 +5070,50 @@ mod tests {
       Some("Check the current daemon state before retrying the operation."),
       true,
     );
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_revoke_autostart_before_claim_without_history() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      ordinary_operation: Duration::from_millis(25),
+      dispatch_delay: Duration::from_millis(100),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut session = CadderSession::connect(&daemon.paths).await.unwrap();
+
+    let error = session
+      .request::<SetAutostartRequest>(
+        message_types::SET_AUTOSTART_REQUEST,
+        message_types::SET_AUTOSTART_RESPONSE,
+        &SetAutostartRequest {
+          request_id: "ipc-limits-autostart-timeout".to_string(),
+          mode: AutostartMode::Daemon,
+        },
+      )
+      .await
+      .unwrap_err();
+
+    assert_daemon_error(
+      &error,
+      ProtocolErrorKind::Timeout,
+      "timeout",
+      "ipc-limits-autostart-timeout",
+      "Cadder did not finish `set-autostart-request` before its local operation deadline; the outcome is unknown.",
+      Some("Check the current daemon state before retrying the operation."),
+      false,
+    );
+    sleep(Duration::from_millis(125)).await;
+    let history = daemon
+      .state
+      .query_history(cadder_protocol::QueryHistoryRequest {
+        request_id: "autostart-timeout-history".to_string(),
+        kind: Some(cadder_protocol::HistoryKind::Autostart),
+        limit: Some(10),
+      })
+      .await;
+    assert!(history.records.is_empty());
     daemon.stop().await;
   }
 
@@ -6962,6 +7032,7 @@ mod tests {
 
   struct RunningTestDaemon {
     paths: RuntimePaths,
+    state: DaemonState,
     shutdown: watch::Sender<bool>,
     task: JoinHandle<Result<()>>,
     _temp: tempfile::TempDir,
@@ -6983,13 +7054,14 @@ mod tests {
       .unwrap();
       let (shutdown, shutdown_rx) = watch::channel(false);
       let task = tokio::spawn(
-        DaemonServer::new(paths.clone(), state)
+        DaemonServer::new(paths.clone(), state.clone())
           .with_limits(limits)
           .run_until(shutdown_rx),
       );
       wait_for_ready(&paths).await;
       Self {
         paths,
+        state,
         shutdown,
         task,
         _temp: temp,

@@ -261,6 +261,7 @@ enum IisProviderInner {
   Fake(Arc<Mutex<FakeIisProviderState>>),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub enum IisMutation {
   Add(IisBindingRecord),
@@ -268,6 +269,7 @@ pub enum IisMutation {
   Restore(IisBindingRecord),
 }
 
+#[cfg(test)]
 impl IisMutation {
   pub fn add(binding: IisBindingRecord) -> Self {
     Self::Add(binding)
@@ -316,6 +318,7 @@ impl IisProvider {
     }
   }
 
+  #[cfg(test)]
   pub async fn remove_binding(&self, binding: &IisBindingRecord) -> Result<(), IisIssue> {
     match &self.inner {
       IisProviderInner::System => system_remove_binding(binding).await,
@@ -324,6 +327,7 @@ impl IisProvider {
     }
   }
 
+  #[cfg(test)]
   pub async fn add_binding(&self, binding: &IisBindingRecord) -> Result<(), IisIssue> {
     match &self.inner {
       IisProviderInner::System => system_add_binding(binding).await,
@@ -332,6 +336,7 @@ impl IisProvider {
     }
   }
 
+  #[cfg(test)]
   pub async fn restore_binding(&self, binding: &IisBindingRecord) -> Result<(), IisIssue> {
     match &self.inner {
       IisProviderInner::System => system_restore_binding(binding).await,
@@ -340,6 +345,7 @@ impl IisProvider {
     }
   }
 
+  #[cfg(test)]
   pub async fn execute_privileged_batch(
     &self,
     reason: &str,
@@ -498,11 +504,13 @@ async fn system_discover() -> Result<Vec<IisBindingRecord>, IisIssue> {
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn system_remove_binding(binding: &IisBindingRecord) -> Result<(), IisIssue> {
   run_powershell_mutation(system_remove_binding_script(binding)).await
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 fn system_remove_binding_script(binding: &IisBindingRecord) -> String {
   format!(
     "$ErrorActionPreference = 'Stop'; Import-Module WebAdministration -ErrorAction Stop; Remove-WebBinding -Name '{}' -Protocol '{}' -BindingInformation '{}'",
@@ -512,7 +520,7 @@ fn system_remove_binding_script(binding: &IisBindingRecord) -> String {
   )
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 async fn system_remove_binding(_binding: &IisBindingRecord) -> Result<(), IisIssue> {
   Err(IisIssue::new(
     IisIssueKind::IisUnavailable,
@@ -521,11 +529,13 @@ async fn system_remove_binding(_binding: &IisBindingRecord) -> Result<(), IisIss
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn system_add_binding(binding: &IisBindingRecord) -> Result<(), IisIssue> {
   run_powershell_mutation(system_add_binding_script(binding)).await
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 fn system_add_binding_script(binding: &IisBindingRecord) -> String {
   let ssl_flags = binding
     .tls_certificate
@@ -589,7 +599,7 @@ try {{
   )
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 async fn system_add_binding(_binding: &IisBindingRecord) -> Result<(), IisIssue> {
   Err(IisIssue::new(
     IisIssueKind::IisUnavailable,
@@ -598,16 +608,18 @@ async fn system_add_binding(_binding: &IisBindingRecord) -> Result<(), IisIssue>
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn system_restore_binding(binding: &IisBindingRecord) -> Result<(), IisIssue> {
   system_add_binding(binding).await
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 fn system_restore_binding_script(binding: &IisBindingRecord) -> String {
   system_add_binding_script(binding)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 async fn system_restore_binding(_binding: &IisBindingRecord) -> Result<(), IisIssue> {
   Err(IisIssue::new(
     IisIssueKind::IisUnavailable,
@@ -616,6 +628,7 @@ async fn system_restore_binding(_binding: &IisBindingRecord) -> Result<(), IisIs
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn system_execute_privileged_batch(
   reason: &str,
   mutations: &[IisMutation],
@@ -635,7 +648,7 @@ async fn system_execute_privileged_batch(
   run_elevated_powershell_batch(reason, scripts).await
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 async fn system_execute_privileged_batch(
   _reason: &str,
   _mutations: &[IisMutation],
@@ -647,6 +660,7 @@ async fn system_execute_privileged_batch(
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn run_powershell_mutation(script: String) -> Result<(), IisIssue> {
   let output = powershell_command()
     .arg("-NoProfile")
@@ -664,6 +678,7 @@ async fn run_powershell_mutation(script: String) -> Result<(), IisIssue> {
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 async fn run_elevated_powershell_batch(reason: &str, script: String) -> Result<(), IisIssue> {
   let stamp = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
@@ -770,6 +785,7 @@ fn configure_hidden_child(command: &mut tokio::process::Command) {
 }
 
 #[cfg(windows)]
+#[cfg(test)]
 fn ps_escape(value: &str) -> String {
   value.replace('\'', "''")
 }

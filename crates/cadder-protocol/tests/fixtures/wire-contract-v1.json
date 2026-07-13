@@ -242,6 +242,7 @@
     ],
     "iisIssueKind": [
       "iisUnavailable",
+      "handoffUnavailable",
       "insufficientPrivileges",
       "elevationRequired",
       "elevationDenied",

@@ -836,6 +836,7 @@ fn wire_discriminators() -> Value {
     ]),
     "iisIssueKind": enum_wire_values!(IisIssueKind => [
       IisIssueKind::IisUnavailable,
+      IisIssueKind::HandoffUnavailable,
       IisIssueKind::InsufficientPrivileges,
       IisIssueKind::ElevationRequired,
       IisIssueKind::ElevationDenied,

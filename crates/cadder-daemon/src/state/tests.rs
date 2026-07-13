@@ -8,6 +8,7 @@ use super::iis_handoff::{
 use super::*;
 use crate::{
   CaddyConfigAdapter, CaddyConfigCoordinator, ProcessRuntime, RealCaddyResolver, RuntimePaths,
+  operation_fence::RevokeOutcome,
 };
 use cadder_protocol::{
   AutostartMode, AutostartStatus, EntrypointInstanceIdentity, LogAttributionKind, LogSeverity,
@@ -952,7 +953,7 @@ async fn iis_handoff_reports_metadata_write_failure_before_mutating_iis() {
 }
 
 #[tokio::test]
-async fn set_autostart_reports_unsupported_missing_targets_and_records_history() {
+async fn set_autostart_fails_closed_without_history() {
   let state = state();
 
   let response = state
@@ -972,12 +973,117 @@ async fn set_autostart_reports_unsupported_missing_targets_and_records_history()
   assert!(!response.accepted);
   assert_eq!(response.status, AutostartStatus::Unsupported);
   assert!(response.target.is_none());
-  assert!(response.diagnostics.iter().any(|diagnostic| {
-    diagnostic.code == "autostart-update-failed"
-      && diagnostic.message.contains("cadderd executable")
-  }));
-  assert_eq!(history.records.len(), 1);
-  assert_eq!(history.records[0].kind, HistoryKind::Autostart);
+  assert_eq!(
+    response
+      .diagnostics
+      .iter()
+      .map(|diagnostic| diagnostic.code.as_str())
+      .collect::<Vec<_>>(),
+    vec!["autostart-update-unavailable"]
+  );
+  assert!(history.records.is_empty());
+}
+
+#[tokio::test]
+async fn revoked_autostart_fence_prevents_apply_and_history() {
+  let state = state();
+  let fence = state.issue_operation_fence().unwrap();
+  fence.revoke();
+
+  let result = state
+    .set_autostart_fenced(
+      SetAutostartRequest {
+        request_id: "autostart-revoked".to_string(),
+        mode: AutostartMode::Daemon,
+      },
+      &fence,
+    )
+    .await;
+  let history = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "history".to_string(),
+      kind: Some(HistoryKind::Autostart),
+      limit: Some(10),
+    })
+    .await;
+
+  assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
+  assert!(history.records.is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_autostart_response_finalizes_without_platform_apply() {
+  let state = state();
+  let fence = state.issue_operation_fence().unwrap();
+
+  let response = state
+    .set_autostart_fenced(
+      SetAutostartRequest {
+        request_id: "autostart-finalized".to_string(),
+        mode: AutostartMode::Daemon,
+      },
+      &fence,
+    )
+    .await
+    .unwrap();
+
+  assert!(!response.accepted);
+  assert_eq!(fence.try_revoke(), RevokeOutcome::Finalized);
+}
+
+#[tokio::test]
+async fn revoked_iis_handoff_fence_prevents_provider_and_metadata_changes() {
+  let binding = iis_binding("App", "http", "*:80:app.localhost");
+  let provider = IisProvider::fake(vec![binding.clone()]);
+  let state = state_with_iis(provider.clone());
+  let fence = state.issue_operation_fence().unwrap();
+  fence.revoke();
+
+  let result = state
+    .set_iis_handoff_fenced(
+      SetIisHandoffRequest {
+        request_id: "iis-revoked".to_string(),
+        binding_id: binding.binding_id(),
+        enabled: true,
+        route_host: None,
+      },
+      &fence,
+    )
+    .await;
+
+  assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
+  assert_eq!(provider.discover().await.unwrap(), vec![binding]);
+  assert!(state.iis_store.snapshot().await.is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_iis_handoff_response_finalizes_without_mutation() {
+  let binding = iis_binding("App", "http", "*:80:app.localhost");
+  let provider = IisProvider::fake(vec![binding.clone()]);
+  let state = state_with_iis(provider.clone());
+  let fence = state.issue_operation_fence().unwrap();
+
+  let response = state
+    .set_iis_handoff_fenced(
+      SetIisHandoffRequest {
+        request_id: "iis-unavailable".to_string(),
+        binding_id: binding.binding_id(),
+        enabled: true,
+        route_host: None,
+      },
+      &fence,
+    )
+    .await
+    .unwrap();
+
+  assert!(!response.accepted);
+  assert_eq!(
+    response.issue.as_ref().map(|issue| issue.kind),
+    Some(IisIssueKind::HandoffUnavailable)
+  );
+  assert_eq!(fence.try_revoke(), RevokeOutcome::Finalized);
+  assert_eq!(provider.discover().await.unwrap(), vec![binding]);
+  assert!(state.iis_store.snapshot().await.is_empty());
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]

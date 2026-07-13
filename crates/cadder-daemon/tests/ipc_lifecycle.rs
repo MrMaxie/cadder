@@ -227,7 +227,7 @@ async fn ipc_local_operator_requests_cover_autostart_status() {
 }
 
 #[tokio::test]
-async fn ipc_set_autostart_request_records_history_over_wire() {
+async fn ipc_set_autostart_request_fails_closed_without_history() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
 
@@ -251,10 +251,15 @@ async fn ipc_set_autostart_request_records_history_over_wire() {
     cadder_protocol::AutostartStatus::Unsupported
   );
   assert!(response.target.is_none());
-  assert!(history.records.iter().any(|record| {
-    record.kind == cadder_protocol::HistoryKind::Autostart
-      && record.summary == "Set autostart mode to Daemon."
-  }));
+  assert_eq!(
+    response
+      .diagnostics
+      .iter()
+      .map(|diagnostic| diagnostic.code.as_str())
+      .collect::<Vec<_>>(),
+    vec!["autostart-update-unavailable"]
+  );
+  assert!(history.records.is_empty());
   harness.shutdown().await;
 }
 
@@ -292,7 +297,13 @@ async fn ipc_iis_operator_requests_return_typed_responses() {
   assert!(bindings.request_id.starts_with("test-query-iis-"));
   assert!(handoff.request_id.starts_with("test-set-iis-"));
   assert!(!handoff.accepted);
-  assert!(handoff.issue.is_some() || handoff.binding.is_none());
+  assert_eq!(
+    handoff.issue.as_ref().map(|issue| issue.kind),
+    Some(cadder_protocol::IisIssueKind::HandoffUnavailable)
+  );
+  assert!(handoff.message.contains("Upgrade Cadder"));
+  assert!(handoff.binding.is_none());
+  assert!(handoff.steps.is_empty());
   harness.shutdown().await;
 }
 

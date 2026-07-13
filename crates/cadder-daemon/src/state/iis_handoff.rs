@@ -25,6 +25,20 @@ impl DaemonState {
     }
   }
 
+  pub(crate) async fn set_iis_handoff_fenced(
+    &self,
+    request: SetIisHandoffRequest,
+    fence: &OperationFence,
+  ) -> Result<SetIisHandoffResponse, CommitRejection> {
+    fence.commit_final(|| ())?;
+    let issue = IisIssue::new(
+      IisIssueKind::HandoffUnavailable,
+      "IIS handoff changes are unavailable on this installation. Upgrade Cadder before retrying this operation.",
+    );
+    Ok(iis_failure(request.request_id, issue, None, Vec::new()))
+  }
+
+  #[cfg(test)]
   pub async fn set_iis_handoff(&self, request: SetIisHandoffRequest) -> SetIisHandoffResponse {
     let request_id = request.request_id.clone();
     let Ok(_operation) = self.iis_operation.try_lock() else {
@@ -42,6 +56,7 @@ impl DaemonState {
     }
   }
 
+  #[cfg(test)]
   async fn enable_iis_handoff(&self, request: SetIisHandoffRequest) -> SetIisHandoffResponse {
     let records = match self.iis_provider.discover().await {
       Ok(records) => records,
@@ -322,6 +337,7 @@ impl DaemonState {
     }
   }
 
+  #[cfg(test)]
   async fn disable_iis_handoff(&self, request: SetIisHandoffRequest) -> SetIisHandoffResponse {
     let mut steps = disable_iis_steps();
     let handoffs = self.iis_store.snapshot().await;
@@ -564,6 +580,7 @@ pub(super) fn duplicate_iis_hosts(records: &[IisBindingRecord]) -> BTreeSet<Stri
     .collect()
 }
 
+#[cfg(test)]
 pub(super) fn iis_route_host_conflicts(
   records: &[IisBindingRecord],
   selected_binding_id: &str,
@@ -669,6 +686,7 @@ pub(super) fn active_registration_conflict(
   })
 }
 
+#[cfg(test)]
 pub(super) fn caddy_front_door_needed(
   registrations: &BTreeMap<String, EntrypointRegistration>,
   restoring_domain: &str,
@@ -683,6 +701,7 @@ pub(super) fn caddy_front_door_needed(
     })
 }
 
+#[cfg(test)]
 pub(super) fn enable_iis_steps() -> Vec<IisOperationStep> {
   vec![
     IisOperationStep::user("iis-discover-bindings", "Discover IIS bindings."),
@@ -703,6 +722,7 @@ pub(super) fn enable_iis_steps() -> Vec<IisOperationStep> {
   ]
 }
 
+#[cfg(test)]
 pub(super) fn disable_iis_steps() -> Vec<IisOperationStep> {
   vec![
     IisOperationStep::user("iis-read-restore-metadata", "Read IIS restore metadata."),
@@ -719,6 +739,7 @@ pub(super) fn disable_iis_steps() -> Vec<IisOperationStep> {
   ]
 }
 
+#[cfg(test)]
 pub(super) fn mark_step_succeeded(steps: &mut [IisOperationStep], step_id: &str) {
   if let Some(step) = steps.iter_mut().find(|step| step.step_id == step_id) {
     step.status = IisOperationStepStatus::Succeeded;
@@ -726,6 +747,7 @@ pub(super) fn mark_step_succeeded(steps: &mut [IisOperationStep], step_id: &str)
   }
 }
 
+#[cfg(test)]
 pub(super) fn mark_step_issue(steps: &mut [IisOperationStep], step_id: &str, issue: &IisIssue) {
   if let Some(step) = steps.iter_mut().find(|step| step.step_id == step_id) {
     step.status = match issue.kind {
@@ -739,6 +761,7 @@ pub(super) fn mark_step_issue(steps: &mut [IisOperationStep], step_id: &str, iss
   }
 }
 
+#[cfg(test)]
 pub(super) fn mark_privileged_batch_approved(steps: &mut [IisOperationStep], step_ids: &[&str]) {
   for step_id in step_ids {
     if let Some(step) = steps.iter_mut().find(|step| step.step_id == *step_id) {
@@ -748,6 +771,7 @@ pub(super) fn mark_privileged_batch_approved(steps: &mut [IisOperationStep], ste
   }
 }
 
+#[cfg(test)]
 pub(super) fn mark_privileged_batch_issue(
   steps: &mut [IisOperationStep],
   step_ids: &[&str],
@@ -774,12 +798,14 @@ pub(super) fn mark_privileged_batch_issue(
   }
 }
 
+#[cfg(test)]
 pub(super) fn mark_step_skipped(steps: &mut [IisOperationStep], step_id: &str) {
   if let Some(step) = steps.iter_mut().find(|step| step.step_id == step_id) {
     step.status = IisOperationStepStatus::Skipped;
   }
 }
 
+#[cfg(test)]
 pub(super) fn follow_up_actions_for_issue(issue: &IisIssue) -> Vec<IisFollowUpAction> {
   match issue.kind {
     IisIssueKind::ElevationDenied

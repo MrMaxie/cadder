@@ -47,6 +47,7 @@ impl DaemonState {
     )
   }
 
+  #[cfg(test)]
   pub(super) async fn publish_change(
     &self,
     kind: StateChangeKind,
@@ -55,6 +56,7 @@ impl DaemonState {
     self.publish_change_inner(kind, registration_id).await;
   }
 
+  #[cfg(test)]
   async fn publish_change_inner(&self, kind: StateChangeKind, registration_id: Option<String>) {
     let _publish = self.publish_operation.lock().await;
     let registrations = {
