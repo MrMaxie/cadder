@@ -18,6 +18,35 @@ impl DaemonState {
     self.snapshot_from_parts(registrations).await
   }
 
+  pub(crate) async fn subscribe_snapshot(
+    &self,
+    request_id: String,
+  ) -> (
+    StateChangedEvent,
+    tokio::sync::broadcast::Receiver<StateChangedEvent>,
+  ) {
+    let _publish = self.publish_operation.lock().await;
+    let subscription = self.events.subscribe();
+    let (sequence_number, registrations) = {
+      let inner = self.inner.lock().await;
+      (
+        inner.sequence,
+        inner.registrations.values().cloned().collect::<Vec<_>>(),
+      )
+    };
+    let snapshot = self.snapshot_from_parts(registrations).await;
+    (
+      StateChangedEvent {
+        request_id,
+        sequence_number,
+        change_kind: StateChangeKind::Snapshot,
+        snapshot,
+        registration_id: None,
+      },
+      subscription,
+    )
+  }
+
   pub(super) async fn publish_change(
     &self,
     kind: StateChangeKind,
@@ -40,6 +69,13 @@ impl DaemonState {
       registration_id,
     };
     let _ = self.events.send(event);
+  }
+
+  #[cfg(test)]
+  pub(crate) async fn publish_test_change(&self) {
+    self
+      .publish_change(StateChangeKind::RuntimeChanged, None)
+      .await;
   }
 
   async fn snapshot_from_parts(

@@ -17,7 +17,7 @@
 
 - [x] 3.1 `[IPC-004]` Replace every unbounded NDJSON reader and writer with the shared 1 MiB bounded codec (verification: `cargo test -p cadder-daemon ipc_codec`)
 - [x] 3.2 `[IPC-004]` `[IPC-005]` Enforce the shared accept-to-first-frame deadline, one active request, pipelining rejection, the 64-connection cap, and operation-specific deadlines (verification: `cargo test -p cadder-daemon ipc_limits`)
-- [ ] 3.3 `[IPC-005]` Bound stream records and bytes, emit heartbeats and gap outcomes, and close stalled writers (verification: `cargo test -p cadder-daemon stream_limits`)
+- [x] 3.3 `[IPC-005]` Bound stream records and bytes, emit heartbeats and gap outcomes, and close stalled writers (verification: `cargo test -p cadder-daemon stream_limits`)
 - [ ] 3.4 `[RUN-005]` `[IPC-005]` Add cancellation/task ownership, lifecycle epochs, and per-operation commit permits that reject late mutation without invalidating unrelated work (verification: `cargo test -p cadder-daemon operation_fence`)
 - [ ] 3.5 `[RUN-005]` `[IPC-009]` Implement the shared accept, request/stream, and owned-runtime shutdown phases and their fixed budgets (verification: `cargo test -p cadder-daemon shutdown_coordinator`)
 - [ ] 3.6 `[RUN-005]` `[IPC-009]` Add interruptible storage flush/join and generation-matched discovery and lock cleanup (verification: `cargo test -p cadder-daemon shutdown_storage`)

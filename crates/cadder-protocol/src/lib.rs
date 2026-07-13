@@ -542,6 +542,8 @@ mod tests {
       message_types::QUERY_STATE_RESPONSE,
       message_types::SUBSCRIBE_STATE_REQUEST,
       message_types::STATE_CHANGED_EVENT,
+      message_types::STATE_STREAM_HEARTBEAT,
+      message_types::STATE_STREAM_GAP,
       message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
       message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
       message_types::SET_DOMAIN_ENABLED_REQUEST,
@@ -962,6 +964,15 @@ mod tests {
       snapshot,
       registration_id: Some(identity.instance_id.clone()),
     };
+    let stream_heartbeat = StateStreamHeartbeat {
+      request_id: "watch-1".to_string(),
+      last_sequence_number: 7,
+    };
+    let stream_gap = StateStreamGap {
+      request_id: "watch-1".to_string(),
+      first_missing_sequence_number: 8,
+      last_missing_sequence_number: 11,
+    };
     let requests = serde_json::json!([
       QueryStateRequest {
         request_id: "state".to_string()
@@ -1026,6 +1037,8 @@ mod tests {
       IpcEnvelope::new(message_types::QUERY_AUTOSTART_RESPONSE, &autostart_response).unwrap();
     let decoded_autostart: QueryAutostartResponse = autostart_envelope.decode().unwrap();
     let event_json = serde_json::to_string(&state_event).unwrap();
+    let heartbeat_json = serde_json::to_string(&stream_heartbeat).unwrap();
+    let gap_json = serde_json::to_string(&stream_gap).unwrap();
     let request_json = serde_json::to_string(&requests).unwrap();
     let variants = serde_json::json!({
       "runtime": [RuntimeStatus::Unknown, RuntimeStatus::NotResolved, RuntimeStatus::Resolved, RuntimeStatus::Running, RuntimeStatus::Unhealthy, RuntimeStatus::Idle],
@@ -1041,6 +1054,9 @@ mod tests {
     assert_eq!(decoded, state_response);
     assert_eq!(decoded_autostart, autostart_response);
     assert!(event_json.contains("\"runtimeChanged\""));
+    assert!(heartbeat_json.contains("\"lastSequenceNumber\":7"));
+    assert!(gap_json.contains("\"firstMissingSequenceNumber\":8"));
+    assert!(gap_json.contains("\"lastMissingSequenceNumber\":11"));
     assert!(request_json.contains("\"minimumSeverity\":\"warn\""));
     assert!(request_json.contains("\"set-autostart\""));
     assert!(variants.to_string().contains("misconfigured"));

@@ -20,8 +20,8 @@ use cadder_protocol::{
   QueryStateRequest, RegisterEntrypointRequest, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
   ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
   SetEntrypointEnabledRequest, SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent,
-  SubscribeStateRequest, UnregisterEntrypointRequest, ensure_compatible_protocol_version,
-  message_types, new_request_id,
+  StateStreamGap, StateStreamHeartbeat, StateStreamRecord, SubscribeStateRequest,
+  UnregisterEntrypointRequest, ensure_compatible_protocol_version, message_types, new_request_id,
 };
 use fs4::{FileExt, TryLockError};
 use futures_util::StreamExt;
@@ -37,7 +37,13 @@ use serde::{Serialize, de::DeserializeOwned};
 #[cfg(not(any(unix, windows)))]
 use std::fs::OpenOptions;
 use std::{
-  collections::BTreeMap, env, fs::File, io, path::PathBuf, process::Stdio, sync::Arc,
+  collections::{BTreeMap, VecDeque},
+  env,
+  fs::File,
+  io,
+  path::PathBuf,
+  process::Stdio,
+  sync::Arc,
   time::Duration,
 };
 use tokio::{
@@ -47,6 +53,7 @@ use tokio::{
   time::{Instant, sleep, sleep_until, timeout_at},
 };
 use tokio_util::codec::FramedRead;
+use tokio_util::sync::CancellationToken;
 
 type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
 
@@ -84,6 +91,9 @@ struct IpcLimits {
   ordinary_operation: Duration,
   reload_operation: Duration,
   stream_setup: Duration,
+  stream_heartbeat: Duration,
+  stream_max_records: usize,
+  stream_max_bytes: usize,
   shutdown_operation: Duration,
   #[cfg(test)]
   dispatch_delay: Duration,
@@ -99,6 +109,9 @@ impl Default for IpcLimits {
       ordinary_operation: Duration::from_secs(30),
       reload_operation: Duration::from_secs(120),
       stream_setup: Duration::from_secs(30),
+      stream_heartbeat: Duration::from_secs(15),
+      stream_max_records: 256,
+      stream_max_bytes: 512 * 1024,
       shutdown_operation: Duration::from_secs(30),
       #[cfg(test)]
       dispatch_delay: Duration::ZERO,
@@ -189,6 +202,7 @@ impl DaemonServer {
     let mut endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
     let shutdown_signal = self.state.shutdown_signal();
     let connection_permits = Arc::new(Semaphore::new(self.limits.max_connections));
+    let stream_cancellation = CancellationToken::new();
 
     loop {
       tokio::select! {
@@ -212,6 +226,7 @@ impl DaemonServer {
                       let policy = self.security_policy.clone();
                       let peer_identity_resolver = self.peer_identity_resolver.clone();
                       let handshake_identity = handshake_identity.clone();
+                      let stream_cancellation = stream_cancellation.clone();
                       let limits = self.limits;
                       tokio::spawn(async move {
                           let _connection_permit = connection_permit;
@@ -230,8 +245,11 @@ impl DaemonServer {
                                 state,
                                 security,
                                 handshake_identity,
-                                accepted_at,
-                                limits,
+                                ConnectionControl {
+                                  accepted_at,
+                                  limits,
+                                  stream_cancellation,
+                                },
                               ).await;
                             }
                             Ok(Err(error)) => log_peer_authentication_denial(&state, &error),
@@ -245,6 +263,8 @@ impl DaemonServer {
           }
       }
     }
+
+    stream_cancellation.cancel();
 
     endpoint_publication
       .cleanup()
@@ -361,13 +381,19 @@ struct ConnectionSecurityContext {
   peer_principal: IpcPrincipal,
 }
 
+#[derive(Debug, Clone)]
+struct ConnectionControl {
+  accepted_at: Instant,
+  limits: IpcLimits,
+  stream_cancellation: CancellationToken,
+}
+
 async fn handle_connection(
   conn: Stream,
   state: DaemonState,
   security: ConnectionSecurityContext,
   handshake_identity: ServerHandshakeIdentity,
-  accepted_at: Instant,
-  limits: IpcLimits,
+  control: ConnectionControl,
 ) -> Result<()> {
   let mut owned = ConnectionRegistrations::default();
   let result = handle_connection_loop(
@@ -376,8 +402,7 @@ async fn handle_connection(
     &mut owned,
     &security,
     &handshake_identity,
-    accepted_at,
-    limits,
+    &control,
   )
   .await;
   for (id, nonce) in owned.into_entries() {
@@ -392,8 +417,7 @@ async fn handle_connection_loop(
   owned: &mut ConnectionRegistrations,
   security: &ConnectionSecurityContext,
   handshake_identity: &ServerHandshakeIdentity,
-  accepted_at: Instant,
-  limits: IpcLimits,
+  control: &ConnectionControl,
 ) -> Result<()> {
   let (read_half, mut write_half) = tokio::io::split(conn);
   let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
@@ -401,8 +425,8 @@ async fn handle_connection_loop(
     &mut reader,
     &mut write_half,
     handshake_identity,
-    accepted_at,
-    limits,
+    control.accepted_at,
+    control.limits,
   )
   .await?
   else {
@@ -458,13 +482,20 @@ async fn handle_connection_loop(
           owned,
           &authorized,
           &envelope,
-          limits,
+          control.limits,
         )
         .await?
       }
       OperationShape::ServerStream => {
-        supervise_state_subscription(&mut reader, &mut write_half, &state, &authorized, limits)
-          .await?
+        supervise_state_subscription(
+          &mut reader,
+          &mut write_half,
+          &state,
+          &authorized,
+          control.stream_cancellation.child_token(),
+          control.limits,
+        )
+        .await?
       }
     };
     if action == ConnectionAction::Close {
@@ -484,6 +515,199 @@ enum ConnectionAction {
 enum ConcurrentRead {
   Pipelined(Option<RequestId>),
   Closed,
+}
+
+const STREAM_CONTROL_RESERVE_BYTES: usize = 1024;
+
+#[derive(Debug)]
+struct EncodedStateStreamRecord {
+  frame: Vec<u8>,
+  kind: StateStreamRecordKind,
+  delivery_deadline: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateStreamRecordKind {
+  Event(u64),
+  Heartbeat,
+  Gap { first: u64, last: u64 },
+}
+
+impl EncodedStateStreamRecord {
+  fn event(event: &StateChangedEvent) -> std::result::Result<Self, IpcCodecError> {
+    Ok(Self {
+      frame: encode_envelope(message_types::STATE_CHANGED_EVENT, event)?,
+      kind: StateStreamRecordKind::Event(event.sequence_number),
+      delivery_deadline: None,
+    })
+  }
+
+  fn heartbeat(heartbeat: &StateStreamHeartbeat) -> std::result::Result<Self, IpcCodecError> {
+    Ok(Self {
+      frame: encode_envelope(message_types::STATE_STREAM_HEARTBEAT, heartbeat)?,
+      kind: StateStreamRecordKind::Heartbeat,
+      delivery_deadline: None,
+    })
+  }
+
+  fn gap(
+    gap: &StateStreamGap,
+    delivery_deadline: Instant,
+  ) -> std::result::Result<Self, IpcCodecError> {
+    Ok(Self {
+      frame: encode_envelope(message_types::STATE_STREAM_GAP, gap)?,
+      kind: StateStreamRecordKind::Gap {
+        first: gap.first_missing_sequence_number,
+        last: gap.last_missing_sequence_number,
+      },
+      delivery_deadline: Some(delivery_deadline),
+    })
+  }
+
+  fn missing_range(&self) -> Option<(u64, u64)> {
+    match self.kind {
+      StateStreamRecordKind::Event(sequence) => Some((sequence, sequence)),
+      StateStreamRecordKind::Gap { first, last } => Some((first, last)),
+      StateStreamRecordKind::Heartbeat => None,
+    }
+  }
+}
+
+#[derive(Debug)]
+struct StateStreamBuffer {
+  records: VecDeque<EncodedStateStreamRecord>,
+  total_records: usize,
+  total_bytes: usize,
+  max_records: usize,
+  max_bytes: usize,
+}
+
+impl StateStreamBuffer {
+  fn new(max_records: usize, max_bytes: usize) -> Self {
+    Self {
+      records: VecDeque::new(),
+      total_records: 0,
+      total_bytes: 0,
+      max_records,
+      max_bytes,
+    }
+  }
+
+  fn enqueue_event(&mut self, event: &StateChangedEvent, gap_deadline: Instant) -> Result<()> {
+    if self.has_queued_gap() {
+      return self.record_gap(
+        &event.request_id,
+        event.sequence_number,
+        event.sequence_number,
+        gap_deadline,
+      );
+    }
+
+    let record = EncodedStateStreamRecord::event(event)?;
+    let data_record_limit = self.max_records.saturating_sub(1);
+    let data_byte_limit = self.max_bytes.saturating_sub(STREAM_CONTROL_RESERVE_BYTES);
+    if self.total_records < data_record_limit
+      && record.frame.len() <= data_byte_limit.saturating_sub(self.total_bytes)
+    {
+      self.push_back(record);
+      return Ok(());
+    }
+
+    self.record_gap(
+      &event.request_id,
+      event.sequence_number,
+      event.sequence_number,
+      gap_deadline,
+    )
+  }
+
+  fn enqueue_heartbeat(&mut self, heartbeat: &StateStreamHeartbeat) -> Result<()> {
+    if self.records.iter().any(|record| {
+      matches!(
+        record.kind,
+        StateStreamRecordKind::Heartbeat | StateStreamRecordKind::Gap { .. }
+      )
+    }) {
+      return Ok(());
+    }
+    let record = EncodedStateStreamRecord::heartbeat(heartbeat)?;
+    if self.total_records >= self.max_records
+      || record.frame.len() > self.max_bytes.saturating_sub(self.total_bytes)
+    {
+      anyhow::bail!("state stream control record does not fit its bounded queue");
+    }
+    self.push_back(record);
+    Ok(())
+  }
+
+  fn record_gap(
+    &mut self,
+    request_id: &str,
+    first: u64,
+    last: u64,
+    delivery_deadline: Instant,
+  ) -> Result<()> {
+    let mut first_missing = first;
+    let mut last_missing = last;
+    let mut earliest_deadline = delivery_deadline;
+    while let Some(record) = self.records.pop_front() {
+      self.total_records -= 1;
+      self.total_bytes -= record.frame.len();
+      if let Some(record_deadline) = record.delivery_deadline {
+        earliest_deadline = earliest_deadline.min(record_deadline);
+      }
+      if let Some((record_first, record_last)) = record.missing_range() {
+        first_missing = first_missing.min(record_first);
+        last_missing = last_missing.max(record_last);
+      }
+    }
+
+    let gap = StateStreamGap {
+      request_id: request_id.to_string(),
+      first_missing_sequence_number: first_missing,
+      last_missing_sequence_number: last_missing,
+    };
+    let record = EncodedStateStreamRecord::gap(&gap, earliest_deadline)?;
+    if self.total_records >= self.max_records
+      || record.frame.len() > self.max_bytes.saturating_sub(self.total_bytes)
+    {
+      anyhow::bail!("state stream gap does not fit its bounded queue");
+    }
+    self.push_back(record);
+    Ok(())
+  }
+
+  fn has_queued_gap(&self) -> bool {
+    self
+      .records
+      .iter()
+      .any(|record| matches!(record.kind, StateStreamRecordKind::Gap { .. }))
+  }
+
+  fn gap_deadline(&self) -> Option<Instant> {
+    self
+      .records
+      .iter()
+      .filter_map(|record| record.delivery_deadline)
+      .min()
+  }
+
+  fn take_next(&mut self) -> Option<EncodedStateStreamRecord> {
+    self.records.pop_front()
+  }
+
+  fn complete(&mut self, record: &EncodedStateStreamRecord) {
+    self.total_records -= 1;
+    self.total_bytes -= record.frame.len();
+  }
+
+  fn push_back(&mut self, record: EncodedStateStreamRecord) {
+    self.total_records += 1;
+    self.total_bytes += record.frame.len();
+    self.records.push_back(record);
+    debug_assert!(self.total_records <= self.max_records);
+    debug_assert!(self.total_bytes <= self.max_bytes);
+  }
 }
 
 async fn supervise_unary_request<W>(
@@ -564,6 +788,7 @@ async fn supervise_state_subscription<W>(
   writer: &mut W,
   state: &DaemonState,
   authorized: &AuthorizedLegacyEnvelope<'_>,
+  cancellation: CancellationToken,
   limits: IpcLimits,
 ) -> Result<ConnectionAction>
 where
@@ -591,7 +816,7 @@ where
   };
   drop(next_frame);
 
-  let Some((stream_request_id, mut subscription)) = (match first {
+  let Some((stream_request_id, initial_sequence, mut subscription)) = (match first {
     SetupFirst::Setup(result) => {
       let prepared = result?;
       drop(setup);
@@ -627,30 +852,177 @@ where
     return Ok(ConnectionAction::Continue);
   };
 
+  run_active_state_subscription(
+    reader,
+    writer,
+    &stream_request_id,
+    initial_sequence,
+    &mut subscription,
+    cancellation,
+    limits,
+  )
+  .await
+}
+
+async fn run_active_state_subscription<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  request_id: &str,
+  initial_sequence: u64,
+  subscription: &mut tokio::sync::broadcast::Receiver<StateChangedEvent>,
+  cancellation: CancellationToken,
+  limits: IpcLimits,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  let mut buffer = StateStreamBuffer::new(limits.stream_max_records, limits.stream_max_bytes);
+  let mut in_flight = None;
+  let mut last_observed_sequence = initial_sequence;
+  let mut heartbeat_deadline = Instant::now() + limits.stream_heartbeat;
+
   loop {
-    tokio::select! {
-      biased;
-      frame = reader.next() => {
-        if let ConcurrentRead::Pipelined(pipelined_request_id) = classify_concurrent_read(frame) {
-          send_pipelined_error(writer, pipelined_request_id, limits).await?;
+    if in_flight.is_none() {
+      in_flight = buffer.take_next();
+    }
+
+    let Some(record) = in_flight.as_ref() else {
+      tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Ok(ConnectionAction::Close),
+        frame = reader.next() => {
+          return close_state_stream_for_client_input(writer, frame, limits).await;
         }
-        return Ok(ConnectionAction::Close);
+        event = subscription.recv() => {
+          if !queue_state_stream_event(
+            event,
+            request_id,
+            &mut last_observed_sequence,
+            &mut buffer,
+            limits,
+          )? {
+            return Ok(ConnectionAction::Close);
+          }
+        }
+        _ = sleep_until(heartbeat_deadline) => {
+          buffer.enqueue_heartbeat(&StateStreamHeartbeat {
+            request_id: request_id.to_string(),
+            last_sequence_number: last_observed_sequence,
+          })?;
+          heartbeat_deadline = Instant::now() + limits.stream_heartbeat;
+        }
       }
-      event = subscription.recv() => {
-        let Ok(mut event) = event else {
+      continue;
+    };
+
+    let mut write = Box::pin(write_state_stream_record(
+      writer,
+      record,
+      limits.write_no_progress,
+    ));
+    loop {
+      let queued_gap_deadline = buffer.gap_deadline();
+      tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Ok(ConnectionAction::Close),
+        _ = reader.next() => {
+          drop(write);
           return Ok(ConnectionAction::Close);
-        };
-        event.request_id = stream_request_id.clone();
-        write_envelope_until(
-          writer,
-          message_types::STATE_CHANGED_EVENT,
-          &event,
-          Instant::now() + limits.frame_completion,
-          limits.write_no_progress,
-        )
-        .await?;
+        }
+        result = &mut write => {
+          result?;
+          drop(write);
+          let completed = in_flight.take().expect("active stream write retains its record");
+          if matches!(
+            completed.kind,
+            StateStreamRecordKind::Event(_) | StateStreamRecordKind::Heartbeat
+          ) {
+            heartbeat_deadline = Instant::now() + limits.stream_heartbeat;
+          }
+          buffer.complete(&completed);
+          break;
+        }
+        _ = wait_for_optional_deadline(queued_gap_deadline) => {
+          return Ok(ConnectionAction::Close);
+        }
+        event = subscription.recv() => {
+          if !queue_state_stream_event(
+            event,
+            request_id,
+            &mut last_observed_sequence,
+            &mut buffer,
+            limits,
+          )? {
+            return Ok(ConnectionAction::Close);
+          }
+        }
+        _ = sleep_until(heartbeat_deadline) => {
+          buffer.enqueue_heartbeat(&StateStreamHeartbeat {
+            request_id: request_id.to_string(),
+            last_sequence_number: last_observed_sequence,
+          })?;
+          heartbeat_deadline = Instant::now() + limits.stream_heartbeat;
+        }
       }
     }
+  }
+}
+
+fn queue_state_stream_event(
+  event: std::result::Result<StateChangedEvent, tokio::sync::broadcast::error::RecvError>,
+  request_id: &str,
+  last_observed_sequence: &mut u64,
+  buffer: &mut StateStreamBuffer,
+  limits: IpcLimits,
+) -> Result<bool> {
+  let gap_deadline = Instant::now() + limits.write_no_progress;
+  match event {
+    Ok(mut event) => {
+      let expected = last_observed_sequence.saturating_add(1);
+      if event.sequence_number > expected {
+        buffer.record_gap(
+          request_id,
+          expected,
+          event.sequence_number - 1,
+          gap_deadline,
+        )?;
+      } else if event.sequence_number < expected {
+        anyhow::bail!("state stream received a non-monotonic sequence number");
+      }
+      *last_observed_sequence = event.sequence_number;
+      event.request_id = request_id.to_string();
+      buffer.enqueue_event(&event, gap_deadline)?;
+      Ok(true)
+    }
+    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+      let first = last_observed_sequence.saturating_add(1);
+      let last = last_observed_sequence.saturating_add(skipped);
+      *last_observed_sequence = last;
+      buffer.record_gap(request_id, first, last, gap_deadline)?;
+      Ok(true)
+    }
+    Err(tokio::sync::broadcast::error::RecvError::Closed) => Ok(false),
+  }
+}
+
+async fn close_state_stream_for_client_input<W>(
+  writer: &mut W,
+  frame: Option<std::result::Result<String, IpcCodecError>>,
+  limits: IpcLimits,
+) -> Result<ConnectionAction>
+where
+  W: AsyncWrite + Unpin,
+{
+  if let ConcurrentRead::Pipelined(pipelined_request_id) = classify_concurrent_read(frame) {
+    send_pipelined_error(writer, pipelined_request_id, limits).await?;
+  }
+  Ok(ConnectionAction::Close)
+}
+
+async fn wait_for_optional_deadline(deadline: Option<Instant>) {
+  match deadline {
+    Some(deadline) => sleep_until(deadline).await,
+    None => std::future::pending().await,
   }
 }
 
@@ -660,7 +1032,13 @@ async fn prepare_state_subscription<W>(
   authorized: &AuthorizedLegacyEnvelope<'_>,
   deadline: Instant,
   limits: IpcLimits,
-) -> Result<Option<(String, tokio::sync::broadcast::Receiver<StateChangedEvent>)>>
+) -> Result<
+  Option<(
+    String,
+    u64,
+    tokio::sync::broadcast::Receiver<StateChangedEvent>,
+  )>,
+>
 where
   W: AsyncWrite + Unpin,
 {
@@ -674,13 +1052,7 @@ where
     return Ok(None);
   };
   let request_id = request.request_id;
-  let initial = StateChangedEvent {
-    request_id: request_id.clone(),
-    sequence_number: 0,
-    change_kind: cadder_protocol::StateChangeKind::Snapshot,
-    snapshot: state.snapshot().await,
-    registration_id: None,
-  };
+  let (initial, subscription) = state.subscribe_snapshot(request_id.clone()).await;
   write_envelope_until(
     writer,
     message_types::STATE_CHANGED_EVENT,
@@ -689,7 +1061,7 @@ where
     limits.write_no_progress,
   )
   .await?;
-  Ok(Some((request_id, state.subscribe())))
+  Ok(Some((request_id, initial.sequence_number, subscription)))
 }
 
 fn classify_concurrent_read(
@@ -1361,10 +1733,24 @@ async fn write_frame_until<W>(
 where
   W: AsyncWrite + Unpin,
 {
+  write_frame_with_deadlines(writer, encoded, Some(terminal_deadline), no_progress).await
+}
+
+async fn write_frame_with_deadlines<W>(
+  writer: &mut W,
+  encoded: &[u8],
+  terminal_deadline: Option<Instant>,
+  no_progress: Duration,
+) -> io::Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
   let mut remaining = encoded;
   while !remaining.is_empty() {
-    ensure_write_deadline(terminal_deadline)?;
-    let progress_deadline = (Instant::now() + no_progress).min(terminal_deadline);
+    if let Some(terminal_deadline) = terminal_deadline {
+      ensure_write_deadline(terminal_deadline)?;
+    }
+    let progress_deadline = next_write_deadline(terminal_deadline, no_progress);
     let written = timeout_at(progress_deadline, writer.write(remaining))
       .await
       .map_err(|_| write_deadline_exceeded())??;
@@ -1377,12 +1763,32 @@ where
     remaining = &remaining[written..];
   }
 
-  ensure_write_deadline(terminal_deadline)?;
-  let progress_deadline = (Instant::now() + no_progress).min(terminal_deadline);
+  if let Some(terminal_deadline) = terminal_deadline {
+    ensure_write_deadline(terminal_deadline)?;
+  }
+  let progress_deadline = next_write_deadline(terminal_deadline, no_progress);
   timeout_at(progress_deadline, writer.flush())
     .await
     .map_err(|_| write_deadline_exceeded())??;
   Ok(())
+}
+
+fn next_write_deadline(terminal_deadline: Option<Instant>, no_progress: Duration) -> Instant {
+  let progress_deadline = Instant::now() + no_progress;
+  terminal_deadline.map_or(progress_deadline, |deadline| {
+    progress_deadline.min(deadline)
+  })
+}
+
+async fn write_state_stream_record<W>(
+  writer: &mut W,
+  record: &EncodedStateStreamRecord,
+  no_progress: Duration,
+) -> io::Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  write_frame_with_deadlines(writer, &record.frame, record.delivery_deadline, no_progress).await
 }
 
 fn ensure_write_deadline(terminal_deadline: Instant) -> io::Result<()> {
@@ -1787,6 +2193,26 @@ pub struct StateSubscription {
 
 impl StateSubscription {
   pub async fn next_event(&mut self) -> IpcClientResult<StateChangedEvent> {
+    loop {
+      match self.next_record().await? {
+        StateStreamRecord::Event(event) => return Ok(*event),
+        StateStreamRecord::Heartbeat(_) => {}
+        StateStreamRecord::Gap(gap) => {
+          let error = response_validation_error(
+            &self.context,
+            format!(
+              "The daemon omitted state events {} through {}; refresh the authoritative state snapshot before continuing.",
+              gap.first_missing_sequence_number, gap.last_missing_sequence_number
+            ),
+          );
+          self.retire();
+          return Err(error);
+        }
+      }
+    }
+  }
+
+  pub async fn next_record(&mut self) -> IpcClientResult<StateStreamRecord> {
     if !self.usable {
       return Err(connection_no_longer_usable(&self.context));
     }
@@ -1797,7 +2223,7 @@ impl StateSubscription {
       .as_mut()
       .expect("usable state subscription retains its reader");
     let result = match read_client_envelope(reader, &subscription.context).await {
-      Ok(envelope) => decode_client_response(envelope, &subscription.context),
+      Ok(envelope) => decode_state_stream_record(envelope, &subscription.context),
       Err(error) => Err(error),
     };
     if result.is_ok() {
@@ -1810,6 +2236,37 @@ impl StateSubscription {
     self.usable = false;
     self.reader.take();
     self.writer.take();
+  }
+}
+
+fn decode_state_stream_record(
+  envelope: IpcEnvelope,
+  request: &ClientRequestContext,
+) -> IpcClientResult<StateStreamRecord> {
+  validate_client_response_version(&envelope, request)?;
+  if envelope.message_type == message_types::PROTOCOL_ERROR_RESPONSE {
+    return decode_client_response::<StateChangedEvent>(envelope, request)
+      .map(Box::new)
+      .map(StateStreamRecord::Event);
+  }
+  validate_response_correlation(&envelope, request)?;
+  match envelope.message_type.as_str() {
+    message_types::STATE_CHANGED_EVENT => decode_client_payload(envelope, request)
+      .map(Box::new)
+      .map(StateStreamRecord::Event),
+    message_types::STATE_STREAM_HEARTBEAT => {
+      decode_client_payload(envelope, request).map(StateStreamRecord::Heartbeat)
+    }
+    message_types::STATE_STREAM_GAP => {
+      decode_client_payload(envelope, request).map(StateStreamRecord::Gap)
+    }
+    _ => Err(response_validation_error(
+      request,
+      format!(
+        "The daemon returned `{}` instead of a state stream record; the subscription outcome is unknown.",
+        envelope.message_type
+      ),
+    )),
   }
 }
 
@@ -2952,6 +3409,316 @@ mod tests {
 
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(written.is_empty());
+  }
+
+  #[tokio::test]
+  async fn stream_limits_queue_replaces_record_overflow_with_one_gap() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+    let snapshot = state.snapshot().await;
+    let mut buffer = StateStreamBuffer::new(3, 512 * 1024);
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    for sequence_number in 1..=3 {
+      buffer
+        .enqueue_event(
+          &StateChangedEvent {
+            request_id: "stream-limits-records".to_string(),
+            sequence_number,
+            change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+            snapshot: snapshot.clone(),
+            registration_id: None,
+          },
+          deadline,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(buffer.total_records, 1);
+    assert!(buffer.total_bytes <= buffer.max_bytes);
+    assert!(matches!(
+      buffer.records.front().map(|record| record.kind),
+      Some(StateStreamRecordKind::Gap { first: 1, last: 3 })
+    ));
+  }
+
+  #[test]
+  fn stream_limits_defaults_match_the_ipc_contract() {
+    let limits = IpcLimits::default();
+
+    assert_eq!(limits.stream_max_records, 256);
+    assert_eq!(limits.stream_max_bytes, 524_288);
+    assert_eq!(limits.stream_heartbeat, Duration::from_secs(15));
+    assert_eq!(limits.write_no_progress, Duration::from_secs(5));
+  }
+
+  #[tokio::test]
+  async fn stream_limits_queue_replaces_byte_overflow_with_a_gap() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+    let event = StateChangedEvent {
+      request_id: "stream-limits-bytes".to_string(),
+      sequence_number: 1,
+      change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+      snapshot: state.snapshot().await,
+      registration_id: None,
+    };
+    let event_size = EncodedStateStreamRecord::event(&event).unwrap().frame.len();
+    let mut buffer = StateStreamBuffer::new(256, event_size + STREAM_CONTROL_RESERVE_BYTES - 1);
+
+    buffer
+      .enqueue_event(&event, Instant::now() + Duration::from_secs(5))
+      .unwrap();
+
+    assert_eq!(buffer.total_records, 1);
+    assert!(buffer.total_bytes <= buffer.max_bytes);
+    assert!(matches!(
+      buffer.records.front().map(|record| record.kind),
+      Some(StateStreamRecordKind::Gap { first: 1, last: 1 })
+    ));
+  }
+
+  #[tokio::test]
+  async fn stream_limits_queue_counts_in_flight_and_keeps_the_first_gap_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+    let snapshot = state.snapshot().await;
+    let event = |sequence_number| StateChangedEvent {
+      request_id: "stream-limits-in-flight".to_string(),
+      sequence_number,
+      change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+      snapshot: snapshot.clone(),
+      registration_id: None,
+    };
+    let mut buffer = StateStreamBuffer::new(3, 512 * 1024);
+    let first_deadline = Instant::now() + Duration::from_secs(5);
+
+    buffer.enqueue_event(&event(1), first_deadline).unwrap();
+    let in_flight = buffer.take_next().unwrap();
+    buffer.enqueue_event(&event(2), first_deadline).unwrap();
+    buffer.enqueue_event(&event(3), first_deadline).unwrap();
+    buffer
+      .enqueue_event(&event(4), first_deadline + Duration::from_secs(3))
+      .unwrap();
+
+    assert_eq!(buffer.total_records, 2);
+    assert_eq!(buffer.gap_deadline(), Some(first_deadline));
+    assert!(matches!(
+      buffer.records.front().map(|record| record.kind),
+      Some(StateStreamRecordKind::Gap { first: 2, last: 4 })
+    ));
+    buffer.complete(&in_flight);
+    assert_eq!(buffer.total_records, 1);
+  }
+
+  #[test]
+  fn stream_limits_broadcast_lag_becomes_an_explicit_gap() {
+    let mut buffer = StateStreamBuffer::new(256, 512 * 1024);
+    let mut last_observed_sequence = 7;
+
+    assert!(
+      queue_state_stream_event(
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(3)),
+        "stream-limits-lagged",
+        &mut last_observed_sequence,
+        &mut buffer,
+        IpcLimits::default(),
+      )
+      .unwrap()
+    );
+
+    assert_eq!(last_observed_sequence, 10);
+    assert!(matches!(
+      buffer.records.front().map(|record| record.kind),
+      Some(StateStreamRecordKind::Gap { first: 8, last: 10 })
+    ));
+  }
+
+  #[tokio::test]
+  async fn stream_limits_snapshot_and_receiver_share_one_sequence_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+    let (snapshot, mut receiver) = state
+      .subscribe_snapshot("stream-limits-snapshot".to_string())
+      .await;
+
+    state.publish_test_change().await;
+    let event = receiver.recv().await.unwrap();
+
+    assert_eq!(event.sequence_number, snapshot.sequence_number + 1);
+  }
+
+  #[tokio::test]
+  async fn stream_limits_writer_closes_after_five_seconds_without_progress() {
+    let (_reader, mut writer) = tokio::io::duplex(1);
+    let record = EncodedStateStreamRecord::heartbeat(&StateStreamHeartbeat {
+      request_id: "stream-limits-stalled".to_string(),
+      last_sequence_number: 0,
+    })
+    .unwrap();
+
+    let error = write_state_stream_record(&mut writer, &record, Duration::from_millis(50))
+      .await
+      .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+  }
+
+  #[test]
+  fn stream_limits_client_decodes_control_records_and_validates_correlation() {
+    let request_id = RequestId::parse("stream-limits-client").unwrap();
+    let context = ClientRequestContext {
+      operation: message_types::SUBSCRIBE_STATE_REQUEST.into(),
+      expected_response: message_types::STATE_CHANGED_EVENT.into(),
+      request_id: request_id.clone(),
+    };
+    let heartbeat = StateStreamHeartbeat {
+      request_id: request_id.to_string(),
+      last_sequence_number: 7,
+    };
+    let heartbeat_envelope =
+      IpcEnvelope::new(message_types::STATE_STREAM_HEARTBEAT, &heartbeat).unwrap();
+    assert_eq!(
+      decode_state_stream_record(heartbeat_envelope, &context).unwrap(),
+      StateStreamRecord::Heartbeat(heartbeat)
+    );
+
+    let gap = StateStreamGap {
+      request_id: request_id.to_string(),
+      first_missing_sequence_number: 8,
+      last_missing_sequence_number: 11,
+    };
+    let gap_envelope = IpcEnvelope::new(message_types::STATE_STREAM_GAP, &gap).unwrap();
+    assert_eq!(
+      decode_state_stream_record(gap_envelope, &context).unwrap(),
+      StateStreamRecord::Gap(gap)
+    );
+
+    let wrong_correlation = IpcEnvelope::new(
+      message_types::STATE_STREAM_HEARTBEAT,
+      &StateStreamHeartbeat {
+        request_id: "another-request".to_string(),
+        last_sequence_number: 7,
+      },
+    )
+    .unwrap();
+    assert!(decode_state_stream_record(wrong_correlation, &context).is_err());
+  }
+
+  #[tokio::test]
+  async fn stream_limits_legacy_next_event_retires_after_a_gap() {
+    let request_id = "stream-limits-legacy-gap";
+    let server = ScriptedIpcServer::start(move |conn| async move {
+      let (_line, mut writer) = read_one_request(conn).await;
+      write_envelope(
+        &mut writer,
+        message_types::STATE_STREAM_GAP,
+        &StateStreamGap {
+          request_id: request_id.to_string(),
+          first_missing_sequence_number: 8,
+          last_missing_sequence_number: 11,
+        },
+      )
+      .await
+      .unwrap();
+    });
+    let mut subscription = CadderSession::connect(&server.paths)
+      .await
+      .unwrap()
+      .subscribe_state(request_id.to_string())
+      .await
+      .unwrap();
+
+    let gap_error = subscription.next_event().await.unwrap_err();
+    assert_local_error(
+      &gap_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseValidate,
+      "protocol_violation",
+      Some(request_id),
+    );
+    let terminal_error = subscription.next_record().await.unwrap_err();
+    assert_local_error(
+      &terminal_error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::Connect,
+      "connection_closed",
+      Some(request_id),
+    );
+    server.finish().await;
+  }
+
+  #[tokio::test]
+  async fn stream_limits_idle_subscription_emits_heartbeat() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      stream_heartbeat: Duration::from_millis(25),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut subscription = CadderSession::connect(&daemon.paths)
+      .await
+      .unwrap()
+      .subscribe_state("stream-limits-heartbeat".to_string())
+      .await
+      .unwrap();
+
+    let initial = subscription.next_record().await.unwrap();
+    let initial_sequence = match initial {
+      StateStreamRecord::Event(event) => event.sequence_number,
+      record => panic!("expected initial state event, got {record:?}"),
+    };
+    let heartbeat = timeout(Duration::from_secs(1), subscription.next_record())
+      .await
+      .unwrap()
+      .unwrap();
+
+    assert_eq!(
+      heartbeat,
+      StateStreamRecord::Heartbeat(StateStreamHeartbeat {
+        request_id: "stream-limits-heartbeat".to_string(),
+        last_sequence_number: initial_sequence,
+      })
+    );
+    drop(subscription);
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn stream_limits_idle_cancellation_closes_subscription() {
+    let daemon = RunningTestDaemon::start().await;
+    let mut subscription = CadderSession::connect(&daemon.paths)
+      .await
+      .unwrap()
+      .subscribe_state("stream-limits-cancellation".to_string())
+      .await
+      .unwrap();
+    assert!(matches!(
+      subscription.next_record().await.unwrap(),
+      StateStreamRecord::Event(_)
+    ));
+
+    daemon.shutdown.send(true).unwrap();
+    let error = timeout(Duration::from_secs(1), subscription.next_record())
+      .await
+      .expect("idle stream cancellation should be observed within one second")
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Transport,
+      IpcClientPhase::ResponseRead,
+      "unexpected_eof",
+      Some("stream-limits-cancellation"),
+    );
+    timeout(Duration::from_secs(2), daemon.task)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
   }
 
   #[tokio::test]
