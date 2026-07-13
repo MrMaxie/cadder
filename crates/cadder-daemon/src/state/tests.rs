@@ -52,6 +52,22 @@ fn state() -> StateFixture {
   }
 }
 
+#[tokio::test]
+async fn shutdown_coordinator_prepare_shutdown_bounds_config_operation_wait() {
+  let fixture = state();
+  let operation = fixture.config_operation.acquire().await.unwrap();
+  let budget = std::time::Duration::from_millis(25);
+  let started = tokio::time::Instant::now();
+
+  let preparation = fixture.prepare_shutdown_until(started + budget).await;
+
+  assert!(!preparation.response.accepted);
+  assert!(!preparation.runtime_quiescent);
+  assert!(preparation.response.message.contains("runtime operation"));
+  assert!(started.elapsed() <= budget + std::time::Duration::from_millis(100));
+  drop(operation);
+}
+
 fn state_with_iis(provider: IisProvider) -> StateFixture {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().to_path_buf())).unwrap();

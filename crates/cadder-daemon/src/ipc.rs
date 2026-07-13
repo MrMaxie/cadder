@@ -13,19 +13,20 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use cadder_protocol::{
-  CLIENT_HELLO_OPERATION, CapabilityId, ClientHello, HeartbeatEntrypointRequest, IpcEnvelope,
-  LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity, OPERATION_REGISTRY,
-  OperationAccess, OperationDeadlineClass, OperationShape, PROTOCOL_VERSION, ProtocolCapabilities,
-  ProtocolError, ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, ProtocolVersion,
-  ProtocolVersionRange, QueryAutostartRequest, QueryIisBindingsRequest, QueryLogsRequest,
-  QueryStateRequest, RegisterEntrypointRequest, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
-  ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
-  SetEntrypointEnabledRequest, SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent,
-  StateStreamGap, StateStreamHeartbeat, StateStreamRecord, SubscribeStateRequest,
-  UnregisterEntrypointRequest, ensure_compatible_protocol_version, message_types, new_request_id,
+  BasicResponse, CLIENT_HELLO_OPERATION, CapabilityId, ClientHello, HeartbeatEntrypointRequest,
+  IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity,
+  OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass, OperationShape, PROTOCOL_VERSION,
+  ProtocolCapabilities, ProtocolError, ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse,
+  ProtocolVersion, ProtocolVersionRange, QueryAutostartRequest, QueryIisBindingsRequest,
+  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId,
+  SUPPORTED_PROTOCOL_VERSIONS, ServerHandshakeFrame, ServerHello, SetAutostartRequest,
+  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
+  ShutdownDaemonRequest, StateChangedEvent, StateStreamGap, StateStreamHeartbeat,
+  StateStreamRecord, SubscribeStateRequest, UnregisterEntrypointRequest,
+  ensure_compatible_protocol_version, message_types, new_request_id,
 };
 use fs4::{FileExt, TryLockError};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 #[cfg(unix)]
 use interprocess::local_socket::{GenericFilePath, ToFsName};
 #[cfg(windows)]
@@ -41,7 +42,9 @@ use std::{
   collections::{BTreeMap, VecDeque},
   env,
   fs::File,
+  future::Future,
   io,
+  panic::{AssertUnwindSafe, resume_unwind},
   path::PathBuf,
   process::Stdio,
   sync::Arc,
@@ -51,6 +54,7 @@ use tokio::{
   io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
   process::Command,
   sync::{Semaphore, watch},
+  task::{JoinHandle, JoinSet},
   time::{Instant, sleep, sleep_until, timeout_at},
 };
 use tokio_util::{codec::FramedRead, sync::CancellationToken, task::TaskTracker};
@@ -68,7 +72,9 @@ struct RequestDispatchContext<'a> {
 struct UnarySupervisionContext<'a> {
   state: &'a DaemonState,
   owned: &'a ConnectionOwnership,
-  mutation_tasks: &'a TaskTracker,
+  mutation_tasks: &'a MutationTaskRegistry,
+  mutation_cancellation: &'a CancellationToken,
+  request_drain: &'a CancellationToken,
   limits: IpcLimits,
 }
 
@@ -100,6 +106,7 @@ struct ServerHandshakeIdentity {
 enum ShutdownOrigin {
   IpcRequest,
   ExternalSignal,
+  ServerFailure,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +116,7 @@ struct AcceptedConnectionContext {
   policy: IpcSecurityPolicy,
   peer_identity_resolver: IpcPeerIdentityResolver,
   handshake_identity: ServerHandshakeIdentity,
+  mutation_tasks: MutationTaskRegistry,
   control: ConnectionControl,
 }
 
@@ -136,6 +144,10 @@ struct IpcLimits {
   stream_max_records: usize,
   stream_max_bytes: usize,
   shutdown_operation: Duration,
+  shutdown_accept: Duration,
+  shutdown_handler_grace: Duration,
+  shutdown_connection_abort_join: Duration,
+  shutdown_runtime: Duration,
   #[cfg(test)]
   dispatch_delay: Duration,
 }
@@ -154,6 +166,10 @@ impl Default for IpcLimits {
       stream_max_records: 256,
       stream_max_bytes: 512 * 1024,
       shutdown_operation: Duration::from_secs(30),
+      shutdown_accept: Duration::from_secs(2),
+      shutdown_handler_grace: Duration::from_secs(8),
+      shutdown_connection_abort_join: Duration::from_secs(1),
+      shutdown_runtime: Duration::from_secs(10),
       #[cfg(test)]
       dispatch_delay: Duration::ZERO,
     }
@@ -244,10 +260,14 @@ impl DaemonServer {
     let shutdown_signal = self.state.shutdown_signal();
     let connection_permits = Arc::new(Semaphore::new(self.limits.max_connections));
     let stream_cancellation = CancellationToken::new();
+    let request_drain = CancellationToken::new();
     let connection_cancellation = CancellationToken::new();
-    let connection_tasks = TaskTracker::new();
+    let mut connection_tasks = JoinSet::new();
+    let mutation_tasks = MutationTaskRegistry::default();
+    let mutation_cancellation = CancellationToken::new();
+    let mut server_failure = None;
 
-    let shutdown_origin = loop {
+    let _shutdown_origin = loop {
       tokio::select! {
           _ = shutdown_signal.wait() => break ShutdownOrigin::IpcRequest,
           changed = shutdown.changed() => {
@@ -255,6 +275,18 @@ impl DaemonServer {
                 Ok(()) if *shutdown.borrow() => break ShutdownOrigin::ExternalSignal,
                 Ok(()) => {}
                 Err(_) => break ShutdownOrigin::ExternalSignal,
+              }
+          }
+          _ = mutation_tasks.panic_detected() => {
+            server_failure = Some(io::Error::other("owned mutation task panicked"));
+            break ShutdownOrigin::ServerFailure;
+          }
+          joined = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+              if let Some(Err(error)) = joined {
+                server_failure = Some(io::Error::other(format!(
+                  "local IPC connection task terminated unexpectedly: {error}"
+                )));
+                break ShutdownOrigin::ServerFailure;
               }
           }
           accepted = listener.accept() => {
@@ -271,7 +303,10 @@ impl DaemonServer {
                       let policy = self.security_policy.clone();
                       let peer_identity_resolver = self.peer_identity_resolver.clone();
                       let handshake_identity = handshake_identity.clone();
+                      let mutation_tasks = mutation_tasks.clone();
                       let stream_cancellation = stream_cancellation.clone();
+                      let request_drain = request_drain.clone();
+                      let mutation_cancellation = mutation_cancellation.clone();
                       let connection_cancellation = connection_cancellation.child_token();
                       let limits = self.limits;
                       connection_tasks.spawn(async move {
@@ -282,10 +317,13 @@ impl DaemonServer {
                             policy,
                             peer_identity_resolver,
                             handshake_identity,
+                            mutation_tasks,
                             control: ConnectionControl {
                               accepted_at,
                               limits,
                               stream_cancellation,
+                              request_drain,
+                              mutation_cancellation,
                               connection_cancellation,
                             },
                           })
@@ -293,7 +331,10 @@ impl DaemonServer {
                       });
                   }
                   Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                  Err(error) => return Err(error).context("accept local IPC connection"),
+                  Err(error) => {
+                    server_failure = Some(error);
+                    break ShutdownOrigin::ServerFailure;
+                  }
               }
           }
       }
@@ -301,25 +342,78 @@ impl DaemonServer {
 
     self.state.begin_operation_drain();
     drop(listener);
-    connection_tasks.close();
+    request_drain.cancel();
     stream_cancellation.cancel();
-    connection_cancellation.cancel();
-    connection_tasks.wait().await;
-    let runtime_shutdown = if shutdown_origin == ShutdownOrigin::ExternalSignal {
-      Some(self.state.prepare_shutdown().await)
-    } else {
-      None
-    };
+    let handler_deadline = Instant::now() + self.limits.shutdown_handler_grace;
+    let abort_join_budget = std::cmp::min(
+      self.limits.shutdown_connection_abort_join,
+      self.limits.shutdown_handler_grace / 2,
+    );
+    let graceful_deadline = handler_deadline - abort_join_budget;
+    mutation_tasks.close();
+    let mut handler_failure = None;
+    match timeout_at(
+      graceful_deadline,
+      drain_handler_tasks(&mut connection_tasks, &mutation_tasks, false),
+    )
+    .await
+    {
+      Ok(Ok(())) => {}
+      Ok(Err(error)) => handler_failure = Some(error),
+      Err(_) => {
+        mutation_cancellation.cancel();
+        connection_cancellation.cancel();
+        connection_tasks.abort_all();
+        match timeout_at(
+          handler_deadline,
+          drain_handler_tasks(&mut connection_tasks, &mutation_tasks, true),
+        )
+        .await
+        {
+          Ok(Ok(())) => {}
+          Ok(Err(error)) => handler_failure = Some(error),
+          Err(_) => {
+            handler_failure = Some(anyhow::anyhow!(
+              "IPC handlers did not finish within the shutdown grace; started mutations remained contained until rollback completed"
+            ));
+            self.state.logs().append(
+              LogStreamIdentity::runtime_control(),
+              LogSeverity::Error,
+              "An owned mutation exceeded the shutdown grace; Cadder keeps runtime and discovery ownership until the mutation finishes rollback.",
+              LogAttributionKind::RuntimeControl,
+              Some("shutdown-mutation-containment".to_string()),
+            );
+            // A started mutation may be performing an asynchronous rollback. Keep the
+            // daemon, runtime, and discovery publication owned until that rollback
+            // finishes instead of detaching or aborting it at an unsafe commit point.
+            if let Err(error) =
+              drain_handler_tasks(&mut connection_tasks, &mutation_tasks, true).await
+            {
+              handler_failure = Some(error);
+            }
+          }
+        }
+      }
+    }
+    let runtime_deadline = Instant::now() + self.limits.shutdown_runtime;
+    let runtime_shutdown = self.state.prepare_shutdown_until(runtime_deadline).await;
+    if !runtime_shutdown.runtime_quiescent {
+      self.state.contain_runtime_fail_stop().await;
+    }
     let cleanup = endpoint_publication
       .cleanup()
       .context("remove the current IPC discovery generation");
-    if let Some(response) = runtime_shutdown
-      && !response.accepted
-    {
+    if !runtime_shutdown.response.accepted {
       cleanup?;
-      anyhow::bail!(response.message);
+      anyhow::bail!(runtime_shutdown.response.message);
     }
     cleanup?;
+    if let Some(error) = handler_failure {
+      return Err(error).context("drain local IPC connection tasks");
+    }
+    if let Some(error) = server_failure {
+      return Err(error).context("accept local IPC connection");
+    }
     Ok(())
   }
 }
@@ -419,6 +513,7 @@ async fn serve_accepted_connection(conn: Stream, context: AcceptedConnectionCont
     policy,
     peer_identity_resolver,
     handshake_identity,
+    mutation_tasks,
     control,
   } = context;
   let authenticated = tokio::select! {
@@ -435,7 +530,15 @@ async fn serve_accepted_connection(conn: Stream, context: AcceptedConnectionCont
   };
   match authenticated {
     Ok(Ok((conn, security))) => {
-      let _ = handle_connection(conn, state, security, handshake_identity, control).await;
+      let _ = handle_connection(
+        conn,
+        state,
+        security,
+        handshake_identity,
+        &mutation_tasks,
+        control,
+      )
+      .await;
     }
     Ok(Err(error)) => log_peer_authentication_denial(&state, &error),
     Err(_) => {}
@@ -467,7 +570,128 @@ struct ConnectionControl {
   accepted_at: Instant,
   limits: IpcLimits,
   stream_cancellation: CancellationToken,
+  request_drain: CancellationToken,
+  mutation_cancellation: CancellationToken,
   connection_cancellation: CancellationToken,
+}
+
+async fn join_connection_tasks(tasks: &mut JoinSet<()>, allow_cancelled: bool) -> Result<()> {
+  let mut first_failure = None;
+  while let Some(result) = tasks.join_next().await {
+    if let Err(error) = result
+      && !(allow_cancelled && error.is_cancelled())
+      && first_failure.is_none()
+    {
+      first_failure = Some(error);
+    }
+  }
+  if let Some(error) = first_failure {
+    anyhow::bail!("local IPC connection task terminated unexpectedly: {error}");
+  }
+  Ok(())
+}
+
+async fn drain_handler_tasks(
+  connection_tasks: &mut JoinSet<()>,
+  mutation_tasks: &MutationTaskRegistry,
+  allow_cancelled: bool,
+) -> Result<()> {
+  let (connections, mutations) = tokio::join!(
+    join_connection_tasks(connection_tasks, allow_cancelled),
+    mutation_tasks.wait()
+  );
+  connections?;
+  mutations
+}
+
+#[derive(Debug, Default)]
+struct MutationTaskRegistryState {
+  tracker: TaskTracker,
+  closed: bool,
+  first_panic: Option<Box<str>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MutationTaskRegistry {
+  state: Arc<std::sync::Mutex<MutationTaskRegistryState>>,
+  panic_signal: CancellationToken,
+}
+
+impl MutationTaskRegistry {
+  fn spawn<F>(&self, task: F) -> Option<JoinHandle<F::Output>>
+  where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+  {
+    let state = self
+      .state
+      .lock()
+      .expect("mutation task registry lock poisoned");
+    if state.closed {
+      None
+    } else {
+      let registry = self.state.clone();
+      let panic_signal = self.panic_signal.clone();
+      Some(state.tracker.spawn(async move {
+        match AssertUnwindSafe(task).catch_unwind().await {
+          Ok(output) => output,
+          Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let mut state = registry
+              .lock()
+              .expect("mutation task registry lock poisoned");
+            if state.first_panic.is_none() {
+              state.first_panic = Some(message.into());
+            }
+            drop(state);
+            panic_signal.cancel();
+            resume_unwind(payload);
+          }
+        }
+      }))
+    }
+  }
+
+  fn close(&self) {
+    let mut state = self
+      .state
+      .lock()
+      .expect("mutation task registry lock poisoned");
+    state.closed = true;
+    state.tracker.close();
+  }
+
+  async fn wait(&self) -> Result<()> {
+    let tracker = self
+      .state
+      .lock()
+      .expect("mutation task registry lock poisoned")
+      .tracker
+      .clone();
+    tracker.wait().await;
+    let first_panic = self
+      .state
+      .lock()
+      .expect("mutation task registry lock poisoned")
+      .first_panic
+      .clone();
+    if let Some(message) = first_panic {
+      anyhow::bail!("owned mutation task panicked: {message}");
+    }
+    Ok(())
+  }
+
+  async fn panic_detected(&self) {
+    self.panic_signal.cancelled().await;
+  }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+  payload
+    .downcast_ref::<&'static str>()
+    .copied()
+    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+    .unwrap_or("non-string panic payload")
 }
 
 async fn handle_connection(
@@ -475,35 +699,57 @@ async fn handle_connection(
   state: DaemonState,
   security: ConnectionSecurityContext,
   handshake_identity: ServerHandshakeIdentity,
+  mutation_tasks: &MutationTaskRegistry,
   control: ConnectionControl,
 ) -> Result<()> {
   let owned = ConnectionOwnership::default();
-  let mutation_tasks = TaskTracker::new();
+  let cleanup_signal = CancellationToken::new();
+  let worker_signal = cleanup_signal.clone();
+  let worker_ownership = owned.clone();
+  let cleanup_state = state.clone();
+  let Some(cleanup_task) = mutation_tasks.spawn(async move {
+    worker_signal.cancelled().await;
+    for (id, nonce) in worker_ownership.disconnect_and_take_entries().await {
+      cleanup_state
+        .unregister_for_ipc_disconnect(&id, &nonce)
+        .await;
+    }
+  }) else {
+    return Ok(());
+  };
+  let cleanup_guard = ConnectionCleanupGuard(cleanup_signal);
   let result = tokio::select! {
     _ = control.connection_cancellation.cancelled() => Ok(()),
     result = handle_connection_loop(
       conn,
       state.clone(),
       &owned,
-      &mutation_tasks,
+      mutation_tasks,
       &security,
       &handshake_identity,
       &control,
     ) => result,
   };
-  mutation_tasks.close();
-  mutation_tasks.wait().await;
-  for (id, nonce) in owned.take_entries() {
-    state.unregister_for_ipc_disconnect(&id, &nonce).await;
-  }
+  drop(cleanup_guard);
+  cleanup_task
+    .await
+    .context("join registration disconnect cleanup")?;
   result
+}
+
+struct ConnectionCleanupGuard(CancellationToken);
+
+impl Drop for ConnectionCleanupGuard {
+  fn drop(&mut self) {
+    self.0.cancel();
+  }
 }
 
 async fn handle_connection_loop(
   conn: Stream,
   state: DaemonState,
   owned: &ConnectionOwnership,
-  mutation_tasks: &TaskTracker,
+  mutation_tasks: &MutationTaskRegistry,
   security: &ConnectionSecurityContext,
   handshake_identity: &ServerHandshakeIdentity,
   control: &ConnectionControl,
@@ -527,7 +773,12 @@ async fn handle_connection_loop(
     };
   }
   loop {
-    let line = match reader.next().await {
+    let next_frame = tokio::select! {
+      biased;
+      frame = reader.next() => frame,
+      _ = control.request_drain.cancelled() => break,
+    };
+    let line = match next_frame {
       Some(Ok(line)) => line,
       Some(Err(error)) => {
         let response = ProtocolErrorResponse::rejected(None, invalid_request_frame_error());
@@ -551,6 +802,15 @@ async fn handle_connection_loop(
         continue;
       }
     };
+    if control.request_drain.is_cancelled() {
+      send_shutting_down(
+        &mut write_half,
+        request_id_from_payload(&envelope),
+        control.limits,
+      )
+      .await?;
+      break;
+    }
     if !authorize_or_reject(&mut write_half, &state, &envelope, security).await? {
       continue;
     }
@@ -573,6 +833,8 @@ async fn handle_connection_loop(
             state: &state,
             owned,
             mutation_tasks,
+            mutation_cancellation: &control.mutation_cancellation,
+            request_drain: &control.request_drain,
             limits: control.limits,
           },
         )
@@ -883,13 +1145,15 @@ where
     Handler(T),
     Reader(ConcurrentRead),
     Cancelled,
+    ShuttingDown,
     Timeout,
   }
 
   let first = tokio::select! {
     biased;
-    frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
+    _ = supervision.request_drain.cancelled() => First::ShuttingDown,
     _ = wait_for_operation_cancellation(operation_fence.as_ref()) => First::Cancelled,
+    frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
     _ = sleep_until(deadline) => First::Timeout,
     result = &mut handler => First::Handler(result),
   };
@@ -911,25 +1175,43 @@ where
     }
     First::Reader(concurrent) => {
       drop(next_frame);
+      enum FollowUp<T> {
+        Handler(T),
+        ShuttingDown,
+        Cancelled,
+        Timeout,
+      }
       let handler_result = tokio::select! {
         biased;
-        _ = wait_for_operation_cancellation(operation_fence.as_ref()) => None,
-        _ = sleep_until(deadline) => None,
-        result = &mut handler => Some(result),
+        _ = supervision.request_drain.cancelled() => FollowUp::ShuttingDown,
+        _ = wait_for_operation_cancellation(operation_fence.as_ref()) => FollowUp::Cancelled,
+        _ = sleep_until(deadline) => FollowUp::Timeout,
+        result = &mut handler => FollowUp::Handler(result),
       };
 
-      if let Some(result) = handler_result {
-        if let Some(fence) = &operation_fence {
-          fence.complete();
+      match handler_result {
+        FollowUp::Handler(result) => {
+          if let Some(fence) = &operation_fence {
+            fence.complete();
+          }
+          drop(handler);
+          result?;
         }
-        drop(handler);
-        result?;
-      } else {
-        if let Some(fence) = &operation_fence {
-          fence.revoke();
+        FollowUp::ShuttingDown | FollowUp::Cancelled => {
+          if let Some(fence) = &operation_fence {
+            fence.revoke();
+          }
+          drop(handler);
+          send_request_shutting_down(writer, request_id, limits).await?;
+          return Ok(ConnectionAction::Close);
         }
-        drop(handler);
-        send_operation_timeout(writer, request_id, definition, limits).await?;
+        FollowUp::Timeout => {
+          if let Some(fence) = &operation_fence {
+            fence.revoke();
+          }
+          drop(handler);
+          send_operation_timeout(writer, request_id, definition, limits).await?;
+        }
       }
       if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
         send_pipelined_error(writer, pipelined_request_id, limits).await?;
@@ -942,6 +1224,15 @@ where
       }
       drop(handler);
       drop(next_frame);
+      Ok(ConnectionAction::Close)
+    }
+    First::ShuttingDown => {
+      if let Some(fence) = &operation_fence {
+        fence.revoke();
+      }
+      drop(handler);
+      drop(next_frame);
+      send_request_shutting_down(writer, request_id, limits).await?;
       Ok(ConnectionAction::Close)
     }
     First::Timeout => {
@@ -984,6 +1275,8 @@ where
     state,
     owned,
     mutation_tasks,
+    mutation_cancellation,
+    request_drain: _,
     limits,
   } = supervision;
   macro_rules! decode_owned_request {
@@ -1036,31 +1329,59 @@ where
   };
   let request_id = authorized.request_id();
   let response_type = request.response_type();
+  let Some(mutation_ownership) = owned.begin_mutation() else {
+    let _ = fence.try_revoke();
+    send_shutting_down(writer, request_id, limits).await?;
+    return Ok(ConnectionAction::Close);
+  };
   let worker_state = state.clone();
   let worker_fence = fence.clone();
+  let completion_fence = fence.clone();
   let worker_ownership = owned.clone();
-  let mut worker = mutation_tasks.spawn(async move {
+  let worker_cancellation = mutation_cancellation.clone();
+  let worker = async move {
+    let _mutation_ownership = mutation_ownership;
     #[cfg(test)]
-    sleep(limits.dispatch_delay).await;
-    request
-      .execute(worker_state, worker_ownership, worker_fence)
-      .await
-  });
+    tokio::select! {
+      biased;
+      _ = worker_cancellation.cancelled() => return Err(CommitRejection::Revoked),
+      _ = sleep(limits.dispatch_delay) => {}
+    }
+    let mut execution = Box::pin(async move {
+      request
+        .execute(worker_state, worker_ownership, worker_fence)
+        .await
+    });
+    tokio::select! {
+      result = &mut execution => result,
+      _ = worker_cancellation.cancelled() => {
+        let _ = completion_fence.try_revoke();
+        execution.await
+      }
+    }
+  };
+  let Some(mut worker) = mutation_tasks.spawn(worker) else {
+    let _ = fence.try_revoke();
+    send_shutting_down(writer, request_id, limits).await?;
+    return Ok(ConnectionAction::Close);
+  };
   let mut next_frame = Box::pin(reader.next());
   let cancellation = fence.cancellation();
 
   enum First<T> {
     Worker(T),
     Reader(ConcurrentRead),
+    ShuttingDown,
     Cancelled,
     Timeout,
   }
 
   let first = tokio::select! {
     biased;
+    _ = supervision.request_drain.cancelled() => First::ShuttingDown,
+    _ = cancellation.cancelled() => First::Cancelled,
     frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
     result = &mut worker => First::Worker(result),
-    _ = cancellation.cancelled() => First::Cancelled,
     _ = sleep_until(deadline) => First::Timeout,
   };
 
@@ -1093,30 +1414,73 @@ where
     }
     First::Reader(concurrent) => {
       drop(next_frame);
+      enum FollowUp<T> {
+        Worker(T),
+        ShuttingDown,
+        Cancelled,
+        Timeout,
+      }
       let worker_result = tokio::select! {
         biased;
-        result = &mut worker => Some(result),
-        _ = cancellation.cancelled() => None,
-        _ = sleep_until(deadline) => None,
+        _ = supervision.request_drain.cancelled() => FollowUp::ShuttingDown,
+        _ = cancellation.cancelled() => FollowUp::Cancelled,
+        result = &mut worker => FollowUp::Worker(result),
+        _ = sleep_until(deadline) => FollowUp::Timeout,
       };
 
-      if let Some(result) = worker_result {
-        let response = result.context("owned mutation worker failed")??;
-        let _ = write_owned_mutation_result(
-          writer,
-          &response,
-          OwnedMutationWriteContext {
-            fence: &fence,
-            request_id: request_id.as_ref(),
-            definition: authorized.definition(),
+      match worker_result {
+        FollowUp::Worker(result) => {
+          let response = result.context("owned mutation worker failed")??;
+          let _ = write_owned_mutation_result(
+            writer,
+            &response,
+            OwnedMutationWriteContext {
+              fence: &fence,
+              request_id: request_id.as_ref(),
+              definition: authorized.definition(),
+              response_type,
+              deadline,
+              limits,
+            },
+          )
+          .await?;
+        }
+        FollowUp::ShuttingDown => {
+          match fence.try_revoke() {
+            RevokeOutcome::Finalized => {
+              let response = (&mut worker)
+                .await
+                .context("owned mutation worker failed")??;
+              write_envelope_until(
+                writer,
+                response_type,
+                &response,
+                Instant::now() + limits.write_no_progress,
+                limits.write_no_progress,
+              )
+              .await?;
+            }
+            RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked => {
+              drop(worker);
+              send_request_shutting_down(writer, request_id, limits).await?;
+            }
+          }
+          return Ok(ConnectionAction::Close);
+        }
+        FollowUp::Cancelled => {
+          let response = (&mut worker)
+            .await
+            .context("owned mutation worker failed")??;
+          write_envelope_until(
+            writer,
             response_type,
-            deadline,
-            limits,
-          },
-        )
-        .await?;
-      } else {
-        match fence.try_revoke() {
+            &response,
+            Instant::now() + limits.write_no_progress,
+            limits.write_no_progress,
+          )
+          .await?;
+        }
+        FollowUp::Timeout => match fence.try_revoke() {
           RevokeOutcome::Revoked => {
             drop(worker);
             send_operation_timeout(writer, request_id, authorized.definition(), limits).await?;
@@ -1135,14 +1499,14 @@ where
             .await?;
           }
           RevokeOutcome::AlreadyRevoked => drop(worker),
-        }
+        },
       }
       if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
         send_pipelined_error(writer, pipelined_request_id, limits).await?;
       }
       Ok(ConnectionAction::Close)
     }
-    First::Cancelled => {
+    First::ShuttingDown => {
       match fence.try_revoke() {
         RevokeOutcome::Finalized => {
           let response = worker.await.context("owned mutation worker failed")??;
@@ -1155,8 +1519,24 @@ where
           )
           .await?;
         }
-        RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked => drop(worker),
+        RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked => {
+          drop(worker);
+          send_request_shutting_down(writer, request_id, limits).await?;
+        }
       }
+      drop(next_frame);
+      Ok(ConnectionAction::Close)
+    }
+    First::Cancelled => {
+      let response = worker.await.context("owned mutation worker failed")??;
+      write_envelope_until(
+        writer,
+        response_type,
+        &response,
+        Instant::now() + limits.write_no_progress,
+        limits.write_no_progress,
+      )
+      .await?;
       drop(next_frame);
       Ok(ConnectionAction::Close)
     }
@@ -1351,12 +1731,14 @@ where
   enum SetupFirst<T> {
     Setup(T),
     Reader(ConcurrentRead),
+    Cancelled,
     Timeout,
   }
 
   let first = tokio::select! {
     biased;
     frame = &mut next_frame => SetupFirst::Reader(classify_concurrent_read(frame)),
+    _ = cancellation.cancelled() => SetupFirst::Cancelled,
     _ = sleep_until(deadline) => SetupFirst::Timeout,
     result = &mut setup => SetupFirst::Setup(result),
   };
@@ -1373,20 +1755,38 @@ where
       prepared
     }
     SetupFirst::Reader(concurrent) => {
+      enum SetupFollowUp<T> {
+        Setup(T),
+        Cancelled,
+        Timeout,
+      }
       let setup_result = tokio::select! {
         biased;
-        _ = sleep_until(deadline) => None,
-        result = &mut setup => Some(result),
+        _ = cancellation.cancelled() => SetupFollowUp::Cancelled,
+        _ = sleep_until(deadline) => SetupFollowUp::Timeout,
+        result = &mut setup => SetupFollowUp::Setup(result),
       };
       drop(setup);
-      if let Some(result) = setup_result {
-        result?;
-      } else {
-        send_operation_timeout(writer, request_id, definition, limits).await?;
+      match setup_result {
+        SetupFollowUp::Setup(result) => {
+          result?;
+        }
+        SetupFollowUp::Cancelled => {
+          send_request_shutting_down(writer, request_id, limits).await?;
+          return Ok(ConnectionAction::Close);
+        }
+        SetupFollowUp::Timeout => {
+          send_operation_timeout(writer, request_id, definition, limits).await?;
+        }
       }
       if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
         send_pipelined_error(writer, pipelined_request_id, limits).await?;
       }
+      return Ok(ConnectionAction::Close);
+    }
+    SetupFirst::Cancelled => {
+      drop(setup);
+      send_request_shutting_down(writer, request_id, limits).await?;
       return Ok(ConnectionAction::Close);
     }
     SetupFirst::Timeout => {
@@ -1435,7 +1835,10 @@ where
     let Some(record) = in_flight.as_ref() else {
       tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Ok(ConnectionAction::Close),
+        _ = cancellation.cancelled() => {
+          send_stream_shutting_down(writer, request_id, limits).await?;
+          return Ok(ConnectionAction::Close);
+        },
         frame = reader.next() => {
           return close_state_stream_for_client_input(writer, frame, limits).await;
         }
@@ -1470,7 +1873,11 @@ where
       let queued_gap_deadline = buffer.gap_deadline();
       tokio::select! {
         biased;
-        _ = cancellation.cancelled() => return Ok(ConnectionAction::Close),
+        _ = cancellation.cancelled() => {
+          drop(write);
+          send_stream_shutting_down(writer, request_id, limits).await?;
+          return Ok(ConnectionAction::Close);
+        },
         _ = reader.next() => {
           drop(write);
           return Ok(ConnectionAction::Close);
@@ -1656,14 +2063,66 @@ async fn send_shutting_down<W>(
 where
   W: AsyncWrite + Unpin,
 {
+  send_shutdown_error(
+    writer,
+    request_id,
+    "The daemon is shutting down and does not accept new requests.",
+    limits,
+  )
+  .await
+}
+
+async fn send_request_shutting_down<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  send_shutdown_error(
+    writer,
+    request_id,
+    "This request did not complete because the daemon is shutting down.",
+    limits,
+  )
+  .await
+}
+
+async fn send_shutdown_error<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  message: &'static str,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
   let error = ProtocolError::new(
     ProtocolErrorKind::ShuttingDown,
     ProtocolErrorCode::parse("shutting_down").expect("built-in error code is valid"),
-    "The daemon is shutting down and does not accept new mutations.",
+    message,
     Some("Wait for the daemon to stop, then start it before retrying the operation.".into()),
-    true,
+    false,
   );
   send_late_protocol_error(writer, request_id, error, limits).await
+}
+
+async fn send_stream_shutting_down<W>(
+  writer: &mut W,
+  request_id: &str,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  send_shutdown_error(
+    writer,
+    Some(RequestId::parse(request_id).expect("active stream request ID is valid")),
+    "This stream is closing because the daemon is shutting down.",
+    limits,
+  )
+  .await
 }
 
 async fn send_pipelined_error<W>(
@@ -1848,14 +2307,22 @@ where
     }
     message_types::SHUTDOWN_DAEMON_REQUEST => {
       let request = decode_request!(ShutdownDaemonRequest);
-      let mut response = state.prepare_shutdown().await;
-      response.request_id = request.request_id;
-      let pending_shutdown = response.accepted.then(|| PendingShutdownSignal::new(state));
-      let write_result =
-        write_envelope(writer, message_types::SHUTDOWN_DAEMON_RESPONSE, &response).await;
-      if let Some(pending_shutdown) = pending_shutdown {
-        pending_shutdown.fire();
-      }
+      let response = BasicResponse {
+        request_id: request.request_id,
+        accepted: true,
+        message: "Daemon shutdown started.".to_string(),
+      };
+      let pending_shutdown = PendingShutdownSignal::new(state);
+      let response_deadline = std::cmp::min(deadline, Instant::now() + limits.shutdown_accept);
+      let write_result = write_envelope_until(
+        writer,
+        message_types::SHUTDOWN_DAEMON_RESPONSE,
+        &response,
+        response_deadline,
+        limits.write_no_progress,
+      )
+      .await;
+      pending_shutdown.fire();
       write_result?;
       return Ok(ConnectionAction::Close);
     }
@@ -2251,36 +2718,111 @@ fn operation_for_message_type(message_type: &str) -> IpcOperation {
   }
 }
 
+#[derive(Debug, Default)]
+struct ConnectionOwnershipState {
+  by_registration_id: BTreeMap<String, String>,
+  active_mutations: usize,
+  disconnected: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ConnectionOwnership {
-  by_registration_id: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
+  state: Arc<std::sync::Mutex<ConnectionOwnershipState>>,
+  mutations_finished: Arc<tokio::sync::Notify>,
+}
+
+struct ConnectionMutationGuard(ConnectionOwnership);
+
+impl Drop for ConnectionMutationGuard {
+  fn drop(&mut self) {
+    let should_notify = {
+      let mut state = self
+        .0
+        .state
+        .lock()
+        .expect("connection ownership lock poisoned");
+      state.active_mutations -= 1;
+      state.disconnected && state.active_mutations == 0
+    };
+    if should_notify {
+      self.0.mutations_finished.notify_one();
+    }
+  }
 }
 
 impl ConnectionOwnership {
+  fn begin_mutation(&self) -> Option<ConnectionMutationGuard> {
+    let mut state = self
+      .state
+      .lock()
+      .expect("connection ownership lock poisoned");
+    if state.disconnected {
+      return None;
+    }
+    state.active_mutations += 1;
+    Some(ConnectionMutationGuard(self.clone()))
+  }
+
   fn insert(&self, registration_id: String, shim_session_nonce: String) {
     self
-      .by_registration_id
+      .state
       .lock()
       .expect("connection ownership lock poisoned")
+      .by_registration_id
       .insert(registration_id, shim_session_nonce);
   }
 
   fn remove(&self, registration_id: &str) {
     self
-      .by_registration_id
+      .state
       .lock()
       .expect("connection ownership lock poisoned")
+      .by_registration_id
       .remove(registration_id);
   }
 
+  #[cfg(test)]
   fn take_entries(&self) -> impl Iterator<Item = (String, String)> {
     std::mem::take(
-      &mut *self
-        .by_registration_id
+      &mut self
+        .state
         .lock()
-        .expect("connection ownership lock poisoned"),
+        .expect("connection ownership lock poisoned")
+        .by_registration_id,
     )
     .into_iter()
+  }
+
+  #[cfg(test)]
+  fn is_disconnected(&self) -> bool {
+    self
+      .state
+      .lock()
+      .expect("connection ownership lock poisoned")
+      .disconnected
+  }
+
+  async fn disconnect_and_take_entries(&self) -> BTreeMap<String, String> {
+    {
+      let mut state = self
+        .state
+        .lock()
+        .expect("connection ownership lock poisoned");
+      state.disconnected = true;
+    }
+    loop {
+      let mutations_finished = self.mutations_finished.notified();
+      {
+        let mut state = self
+          .state
+          .lock()
+          .expect("connection ownership lock poisoned");
+        if state.active_mutations == 0 {
+          return std::mem::take(&mut state.by_registration_id);
+        }
+      }
+      mutations_finished.await;
+    }
   }
 }
 
@@ -3915,16 +4457,20 @@ mod tests {
   use crate::{
     CaddyConfigCoordinator, IisBindingRecord, IisProvider, IpcEndpoint, PrivilegeStatus,
     discover_ipc_endpoint, logs::LogQuery, operation_fence::OperationFenceAuthority,
+    state::RegistrationPublishTestHook,
   };
   use cadder_protocol::{
-    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY,
+    ActivationState, AutostartMode, BasicResponse, EntrypointInstanceIdentity,
+    EntrypointRegistration, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY, OwnerProcessIdentity,
     ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest,
-    QueryIisBindingsResponse, QueryStateRequest, QueryStateResponse, message_types, new_request_id,
+    QueryIisBindingsResponse, QueryStateRequest, QueryStateResponse, ShimRunMetadata, SourcePath,
+    message_types, new_request_id,
   };
+  use chrono::Utc;
   use std::{env, ffi::OsString, fs, future::Future, future::pending};
   use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    sync::{oneshot, watch},
+    sync::{Notify, oneshot, watch},
     task::JoinHandle,
     time::{Duration, sleep, timeout},
   };
@@ -4108,9 +4654,289 @@ mod tests {
     let mut byte = [0_u8; 1];
     let read = timeout(Duration::from_secs(1), connection.read(&mut byte))
       .await
-      .expect("drained connection should close")
+      .expect("idle drained connection should close without an unsolicited frame")
       .unwrap();
     assert_eq!(read, 0);
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_closes_registry_before_waiting_for_owned_mutations() {
+    let registry = MutationTaskRegistry::default();
+    let release = Arc::new(Notify::new());
+    let worker_release = release.clone();
+    let worker = registry
+      .spawn(async move {
+        worker_release.notified().await;
+      })
+      .expect("open registry should accept owned mutations");
+
+    registry.close();
+
+    assert!(registry.spawn(async {}).is_none());
+    assert!(
+      timeout(Duration::from_millis(25), registry.wait())
+        .await
+        .is_err(),
+      "the registry must retain a mutation accepted before close"
+    );
+
+    release.notify_one();
+    timeout(Duration::from_secs(1), registry.wait())
+      .await
+      .expect("the registry should drain after its accepted mutation completes")
+      .unwrap();
+    worker.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_reports_a_detached_owned_mutation_panic() {
+    let registry = MutationTaskRegistry::default();
+    let worker = registry
+      .spawn(async {
+        panic!("owned-mutation-panic");
+      })
+      .expect("open registry should accept owned mutations");
+    drop(worker);
+    timeout(Duration::from_secs(1), registry.panic_detected())
+      .await
+      .expect("the registry should signal an owned mutation panic immediately");
+    registry.close();
+
+    let error = timeout(Duration::from_secs(1), registry.wait())
+      .await
+      .expect("the registry should observe the detached task")
+      .unwrap_err();
+
+    assert!(error.to_string().contains("owned-mutation-panic"));
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_keeps_discovery_until_a_revoked_mutation_rolls_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let mut state = DaemonState::with_runtime_paths(
+      CaddyConfigCoordinator::new_mock(paths.clone()),
+      paths.clone(),
+    )
+    .await
+    .unwrap();
+    let hook = RegistrationPublishTestHook::new();
+    state.set_registration_publish_hook(hook.clone());
+    let observed_state = state.clone();
+    let limits = IpcLimits {
+      shutdown_handler_grace: Duration::from_millis(50),
+      ..IpcLimits::default()
+    };
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let server_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      DaemonServer::new(server_paths, state)
+        .with_limits(limits)
+        .run_until(shutdown_rx)
+        .await
+    });
+    wait_for_ready(&paths).await;
+    let mut connection = connect_authenticated(&paths).await;
+    write_envelope(
+      &mut connection,
+      message_types::REGISTER_ENTRYPOINT_REQUEST,
+      &RegisterEntrypointRequest {
+        request_id: "shutdown-contained-registration".to_string(),
+        registration: shutdown_test_registration(),
+      },
+    )
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(2), hook.wait_until_reached())
+      .await
+      .expect("registration should reach the pre-publish containment hook");
+
+    shutdown.send(true).unwrap();
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(!server.is_finished());
+    assert!(discover_ipc_endpoint(&paths).is_ok());
+
+    hook.release();
+    let error = timeout(Duration::from_secs(2), server)
+      .await
+      .expect("server should finish after the contained mutation rolls back")
+      .unwrap()
+      .unwrap_err();
+    let snapshot = observed_state.snapshot().await;
+    let history = observed_state
+      .query_history(cadder_protocol::QueryHistoryRequest {
+        request_id: "shutdown-contained-history".to_string(),
+        kind: None,
+        limit: Some(10),
+      })
+      .await;
+
+    assert!(
+      error
+        .to_string()
+        .contains("drain local IPC connection tasks")
+    );
+    assert!(discover_ipc_endpoint(&paths).is_err());
+    assert!(snapshot.registrations.is_empty());
+    assert!(history.records.iter().all(|record| {
+      record.registration_id.as_deref() != Some("shutdown-contained-entrypoint")
+    }));
+  }
+
+  fn shutdown_test_registration() -> EntrypointRegistration {
+    let now = Utc::now();
+    EntrypointRegistration {
+      registration_id: "shutdown-contained-entrypoint".to_string(),
+      entrypoint_instance: EntrypointInstanceIdentity {
+        instance_id: "shutdown-contained-entrypoint".to_string(),
+        started_at_utc: now,
+        shim_session_nonce: "shutdown-contained-nonce".to_string(),
+      },
+      source_working_directory: SourcePath::new(".", None),
+      source_config_path: SourcePath::new("Caddyfile", None),
+      registered_domains: Vec::new(),
+      activation_state: ActivationState::Active,
+      owner_process: OwnerProcessIdentity {
+        process_id: 1,
+        process_start_time_utc: now,
+        shim_session_nonce: "shutdown-contained-nonce".to_string(),
+        executable_path: None,
+      },
+      log_stream: LogStreamIdentity::entrypoint("shutdown-contained-entrypoint"),
+      shim_run: Some(ShimRunMetadata {
+        adapter: Some("caddyfile".to_string()),
+        raw_arguments: vec!["run".to_string()],
+        command_line: "run".to_string(),
+      }),
+      created_at_utc: now,
+      last_heartbeat_utc: now,
+    }
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_cancels_slow_request_with_typed_terminal_error() {
+    let limits = IpcLimits {
+      shutdown_handler_grace: Duration::from_millis(50),
+      dispatch_delay: Duration::from_secs(5),
+      ..IpcLimits::default()
+    };
+    let daemon = RunningTestDaemon::start_with_limits(limits).await;
+    let mut connection = connect_authenticated(&daemon.paths).await;
+    let request_id = "shutdown-coordinator-slow-request";
+    write_envelope(
+      &mut connection,
+      message_types::QUERY_STATE_REQUEST,
+      &QueryStateRequest {
+        request_id: request_id.to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    sleep(Duration::from_millis(50)).await;
+
+    daemon.shutdown.send(true).unwrap();
+
+    let envelope = timeout(Duration::from_secs(1), read_raw_envelope(&mut connection))
+      .await
+      .expect("slow request should receive a bounded shutdown outcome");
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(response.error.kind, ProtocolErrorKind::ShuttingDown);
+    assert_eq!(response.error.code.as_str(), "shutting_down");
+    assert_eq!(
+      response.error.message.as_ref(),
+      "This request did not complete because the daemon is shutting down."
+    );
+    assert!(!response.error.retryable);
+    timeout(Duration::from_secs(1), daemon.task)
+      .await
+      .expect("shutdown coordinator should join the slow handler")
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_joins_a_stalled_owned_mutation_worker() {
+    let limits = IpcLimits {
+      shutdown_handler_grace: Duration::from_millis(50),
+      dispatch_delay: Duration::from_secs(5),
+      ..IpcLimits::default()
+    };
+    let daemon = RunningTestDaemon::start_with_limits(limits).await;
+    let mut connection = connect_authenticated(&daemon.paths).await;
+    let request_id = "shutdown-coordinator-owned-mutation";
+    write_envelope(
+      &mut connection,
+      message_types::SET_AUTOSTART_REQUEST,
+      &SetAutostartRequest {
+        request_id: request_id.to_string(),
+        mode: cadder_protocol::AutostartMode::Daemon,
+      },
+    )
+    .await
+    .unwrap();
+    sleep(Duration::from_millis(50)).await;
+
+    daemon.shutdown.send(true).unwrap();
+
+    let envelope = timeout(Duration::from_secs(1), read_raw_envelope(&mut connection))
+      .await
+      .expect("owned mutation should receive a bounded shutdown outcome");
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(response.error.kind, ProtocolErrorKind::ShuttingDown);
+    assert_eq!(
+      response.error.message.as_ref(),
+      "This request did not complete because the daemon is shutting down."
+    );
+    assert!(!response.error.retryable);
+    timeout(Duration::from_secs(1), daemon.task)
+      .await
+      .expect("shutdown coordinator should join the owned mutation worker")
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn shutdown_coordinator_cancels_slow_stream_setup_with_typed_error() {
+    let limits = IpcLimits {
+      shutdown_handler_grace: Duration::from_millis(50),
+      dispatch_delay: Duration::from_secs(5),
+      ..IpcLimits::default()
+    };
+    let daemon = RunningTestDaemon::start_with_limits(limits).await;
+    let mut connection = connect_authenticated(&daemon.paths).await;
+    let request_id = "shutdown-coordinator-stream-setup";
+    write_envelope(
+      &mut connection,
+      message_types::SUBSCRIBE_STATE_REQUEST,
+      &SubscribeStateRequest {
+        request_id: request_id.to_string(),
+      },
+    )
+    .await
+    .unwrap();
+    sleep(Duration::from_millis(50)).await;
+
+    daemon.shutdown.send(true).unwrap();
+
+    let envelope = timeout(Duration::from_secs(1), read_raw_envelope(&mut connection))
+      .await
+      .expect("stream setup should receive a bounded shutdown outcome");
+    let response: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert_eq!(response.request_id, request_id);
+    assert_eq!(response.error.kind, ProtocolErrorKind::ShuttingDown);
+    assert_eq!(
+      response.error.message.as_ref(),
+      "This request did not complete because the daemon is shutting down."
+    );
+    assert!(!response.error.retryable);
+    timeout(Duration::from_secs(1), daemon.task)
+      .await
+      .expect("shutdown coordinator should join stream setup")
+      .unwrap()
+      .unwrap();
   }
 
   #[tokio::test]
@@ -4511,12 +5337,14 @@ mod tests {
       .expect("idle stream cancellation should be observed within one second")
       .unwrap_err();
 
-    assert_local_error(
+    assert_daemon_error(
       &error,
-      LocalIpcErrorKind::Transport,
-      IpcClientPhase::ResponseRead,
-      "unexpected_eof",
-      Some("stream-limits-cancellation"),
+      ProtocolErrorKind::ShuttingDown,
+      "shutting_down",
+      "stream-limits-cancellation",
+      "This stream is closing because the daemon is shutting down.",
+      Some("Wait for the daemon to stop, then start it before retrying the operation."),
+      false,
     );
     timeout(Duration::from_secs(2), daemon.task)
       .await
@@ -5292,6 +6120,33 @@ mod tests {
 
     let entries = registrations.take_entries().collect::<Vec<_>>();
     assert_eq!(entries, vec![("shim-1".to_string(), "nonce-2".to_string())]);
+  }
+
+  #[tokio::test]
+  async fn connection_ownership_cleanup_waits_for_a_late_successful_mutation() {
+    let ownership = ConnectionOwnership::default();
+    let mutation = ownership
+      .begin_mutation()
+      .expect("connected ownership should accept a mutation");
+    let cleanup_ownership = ownership.clone();
+    let cleanup =
+      tokio::spawn(async move { cleanup_ownership.disconnect_and_take_entries().await });
+    while !ownership.is_disconnected() {
+      tokio::task::yield_now().await;
+    }
+
+    ownership.insert("shim-late".to_string(), "nonce-late".to_string());
+    assert!(ownership.begin_mutation().is_none());
+    drop(mutation);
+
+    let entries = timeout(Duration::from_secs(1), cleanup)
+      .await
+      .expect("disconnect cleanup should finish after the mutation")
+      .unwrap();
+    assert_eq!(
+      entries,
+      BTreeMap::from([("shim-late".to_string(), "nonce-late".to_string())])
+    );
   }
 
   #[test]

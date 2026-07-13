@@ -1396,7 +1396,7 @@ if "%1"=="adapt" (
 )
 if "%1"=="reload" exit /b 0
 if "%1"=="stop" (
-  ping -n 3 127.0.0.1 >nul
+  ping -n 8 127.0.0.1 >nul
   exit /b 0
 )
 if "%1"=="run" (
@@ -1424,7 +1424,7 @@ case "$1" in
     exit 0
     ;;
   stop)
-    sleep 1
+    sleep 6
     exit 0
     ;;
   run)
@@ -2315,9 +2315,9 @@ app.localhost, http://api.localhost:8080 {
       RuntimeTimeouts {
         start_check: Duration::from_millis(150),
         reload: Duration::from_millis(500),
-        graceful_stop: Duration::from_millis(100),
-        stop_wait: Duration::from_millis(200),
-        kill_wait: Duration::from_secs(1),
+        graceful_stop: Duration::from_secs(1),
+        stop_wait: Duration::from_secs(1),
+        kill_wait: Duration::from_secs(2),
       },
     );
     let logs = CaddyLogStore::default();

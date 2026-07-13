@@ -23,8 +23,9 @@ use tokio::{
   process::Command,
   sync::Mutex,
   task::yield_now,
-  time::timeout,
+  time::{Instant, timeout, timeout_at},
 };
+use tokio_util::task::TaskTracker;
 
 use crate::caddy::RealCaddyResolver;
 
@@ -101,6 +102,20 @@ impl CaddyRuntime {
     }
   }
 
+  pub(crate) async fn stop_until(&self, deadline: Instant) -> RuntimeStopOutcome {
+    match self {
+      Self::Real(runtime) => runtime.stop_until(deadline).await,
+      Self::Mock(runtime) => RuntimeStopOutcome::new(runtime.stop().await, true),
+    }
+  }
+
+  pub(crate) async fn contain(&self) -> Result<()> {
+    match self {
+      Self::Real(runtime) => runtime.contain().await,
+      Self::Mock(runtime) => runtime.stop().await,
+    }
+  }
+
   pub(crate) async fn begin_stop(&self, logs: &CaddyLogStore) -> Result<RuntimeStopAttempt> {
     match self {
       Self::Real(runtime) => {
@@ -134,6 +149,22 @@ impl RuntimeApplyAttempt {
 pub(crate) struct RuntimeStopAttempt {
   receipt: RuntimeStopReceipt,
   outcome: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeStopOutcome {
+  result: Result<()>,
+  quiescent: bool,
+}
+
+impl RuntimeStopOutcome {
+  fn new(result: Result<()>, quiescent: bool) -> Self {
+    Self { result, quiescent }
+  }
+
+  pub(crate) fn into_parts(self) -> (Result<()>, bool) {
+    (self.result, self.quiescent)
+  }
 }
 
 impl RuntimeStopAttempt {
@@ -214,10 +245,18 @@ impl From<ProcessRuntime> for CaddyRuntime {
 pub struct ProcessRuntime {
   resolver: RealCaddyResolver,
   paths: RuntimePaths,
-  child: Arc<Mutex<Option<ProcessTreeChild>>>,
+  child: Arc<Mutex<Option<OwnedRuntimeProcess>>>,
+  snapshot: Arc<StdMutex<RuntimeState>>,
+  log_tasks: TaskTracker,
   timeouts: RuntimeTimeouts,
   #[cfg(test)]
   force_inspect_failure: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct OwnedRuntimeProcess {
+  child: ProcessTreeChild,
+  binary: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,9 +273,50 @@ impl Default for RuntimeTimeouts {
     Self {
       start_check: Duration::from_millis(250),
       reload: Duration::from_secs(30),
-      graceful_stop: Duration::from_secs(5),
-      stop_wait: Duration::from_secs(5),
-      kill_wait: Duration::from_secs(5),
+      graceful_stop: Duration::from_secs(3),
+      stop_wait: Duration::from_secs(3),
+      kill_wait: Duration::from_secs(4),
+    }
+  }
+}
+
+impl RuntimeTimeouts {
+  fn stop_budget(self) -> Duration {
+    let defaults = Self::default();
+    std::cmp::min(self.graceful_stop, defaults.graceful_stop)
+      + std::cmp::min(self.stop_wait, defaults.stop_wait)
+      + std::cmp::min(self.kill_wait, defaults.kill_wait)
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeStopDeadlines {
+  graceful: Instant,
+  stop: Instant,
+  kill: Instant,
+}
+
+impl RuntimeStopDeadlines {
+  fn new(overall: Instant, timeouts: RuntimeTimeouts) -> Self {
+    let started = Instant::now();
+    let available = overall.saturating_duration_since(started);
+    let defaults = RuntimeTimeouts::default();
+    let graceful = std::cmp::min(timeouts.graceful_stop, defaults.graceful_stop);
+    let stop = std::cmp::min(timeouts.stop_wait, defaults.stop_wait);
+    let kill = std::cmp::min(timeouts.kill_wait, defaults.kill_wait);
+    let configured = graceful + stop + kill;
+    let scale = if configured.is_zero() {
+      0.0
+    } else {
+      (available.as_secs_f64() / configured.as_secs_f64()).min(1.0)
+    };
+    let graceful_deadline = std::cmp::min(overall, started + graceful.mul_f64(scale));
+    let stop_deadline = std::cmp::min(overall, graceful_deadline + stop.mul_f64(scale));
+    let kill_deadline = std::cmp::min(overall, stop_deadline + kill.mul_f64(scale));
+    Self {
+      graceful: graceful_deadline,
+      stop: stop_deadline,
+      kill: kill_deadline,
     }
   }
 }
@@ -255,6 +335,8 @@ impl ProcessRuntime {
       resolver,
       paths,
       child: Arc::new(Mutex::new(None)),
+      snapshot: Arc::new(StdMutex::new(RuntimeState::idle())),
+      log_tasks: TaskTracker::new(),
       timeouts,
       #[cfg(test)]
       force_inspect_failure: Arc::new(AtomicBool::new(false)),
@@ -262,17 +344,15 @@ impl ProcessRuntime {
   }
 
   pub async fn inspect(&self) -> RuntimeState {
-    let binary_path = self
-      .resolver
-      .resolve()
-      .ok()
-      .map(|path| path.display().to_string());
-    let mut guard = self.child.lock().await;
-    if let Some(child) = guard.as_mut() {
-      let process_id = child.id();
+    let Ok(mut guard) = self.child.try_lock() else {
+      return self.snapshot();
+    };
+    if let Some(owned) = guard.as_mut() {
+      let binary_path = Some(owned.binary.display().to_string());
+      let process_id = owned.child.id();
       #[cfg(test)]
       if self.force_inspect_failure.load(Ordering::SeqCst) {
-        return RuntimeState {
+        let snapshot = RuntimeState {
           status: RuntimeStatus::Unhealthy,
           binary_path,
           version: None,
@@ -284,11 +364,13 @@ impl ProcessRuntime {
             operation: Some("inspect".to_string()),
           }],
         };
+        self.set_snapshot(snapshot.clone());
+        return snapshot;
       }
-      let status = child.try_wait();
+      let status = owned.child.try_wait();
       match status {
         Ok(None) => {
-          return RuntimeState {
+          let snapshot = RuntimeState {
             status: RuntimeStatus::Running,
             binary_path,
             version: None,
@@ -296,10 +378,12 @@ impl ProcessRuntime {
             admin_endpoint: Some("localhost:2019".to_string()),
             diagnostics: Vec::new(),
           };
+          self.set_snapshot(snapshot.clone());
+          return snapshot;
         }
         Ok(Some(status)) => {
           *guard = None;
-          return RuntimeState {
+          let snapshot = RuntimeState {
             status: RuntimeStatus::Unhealthy,
             binary_path,
             version: None,
@@ -311,9 +395,11 @@ impl ProcessRuntime {
               operation: Some("inspect".to_string()),
             }],
           };
+          self.set_snapshot(snapshot.clone());
+          return snapshot;
         }
         Err(error) => {
-          return RuntimeState {
+          let snapshot = RuntimeState {
             status: RuntimeStatus::Unhealthy,
             binary_path,
             version: None,
@@ -325,11 +411,30 @@ impl ProcessRuntime {
               operation: Some("inspect".to_string()),
             }],
           };
+          self.set_snapshot(snapshot.clone());
+          return snapshot;
         }
       }
     }
 
-    RuntimeState::idle()
+    let snapshot = RuntimeState::idle();
+    self.set_snapshot(snapshot.clone());
+    snapshot
+  }
+
+  fn snapshot(&self) -> RuntimeState {
+    self
+      .snapshot
+      .lock()
+      .expect("runtime snapshot lock poisoned")
+      .clone()
+  }
+
+  fn set_snapshot(&self, snapshot: RuntimeState) {
+    *self
+      .snapshot
+      .lock()
+      .expect("runtime snapshot lock poisoned") = snapshot;
   }
 
   pub async fn apply_config(&self, rendered: &[u8], logs: &CaddyLogStore) -> Result<()> {
@@ -392,7 +497,7 @@ impl ProcessRuntime {
       anyhow::bail!("real Caddy runtime already owns a child process");
     }
     let binary = self.resolver.resolve()?;
-    let mut command = Command::new(binary);
+    let mut command = Command::new(&binary);
     command
       .arg("run")
       .arg("--config")
@@ -401,11 +506,12 @@ impl ProcessRuntime {
       .stderr(Stdio::piped());
     let mut child = ProcessTreeChild::spawn(command).context("start real Caddy runtime")?;
 
+    self.log_tasks.reopen();
     if let Some(stdout) = child.take_stdout() {
-      spawn_log_reader(stdout, logs.clone(), "stdout");
+      spawn_log_reader(&self.log_tasks, stdout, logs.clone(), "stdout");
     }
     if let Some(stderr) = child.take_stderr() {
-      spawn_log_reader(stderr, logs.clone(), "stderr");
+      spawn_log_reader(&self.log_tasks, stderr, logs.clone(), "stderr");
     }
 
     yield_now().await;
@@ -417,7 +523,19 @@ impl ProcessRuntime {
       Err(_) => {}
     }
 
-    *self.child.lock().await = Some(child);
+    let process_id = child.id();
+    *self.child.lock().await = Some(OwnedRuntimeProcess {
+      child,
+      binary: binary.clone(),
+    });
+    self.set_snapshot(RuntimeState {
+      status: RuntimeStatus::Running,
+      binary_path: Some(binary.display().to_string()),
+      version: None,
+      process_id,
+      admin_endpoint: Some("localhost:2019".to_string()),
+      diagnostics: Vec::new(),
+    });
     logs.append(
       LogStreamIdentity::runtime_control(),
       LogSeverity::Info,
@@ -464,57 +582,134 @@ impl ProcessRuntime {
   }
 
   pub async fn stop(&self) -> Result<()> {
-    let child = {
-      let mut guard = self.child.lock().await;
-      guard.take()
+    let deadline = Instant::now() + self.timeouts.stop_budget();
+    let (result, quiescent) = self.stop_until(deadline).await.into_parts();
+    if quiescent {
+      return result;
+    }
+    self
+      .contain()
+      .await
+      .context("contain real Caddy runtime after bounded stop failed")?;
+    result
+  }
+
+  pub(crate) async fn stop_until(&self, deadline: Instant) -> RuntimeStopOutcome {
+    let deadlines = RuntimeStopDeadlines::new(deadline, self.timeouts);
+    let mut child_guard = match timeout_at(deadline, self.child.lock()).await {
+      Ok(guard) => guard,
+      Err(_) => {
+        return RuntimeStopOutcome::new(
+          Err(anyhow::anyhow!(
+            "real Caddy runtime stop could not acquire child ownership before its deadline"
+          )),
+          false,
+        );
+      }
     };
-    if let Some(mut child) = child {
-      match child.try_wait() {
-        Ok(Some(_)) => return Ok(()),
-        Ok(None) => {}
-        Err(error) => {
-          *self.child.lock().await = Some(child);
-          return Err(error).context("inspect real Caddy runtime before stop");
-        }
-      }
-      let mut stop_error = None;
-      if let Ok(binary) = self.resolver.resolve() {
-        stop_error = request_graceful_stop(binary, self.timeouts.graceful_stop)
-          .await
-          .err();
-      }
-      match timeout(self.timeouts.stop_wait, child.wait()).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-          *self.child.lock().await = Some(child);
-          return Err(error).context("wait for real Caddy runtime during stop");
-        }
-        Err(_) => match timeout(self.timeouts.kill_wait, child.kill()).await {
-          Ok(Ok(())) => {
-            if stop_error.is_none() {
-              stop_error = Some(anyhow::anyhow!(
-                "real Caddy runtime did not stop within {} seconds and was killed",
-                self.timeouts.stop_wait.as_secs()
-              ));
+    let mut stop_error = None;
+    if let Some(owned) = child_guard.as_mut() {
+      match owned.child.try_wait() {
+        Ok(Some(_)) => *child_guard = None,
+        Ok(None) => {
+          stop_error =
+            request_graceful_stop_until(owned.binary.clone(), deadlines.graceful, deadlines.stop)
+              .await
+              .err();
+
+          match timeout_at(deadlines.stop, owned.child.wait()).await {
+            Ok(Ok(_)) => *child_guard = None,
+            Ok(Err(error)) => {
+              return RuntimeStopOutcome::new(
+                Err(error).context("wait for real Caddy runtime during stop"),
+                false,
+              );
+            }
+            Err(_) => {
+              if let Err(error) = owned.child.start_kill() {
+                return RuntimeStopOutcome::new(
+                  Err(error).context("start kill for timed-out real Caddy runtime"),
+                  false,
+                );
+              }
+              match timeout_at(deadlines.kill, owned.child.wait()).await {
+                Ok(Ok(_)) => {
+                  *child_guard = None;
+                  if stop_error.is_none() {
+                    stop_error = Some(anyhow::anyhow!(
+                      "real Caddy runtime did not stop within {} seconds and was killed",
+                      self.timeouts.stop_wait.as_secs_f32()
+                    ));
+                  }
+                }
+                Ok(Err(error)) => {
+                  return RuntimeStopOutcome::new(
+                    Err(error).context("join killed real Caddy runtime"),
+                    false,
+                  );
+                }
+                Err(_) => {
+                  return RuntimeStopOutcome::new(
+                    Err(anyhow::anyhow!(
+                      "real Caddy runtime kill did not complete before the shutdown deadline"
+                    )),
+                    false,
+                  );
+                }
+              }
             }
           }
-          Ok(Err(error)) => {
-            *self.child.lock().await = Some(child);
-            return Err(error).context("kill timed-out real Caddy runtime");
-          }
-          Err(_) => {
-            *self.child.lock().await = Some(child);
-            anyhow::bail!(
-              "real Caddy runtime kill did not complete within {} seconds",
-              self.timeouts.kill_wait.as_secs()
-            );
-          }
-        },
-      }
-      if let Some(error) = stop_error {
-        return Err(error);
+        }
+        Err(error) => {
+          return RuntimeStopOutcome::new(
+            Err(error).context("inspect real Caddy runtime before stop"),
+            false,
+          );
+        }
       }
     }
+    drop(child_guard);
+
+    self.set_snapshot(RuntimeState::idle());
+
+    self.log_tasks.close();
+    if timeout_at(deadline, self.log_tasks.wait()).await.is_err() {
+      return RuntimeStopOutcome::new(
+        Err(anyhow::anyhow!(
+          "real Caddy runtime log readers did not join before the shutdown deadline"
+        )),
+        false,
+      );
+    }
+    RuntimeStopOutcome::new(stop_error.map_or(Ok(()), Err), true)
+  }
+
+  async fn contain(&self) -> Result<()> {
+    let mut child_guard = self.child.lock().await;
+    if let Some(owned) = child_guard.as_mut() {
+      match owned.child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+          owned
+            .child
+            .start_kill()
+            .context("start fail-stop containment for real Caddy runtime")?;
+          owned
+            .child
+            .wait()
+            .await
+            .context("join fail-stop containment for real Caddy runtime")?;
+        }
+        Err(error) => {
+          return Err(error).context("inspect real Caddy runtime during fail-stop containment");
+        }
+      }
+      *child_guard = None;
+    }
+    drop(child_guard);
+    self.set_snapshot(RuntimeState::idle());
+    self.log_tasks.close();
+    self.log_tasks.wait().await;
     Ok(())
   }
 
@@ -524,10 +719,10 @@ impl ProcessRuntime {
     if self.force_inspect_failure.load(Ordering::SeqCst) && guard.is_some() {
       anyhow::bail!("injected real Caddy runtime inspection failure");
     }
-    let Some(child) = guard.as_mut() else {
+    let Some(owned) = guard.as_mut() else {
       return Ok(false);
     };
-    let status = child.try_wait();
+    let status = owned.child.try_wait();
     match status {
       Ok(None) => Ok(true),
       Ok(Some(status)) => {
@@ -812,7 +1007,11 @@ impl MockRuntimeStopReceipt {
   }
 }
 
-async fn request_graceful_stop(binary: PathBuf, graceful_stop: Duration) -> Result<()> {
+async fn request_graceful_stop_until(
+  binary: PathBuf,
+  wait_deadline: Instant,
+  cleanup_deadline: Instant,
+) -> Result<()> {
   let mut command = Command::new(binary);
   command
     .arg("stop")
@@ -821,13 +1020,35 @@ async fn request_graceful_stop(binary: PathBuf, graceful_stop: Duration) -> Resu
     .stdout(Stdio::null())
     .stderr(Stdio::null());
   let mut child = ProcessTreeChild::spawn(command).context("start caddy stop")?;
-  let status = match timeout(graceful_stop, child.wait()).await {
+  let graceful_stop = wait_deadline.saturating_duration_since(Instant::now());
+  let status = match timeout_at(wait_deadline, child.wait()).await {
     Ok(result) => result.context("wait for caddy stop")?,
     Err(_) => {
-      let _ = child.kill().await;
+      child
+        .start_kill()
+        .context("start kill for timed-out caddy stop helper")?;
+      let cleanup_overran = match timeout_at(cleanup_deadline, child.wait()).await {
+        Ok(result) => {
+          result.context("join timed-out caddy stop helper")?;
+          false
+        }
+        Err(_) => {
+          child
+            .wait()
+            .await
+            .context("complete fail-stop containment for caddy stop helper")?;
+          true
+        }
+      };
+      if cleanup_overran {
+        anyhow::bail!(
+          "caddy stop timed out after {} seconds and helper containment exceeded its cleanup deadline",
+          graceful_stop.as_secs_f32()
+        );
+      }
       anyhow::bail!(
         "caddy stop timed out after {} seconds",
-        graceful_stop.as_secs()
+        graceful_stop.as_secs_f32()
       );
     }
   };
@@ -837,11 +1058,11 @@ async fn request_graceful_stop(binary: PathBuf, graceful_stop: Duration) -> Resu
   Ok(())
 }
 
-fn spawn_log_reader<R>(reader: R, logs: CaddyLogStore, channel: &'static str)
+fn spawn_log_reader<R>(tasks: &TaskTracker, reader: R, logs: CaddyLogStore, channel: &'static str)
 where
   R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-  tokio::spawn(async move {
+  tasks.spawn(async move {
     let mut reader = BufReader::new(reader).lines();
     while let Ok(Some(line)) = reader.next_line().await {
       let severity = if channel == "stderr" {
@@ -893,8 +1114,8 @@ mod tests {
     RuntimeTimeouts {
       start_check: Duration::from_millis(250),
       reload: Duration::from_millis(500),
-      graceful_stop: Duration::from_millis(500),
-      stop_wait: Duration::from_secs(2),
+      graceful_stop: Duration::from_secs(2),
+      stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
     }
   }
@@ -925,10 +1146,33 @@ mod tests {
 
     assert_eq!(timeouts.start_check, Duration::from_millis(250));
     assert_eq!(timeouts.reload, Duration::from_secs(30));
-    assert_eq!(timeouts.graceful_stop, Duration::from_secs(5));
-    assert_eq!(timeouts.stop_wait, Duration::from_secs(5));
-    assert_eq!(timeouts.kill_wait, Duration::from_secs(5));
+    assert_eq!(timeouts.graceful_stop, Duration::from_secs(3));
+    assert_eq!(timeouts.stop_wait, Duration::from_secs(3));
+    assert_eq!(timeouts.kill_wait, Duration::from_secs(4));
+    assert_eq!(
+      timeouts.graceful_stop + timeouts.stop_wait + timeouts.kill_wait,
+      Duration::from_secs(10)
+    );
     assert!(format!("{:?}", timeouts).contains("RuntimeTimeouts"));
+  }
+
+  #[test]
+  fn runtime_stop_deadlines_do_not_expand_short_phase_budgets_to_the_overall_deadline() {
+    let started = Instant::now();
+    let overall = started + Duration::from_secs(10);
+    let deadlines = RuntimeStopDeadlines::new(overall, short_timeouts());
+
+    let graceful = deadlines.graceful.saturating_duration_since(started);
+    let stop = deadlines.stop.saturating_duration_since(started);
+    let kill = deadlines.kill.saturating_duration_since(started);
+
+    assert!(graceful <= Duration::from_millis(2_100));
+    assert!(graceful >= Duration::from_millis(1_900));
+    assert!(stop <= Duration::from_millis(3_100));
+    assert!(stop >= Duration::from_millis(2_900));
+    assert!(kill <= Duration::from_millis(4_100));
+    assert!(kill >= Duration::from_millis(3_900));
+    assert!(deadlines.kill < overall);
   }
 
   #[test]
@@ -1145,7 +1389,7 @@ mod tests {
       RuntimeStatus::Running
     );
     assert!(!command_log_contains(&fixture.command_log, "stop"));
-    fixture.runtime.stop().await.unwrap();
+    fixture.runtime.contain().await.unwrap();
   }
 
   #[tokio::test]
@@ -1255,17 +1499,76 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn stop_until_clips_oversized_phase_timeouts_and_joins_the_child() {
+    let mut fixture = runtime_fixture(FakeRuntimeMode::SlowStop);
+    fixture.runtime.timeouts = RuntimeTimeouts {
+      start_check: Duration::from_millis(250),
+      reload: Duration::from_secs(30),
+      graceful_stop: Duration::from_secs(60),
+      stop_wait: Duration::from_secs(60),
+      kill_wait: Duration::from_secs(60),
+    };
+    fixture
+      .runtime
+      .apply_config(br#"{"apps":{}}"#, &fixture.logs)
+      .await
+      .unwrap();
+    wait_for_command_log(&fixture.command_log, "run").await;
+    let budget = Duration::from_secs(4);
+    let started = Instant::now();
+
+    let outcome = fixture.runtime.stop_until(started + budget).await;
+    let (result, quiescent) = outcome.into_parts();
+
+    assert!(result.is_err());
+    assert!(quiescent);
+    assert!(started.elapsed() <= budget + Duration::from_millis(250));
+    assert_eq!(fixture.runtime.inspect().await.status, RuntimeStatus::Idle);
+    assert_eq!(fixture.runtime.log_tasks.len(), 0);
+  }
+
+  #[tokio::test]
+  async fn cancelling_stop_until_retains_child_ownership_for_containment() {
+    let fixture = runtime_fixture(FakeRuntimeMode::SlowStop);
+    fixture
+      .runtime
+      .apply_config(br#"{"apps":{}}"#, &fixture.logs)
+      .await
+      .unwrap();
+    wait_for_command_log(&fixture.command_log, "run").await;
+    let runtime = fixture.runtime.clone();
+    let stop = tokio::spawn(async move {
+      runtime
+        .stop_until(Instant::now() + Duration::from_secs(10))
+        .await
+    });
+    sleep(Duration::from_millis(100)).await;
+
+    stop.abort();
+    assert!(stop.await.unwrap_err().is_cancelled());
+    assert!(fixture.runtime.child.lock().await.is_some());
+
+    fixture.runtime.contain().await.unwrap();
+    assert_eq!(fixture.runtime.inspect().await.status, RuntimeStatus::Idle);
+    assert_eq!(fixture.runtime.log_tasks.len(), 0);
+  }
+
+  #[tokio::test]
   async fn request_graceful_stop_times_out_the_stop_command() {
     let temp = tempfile::tempdir().unwrap();
     let command_log = temp.path().join("fake-caddy.log");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::SlowStop);
 
-    let error = request_graceful_stop(fake_caddy, Duration::from_millis(500))
-      .await
-      .unwrap_err();
+    let started = Instant::now();
+    let error = request_graceful_stop_until(
+      fake_caddy,
+      started + Duration::from_secs(2),
+      started + Duration::from_secs(3),
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("caddy stop timed out"));
-    wait_for_command_log(&command_log, "stop").await;
   }
 
   #[tokio::test]
@@ -1274,9 +1577,14 @@ mod tests {
     let command_log = temp.path().join("fake-caddy.log");
     let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::FailStop);
 
-    let error = request_graceful_stop(fake_caddy, Duration::from_secs(1))
-      .await
-      .unwrap_err();
+    let started = Instant::now();
+    let error = request_graceful_stop_until(
+      fake_caddy,
+      started + Duration::from_secs(10),
+      started + Duration::from_secs(12),
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("caddy stop failed"));
     wait_for_command_log(&command_log, "stop").await;
@@ -1320,7 +1628,7 @@ mod tests {
         let mut child = runtime.child.lock().await;
         child
           .as_mut()
-          .is_none_or(|child| child.try_wait().unwrap().is_some())
+          .is_none_or(|owned| owned.child.try_wait().unwrap().is_some())
       };
       if has_exited {
         return;
@@ -1355,7 +1663,7 @@ mod tests {
         "exit /b 0"
       };
       let stop_behavior = if matches!(mode, FakeRuntimeMode::SlowStop) {
-        "\"%SystemRoot%\\System32\\ping.exe\" -n 3 127.0.0.1 >nul\r\n  echo stop> \"{stop_file}\"\r\n  exit /b 0"
+        "\"%SystemRoot%\\System32\\ping.exe\" -n 8 127.0.0.1 >nul\r\n  echo stop> \"{stop_file}\"\r\n  exit /b 0"
       } else if matches!(mode, FakeRuntimeMode::FailStop) {
         "echo stop> \"{stop_file}\"\r\n  exit /b 7"
       } else {
@@ -1409,7 +1717,7 @@ exit /b 0
         "exit 0"
       };
       let stop_behavior = if matches!(mode, FakeRuntimeMode::SlowStop) {
-        "sleep 1\n  : > '{stop_file}'\n  exit 0"
+        "sleep 6\n  : > '{stop_file}'\n  exit 0"
       } else if matches!(mode, FakeRuntimeMode::FailStop) {
         ": > '{stop_file}'\n  exit 7"
       } else {

@@ -86,6 +86,11 @@ impl DaemonState {
     self.operation_fences.begin_drain()
   }
 
+  #[cfg(test)]
+  pub(crate) fn set_registration_publish_hook(&mut self, hook: RegistrationPublishTestHook) {
+    self.registration_publish_hook = Some(hook);
+  }
+
   pub fn logs(&self) -> CaddyLogStore {
     self.logs.clone()
   }

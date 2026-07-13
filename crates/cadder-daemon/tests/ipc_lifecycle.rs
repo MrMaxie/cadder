@@ -325,6 +325,7 @@ async fn shutdown_daemon_request_stops_server_and_rejects_new_clients() {
     .unwrap();
   assert!(response.accepted, "{}", response.message);
 
+  let mut rejected_new_client = false;
   for _ in 0..50 {
     let result = harness
       .client
@@ -337,16 +338,21 @@ async fn shutdown_daemon_request_stops_server_and_rejects_new_clients() {
       )
       .await;
     if result.is_err() {
-      return;
+      rejected_new_client = true;
+      break;
     }
     sleep(Duration::from_millis(20)).await;
   }
 
-  panic!("daemon server still accepted new IPC clients after shutdown request");
+  assert!(
+    rejected_new_client,
+    "daemon server still accepted new IPC clients after shutdown request"
+  );
+  harness.shutdown().await;
 }
 
 #[tokio::test]
-async fn shutdown_daemon_request_reports_stop_timeout_and_keeps_server_available() {
+async fn shutdown_daemon_request_acknowledges_then_closes_after_stop_timeout() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture).slow_stop(short_runtime_timeouts())).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
@@ -371,25 +377,41 @@ async fn shutdown_daemon_request_reports_stop_timeout_and_keeps_server_available
     )
     .await
     .unwrap();
-  let heartbeat: BasicResponse = harness
-    .client
-    .request(
-      message_types::HEARTBEAT_ENTRYPOINT_REQUEST,
-      message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
-      &HeartbeatEntrypointRequest {
-        request_id: new_request_id("after-failed-shutdown"),
-        registration_id: "shim-1".to_string(),
-        shim_session_nonce: "nonce-1".to_string(),
-      },
-    )
-    .await
-    .unwrap();
-  let snapshot = query_state(&harness.client).await;
-  let history = query_history(&harness.client, cadder_protocol::HistoryKind::Runtime).await;
+  let mut control_plane_closed = false;
+  for _ in 0..50 {
+    let heartbeat = harness
+      .client
+      .request(
+        message_types::HEARTBEAT_ENTRYPOINT_REQUEST,
+        message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
+        &HeartbeatEntrypointRequest {
+          request_id: new_request_id("after-failed-shutdown"),
+          registration_id: "shim-1".to_string(),
+          shim_session_nonce: "nonce-1".to_string(),
+        },
+      )
+      .await;
+    if heartbeat.is_err() {
+      control_plane_closed = true;
+      break;
+    }
+    sleep(Duration::from_millis(20)).await;
+  }
+  let state = harness.state.clone();
+  let paths = harness.paths.clone();
+  let snapshot = state.snapshot().await;
+  let history = harness
+    .state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: new_request_id("shutdown-history"),
+      kind: Some(cadder_protocol::HistoryKind::Runtime),
+      limit: Some(100),
+    })
+    .await;
 
-  assert!(!response.accepted);
-  assert!(response.message.contains("timed out"));
-  assert!(heartbeat.accepted, "{}", heartbeat.message);
+  assert!(response.accepted);
+  assert_eq!(response.message, "Daemon shutdown started.");
+  assert!(control_plane_closed);
   assert_eq!(snapshot.registrations.len(), 1);
   assert!(
     history
@@ -397,7 +419,13 @@ async fn shutdown_daemon_request_reports_stop_timeout_and_keeps_server_available
       .iter()
       .all(|record| record.summary != "Daemon shutdown requested.")
   );
-  harness.shutdown().await;
+  let server_error = harness
+    .server_result()
+    .await
+    .expect_err("the bounded graceful-stop timeout should reject shutdown");
+  assert!(server_error.to_string().contains("caddy stop timed out"));
+  assert_eq!(state.snapshot().await.runtime.status, RuntimeStatus::Idle);
+  assert!(discover_ipc_endpoint(&paths).is_err());
 }
 
 #[tokio::test]
@@ -1029,7 +1057,15 @@ async fn slow_stop_does_not_block_state_queries_and_logs_timeout() {
   assert!(logs.entries.iter().any(|entry| {
     entry.severity == LogSeverity::Error && entry.raw_message.contains("timed out")
   }));
-  harness.shutdown().await;
+  let state = harness.state.clone();
+  let paths = harness.paths.clone();
+  let server_error = harness
+    .server_result()
+    .await
+    .expect_err("the slow stop helper should reject bounded shutdown");
+  assert!(server_error.to_string().contains("caddy stop timed out"));
+  assert_eq!(state.snapshot().await.runtime.status, RuntimeStatus::Idle);
+  assert!(discover_ipc_endpoint(&paths).is_err());
 }
 
 #[tokio::test]
@@ -1115,6 +1151,7 @@ async fn shutdown_after_runtime_child_exit_is_accepted() {
     .unwrap();
 
   assert!(response.accepted, "{}", response.message);
+  harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -2167,6 +2204,7 @@ struct Harness {
   state: DaemonState,
   paths: RuntimePaths,
   shutdown_tx: watch::Sender<bool>,
+  server_task: JoinHandle<anyhow::Result<()>>,
   config_path: PathBuf,
   command_log_path: PathBuf,
   _temp: tempfile::TempDir,
@@ -2195,9 +2233,7 @@ impl Harness {
     let state = DaemonState::new(CaddyConfigCoordinator::new(adapter, runtime));
     let server = DaemonServer::new(paths.clone(), state.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(async move {
-      let _ = server.run_until(shutdown_rx).await;
-    });
+    let server_task = tokio::spawn(async move { server.run_until(shutdown_rx).await });
 
     let client = CadderClient::new(paths.clone());
     for _ in 0..50 {
@@ -2217,6 +2253,7 @@ impl Harness {
           state,
           paths,
           shutdown_tx,
+          server_task,
           config_path,
           command_log_path,
           _temp: temp,
@@ -2228,7 +2265,18 @@ impl Harness {
   }
 
   async fn shutdown(self) {
+    self
+      .server_result()
+      .await
+      .expect("test daemon should shut down cleanly");
+  }
+
+  async fn server_result(self) -> anyhow::Result<()> {
     let _ = self.shutdown_tx.send(true);
+    tokio::time::timeout(Duration::from_secs(20), self.server_task)
+      .await
+      .expect("test daemon should finish within its bounded shutdown phases")
+      .expect("test daemon task should not panic")
   }
 }
 
@@ -2373,9 +2421,9 @@ async fn wait_for_command_count(path: &Path, command: &str, expected: usize) {
 fn short_runtime_timeouts() -> RuntimeTimeouts {
   RuntimeTimeouts {
     start_check: Duration::from_millis(250),
-    reload: Duration::from_millis(500),
-    graceful_stop: Duration::from_millis(500),
-    stop_wait: Duration::from_millis(500),
+    reload: Duration::from_secs(2),
+    graceful_stop: Duration::from_secs(2),
+    stop_wait: Duration::from_secs(1),
     kill_wait: Duration::from_secs(1),
   }
 }
@@ -2408,11 +2456,11 @@ fn write_fake_caddy(dir: &Path, command_log_path: &Path, fake_caddy: FakeCaddy<'
   let slow_reload = if fake_caddy.slow_reload {
     #[cfg(windows)]
     {
-      "ping -n 2 127.0.0.1 >nul"
+      "ping -n 8 127.0.0.1 >nul"
     }
     #[cfg(not(windows))]
     {
-      "sleep 1"
+      "sleep 6"
     }
   } else {
     ""
@@ -2420,11 +2468,11 @@ fn write_fake_caddy(dir: &Path, command_log_path: &Path, fake_caddy: FakeCaddy<'
   let slow_stop = if fake_caddy.slow_stop {
     #[cfg(windows)]
     {
-      "ping -n 2 127.0.0.1 >nul"
+      "ping -n 8 127.0.0.1 >nul"
     }
     #[cfg(not(windows))]
     {
-      "sleep 1"
+      "sleep 6"
     }
   } else {
     ""

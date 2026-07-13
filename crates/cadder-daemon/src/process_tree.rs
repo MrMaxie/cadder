@@ -54,10 +54,15 @@ impl ProcessTreeChild {
     self.inner.wait().await
   }
 
+  #[cfg(test)]
   pub(crate) async fn kill(&mut self) -> io::Result<()> {
-    self.inner.start_kill()?;
+    self.start_kill()?;
     self.inner.wait().await?;
     Ok(())
+  }
+
+  pub(crate) fn start_kill(&mut self) -> io::Result<()> {
+    self.inner.start_kill()
   }
 
   pub(crate) async fn wait_for_output(

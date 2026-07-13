@@ -77,14 +77,14 @@ struct DaemonInner {
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-struct RegistrationPublishTestHook {
+pub(crate) struct RegistrationPublishTestHook {
   reached: Arc<Semaphore>,
   release: Arc<Semaphore>,
 }
 
 #[cfg(test)]
 impl RegistrationPublishTestHook {
-  fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self {
       reached: Arc::new(Semaphore::new(0)),
       release: Arc::new(Semaphore::new(0)),
@@ -101,7 +101,7 @@ impl RegistrationPublishTestHook {
       .forget();
   }
 
-  async fn wait_until_reached(&self) {
+  pub(crate) async fn wait_until_reached(&self) {
     self
       .reached
       .acquire()
@@ -110,7 +110,7 @@ impl RegistrationPublishTestHook {
       .forget();
   }
 
-  fn release(&self) {
+  pub(crate) fn release(&self) {
     self.release.add_permits(1);
   }
 }
