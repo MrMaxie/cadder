@@ -949,7 +949,9 @@ where
 fn owned_mutation_uses_worker(message_type: &str) -> bool {
   matches!(
     message_type,
-    message_types::REGISTER_ENTRYPOINT_REQUEST | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
+    message_types::REGISTER_ENTRYPOINT_REQUEST
+      | message_types::UNREGISTER_ENTRYPOINT_REQUEST
+      | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
   )
 }
 
@@ -995,6 +997,10 @@ where
         OwnedMutationRequest::Register(Box::new(request))
       })
     }
+    message_types::UNREGISTER_ENTRYPOINT_REQUEST => decode_owned_request!(
+      UnregisterEntrypointRequest,
+      OwnedMutationRequest::Unregister
+    ),
     message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
       decode_owned_request!(HeartbeatEntrypointRequest, OwnedMutationRequest::Heartbeat)
     }
@@ -1132,6 +1138,7 @@ where
 
 enum OwnedMutationRequest {
   Register(Box<RegisterEntrypointRequest>),
+  Unregister(UnregisterEntrypointRequest),
   Heartbeat(HeartbeatEntrypointRequest),
 }
 
@@ -1139,6 +1146,7 @@ impl OwnedMutationRequest {
   fn response_type(&self) -> &'static str {
     match self {
       Self::Register(_) => message_types::REGISTER_ENTRYPOINT_RESPONSE,
+      Self::Unregister(_) => message_types::UNREGISTER_ENTRYPOINT_RESPONSE,
       Self::Heartbeat(_) => message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
     }
   }
@@ -1167,6 +1175,21 @@ impl OwnedMutationRequest {
           ownership.insert(registration_id.clone(), nonce);
         }
         Ok(OwnedMutationResponse::Register(response))
+      }
+      Self::Unregister(request) => {
+        let registration_id = request.registration_id.clone();
+        let response = state
+          .unregister_fenced(
+            request.request_id,
+            &registration_id,
+            &request.shim_session_nonce,
+            &fence,
+          )
+          .await?;
+        if response.accepted {
+          ownership.remove(&registration_id);
+        }
+        Ok(OwnedMutationResponse::Basic(response))
       }
       Self::Heartbeat(request) => Ok(OwnedMutationResponse::Basic(
         state.heartbeat_fenced(request, &fence).await?,
@@ -3816,6 +3839,22 @@ mod tests {
       OPERATION_REGISTRY
         .lookup(message_types::SHUTDOWN_DAEMON_REQUEST)
         .unwrap()
+    ));
+  }
+
+  #[test]
+  fn owned_mutation_worker_tracks_registration_lifecycle_requests() {
+    assert!(owned_mutation_uses_worker(
+      message_types::REGISTER_ENTRYPOINT_REQUEST
+    ));
+    assert!(owned_mutation_uses_worker(
+      message_types::UNREGISTER_ENTRYPOINT_REQUEST
+    ));
+    assert!(owned_mutation_uses_worker(
+      message_types::HEARTBEAT_ENTRYPOINT_REQUEST
+    ));
+    assert!(!owned_mutation_uses_worker(
+      message_types::SET_ENTRYPOINT_ENABLED_REQUEST
     ));
   }
 

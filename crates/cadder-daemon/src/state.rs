@@ -61,7 +61,7 @@ pub struct DaemonState {
   shutdown_signal: ShutdownSignal,
   operation_fences: OperationFenceAuthority,
   #[cfg(test)]
-  register_publish_hook: Option<RegisterPublishTestHook>,
+  registration_publish_hook: Option<RegistrationPublishTestHook>,
 }
 
 #[derive(Debug)]
@@ -72,13 +72,13 @@ struct DaemonInner {
 
 #[cfg(test)]
 #[derive(Debug, Clone)]
-struct RegisterPublishTestHook {
+struct RegistrationPublishTestHook {
   reached: Arc<Semaphore>,
   release: Arc<Semaphore>,
 }
 
 #[cfg(test)]
-impl RegisterPublishTestHook {
+impl RegistrationPublishTestHook {
   fn new() -> Self {
     Self {
       reached: Arc::new(Semaphore::new(0)),

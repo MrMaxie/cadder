@@ -125,7 +125,7 @@ impl DaemonState {
       None => runtime.inspect().await,
     };
     #[cfg(test)]
-    if let Some(hook) = &self.register_publish_hook {
+    if let Some(hook) = &self.registration_publish_hook {
       hook.pause().await;
     }
     let storage_state = self.store.state();
@@ -263,66 +263,58 @@ impl DaemonState {
       .acquire()
       .await
       .expect("config operation semaphore closed");
-    let (removed, removed_registration, registrations) = {
-      let mut inner = self.inner.lock().await;
-      let (removed, removed_registration) = fence.commit(|| {
-        let removed = inner
-          .registrations
-          .get(registration_id)
-          .is_some_and(|registration| {
-            registration.entrypoint_instance.shim_session_nonce == shim_session_nonce
-          });
-        if !removed {
-          (false, None)
-        } else {
-          let removed_registration = inner.registrations.remove(registration_id);
-          (true, removed_registration)
-        }
-      })?;
-      let registrations = if removed {
-        inner.registrations.values().cloned().collect::<Vec<_>>()
-      } else {
-        Vec::new()
-      };
-      (removed, removed_registration, registrations)
+    let (candidate_coordinator, mut candidate_registrations) = {
+      let coordinator = self.coordinator.lock().await;
+      let inner = self.inner.lock().await;
+      (coordinator.clone(), inner.registrations.clone())
     };
-    if removed {
-      self
-        .apply_registrations_fenced(registrations, fence)
-        .await?;
-      fence.commit(|| {
-        self.store.record_history(
-          HistoryKind::Registration,
-          format!("Unregistered entrypoint `{registration_id}`."),
-          Some(registration_id),
-          None,
-          &serde_json::json!({
-            "registrationId": registration_id,
-            "domainCount": removed_registration
-              .as_ref()
-              .map(|registration| registration.registered_domains.len())
-              .unwrap_or_default()
-          }),
-        );
-      })?;
-      self
-        .publish_change_fenced(
-          StateChangeKind::RegistrationsChanged,
-          Some(registration_id.to_string()),
-          fence,
-        )
-        .await?;
+    let removed_registration = candidate_registrations
+      .get(registration_id)
+      .filter(|registration| {
+        registration.entrypoint_instance.shim_session_nonce == shim_session_nonce
+      })
+      .cloned();
+    let Some(removed_registration) = removed_registration else {
+      return Ok(BasicResponse {
+        request_id,
+        accepted: false,
+        message: "Entrypoint was not found for the requested owner.".to_string(),
+      });
+    };
+    candidate_registrations.remove(registration_id);
+    let transaction = RegistrationTransaction {
+      coordinator: candidate_coordinator,
+      registrations: candidate_registrations,
+      history: RegistrationHistoryDraft {
+        summary: format!("Unregistered entrypoint `{registration_id}`."),
+        registration_id: Some(registration_id.to_string()),
+        domain_key: None,
+        details: serde_json::json!({
+          "registrationId": registration_id,
+          "domainCount": removed_registration.registered_domains.len()
+        }),
+      },
+      event_registration_id: Some(registration_id.to_string()),
+    };
+    match self
+      .execute_registration_transaction(transaction, fence)
+      .await
+    {
+      Ok(()) => {}
+      Err(RegistrationTransactionFailure::Fenced(rejection)) => return Err(rejection),
+      Err(RegistrationTransactionFailure::Runtime(error)) => {
+        return Ok(registration_mutation_runtime_rejected(
+          request_id,
+          "unregister entrypoint",
+          error,
+        ));
+      }
     }
 
     Ok(BasicResponse {
       request_id,
-      accepted: removed,
-      message: if removed {
-        "Entrypoint unregistered."
-      } else {
-        "Entrypoint was not found for the requested owner."
-      }
-      .to_string(),
+      accepted: true,
+      message: "Entrypoint unregistered.".to_string(),
     })
   }
 
@@ -682,6 +674,18 @@ fn registration_runtime_rejected(
     accepted: false,
     message: format!("Entrypoint registration could not update Caddy: {error}."),
     registration_id: None,
+  }
+}
+
+fn registration_mutation_runtime_rejected(
+  request_id: String,
+  operation: &str,
+  error: impl std::fmt::Display,
+) -> BasicResponse {
+  BasicResponse {
+    request_id,
+    accepted: false,
+    message: format!("Could not {operation} because Caddy rejected the runtime update: {error}."),
   }
 }
 

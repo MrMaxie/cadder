@@ -486,22 +486,50 @@ async fn shutdown_signal_notifies_pending_and_pre_requested_waiters() {
 #[tokio::test]
 async fn register_and_unregister_preserve_owner_boundary() {
   let state = state();
+  let mut events = state.subscribe();
   let response = state
     .register("register".to_string(), registration("shim-1", "nonce-1"))
     .await;
   assert!(response.accepted);
+  let registered = events.try_recv().unwrap();
+  assert_eq!(registered.sequence_number, 1);
+  assert_eq!(registered.snapshot.registrations.len(), 1);
 
   let wrong = state
     .unregister("wrong".to_string(), "shim-1", "other")
     .await;
   assert!(!wrong.accepted);
   assert_eq!(state.snapshot().await.registrations.len(), 1);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
 
   let right = state
     .unregister("right".to_string(), "shim-1", "nonce-1")
     .await;
   assert!(right.accepted);
   assert!(state.snapshot().await.registrations.is_empty());
+  let unregistered = events.try_recv().unwrap();
+  assert_eq!(unregistered.sequence_number, 2);
+  assert!(unregistered.snapshot.registrations.is_empty());
+  assert_eq!(state.inner.lock().await.sequence, 2);
+  let history = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "registration-history".to_string(),
+      kind: Some(HistoryKind::Registration),
+      limit: Some(10),
+    })
+    .await;
+  assert_eq!(history.records.len(), 2);
+  assert_eq!(
+    history
+      .records
+      .iter()
+      .filter(|record| record.summary == "Unregistered entrypoint `shim-1`.")
+      .count(),
+    1
+  );
 }
 
 #[tokio::test]
@@ -2206,8 +2234,8 @@ async fn operation_fence_revoke_after_runtime_apply_rolls_back_before_worker_fin
   let stop_marker = temp.path().join("stop-runtime");
   write_transaction_fake_caddy(&fake_caddy, &stop_marker);
   let (mut state, paths) = state_with_fake_caddy_paths(IisProvider::fake(Vec::new()), &fake_caddy);
-  let hook = RegisterPublishTestHook::new();
-  state.register_publish_hook = Some(hook.clone());
+  let hook = RegistrationPublishTestHook::new();
+  state.registration_publish_hook = Some(hook.clone());
   let registering_state = state.state.clone();
   let fence = state.issue_operation_fence().unwrap();
   let pending_fence = fence.clone();
@@ -2278,17 +2306,20 @@ async fn operation_fence_revoke_after_runtime_stop_restores_previous_registratio
     .records
     .len();
   let mut events = state.subscribe();
-  let hook = RegisterPublishTestHook::new();
-  state.register_publish_hook = Some(hook.clone());
+  let hook = RegistrationPublishTestHook::new();
+  state.registration_publish_hook = Some(hook.clone());
   let registering_state = state.clone();
   let fence = state.issue_operation_fence().unwrap();
   let pending_fence = fence.clone();
-  let mut inactive = registration("shim-1", "nonce-1");
-  inactive.activation_state = ActivationState::Inactive;
 
   let pending = tokio::spawn(async move {
     registering_state
-      .register_fenced("replace-inactive".to_string(), inactive, &pending_fence)
+      .unregister_fenced(
+        "unregister-active".to_string(),
+        "shim-1",
+        "nonce-1",
+        &pending_fence,
+      )
       .await
   });
   hook.wait_until_reached().await;
@@ -2314,6 +2345,93 @@ async fn operation_fence_revoke_after_runtime_stop_restores_previous_registratio
     snapshot.registrations[0].activation_state,
     ActivationState::Active
   );
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Running
+  );
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(
+    fs::read(paths.effective_config_path()).unwrap(),
+    previous_config
+  );
+  assert_eq!(state.inner.lock().await.sequence, sequence_before);
+  assert_eq!(history_after, history_before);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
+async fn operation_fence_revoke_after_unregister_reload_restores_all_registrations() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+  assert!(
+    state
+      .register(
+        "register-first".to_string(),
+        registration("shim-1", "nonce-1")
+      )
+      .await
+      .accepted
+  );
+  let mut second = registration("shim-2", "nonce-2");
+  second.registered_domains = vec![RegisteredDomain::active("other.localhost")];
+  assert!(
+    state
+      .register("register-second".to_string(), second)
+      .await
+      .accepted
+  );
+  let previous_config = fs::read(paths.effective_config_path()).unwrap();
+  let sequence_before = state.inner.lock().await.sequence;
+  let history_before = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "reload-rollback-history-before".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+  let mut events = state.subscribe();
+  let hook = RegistrationPublishTestHook::new();
+  state.registration_publish_hook = Some(hook.clone());
+  let unregistering_state = state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+
+  let pending = tokio::spawn(async move {
+    unregistering_state
+      .unregister_fenced(
+        "unregister-second".to_string(),
+        "shim-2",
+        "nonce-2",
+        &pending_fence,
+      )
+      .await
+  });
+  hook.wait_until_reached().await;
+  fence.revoke();
+  hook.release();
+
+  assert_eq!(
+    pending.await.unwrap().unwrap_err(),
+    CommitRejection::Revoked
+  );
+  let snapshot = state.snapshot().await;
+  let history_after = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "reload-rollback-history-after".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+
+  assert_eq!(snapshot.registrations.len(), 2);
   assert_eq!(
     snapshot.runtime.status,
     cadder_protocol::RuntimeStatus::Running

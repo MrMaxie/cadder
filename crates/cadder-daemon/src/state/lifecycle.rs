@@ -22,7 +22,7 @@ impl DaemonState {
       shutdown_signal: ShutdownSignal::default(),
       operation_fences: OperationFenceAuthority::default(),
       #[cfg(test)]
-      register_publish_hook: None,
+      registration_publish_hook: None,
     }
   }
 

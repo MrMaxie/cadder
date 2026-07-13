@@ -458,7 +458,7 @@ async fn ipc_lifecycle_supports_many_registrations_and_owner_cleanup() {
   assert_eq!(query_state(&harness.client).await.registrations.len(), 9);
 
   drop(sessions);
-  for _ in 0..50 {
+  for _ in 0..COMMAND_LOG_WAIT_ATTEMPTS {
     if query_state(&harness.client).await.registrations.is_empty() {
       harness.shutdown().await;
       return;
@@ -1748,7 +1748,7 @@ async fn query_state(client: &CadderClient) -> cadder_protocol::GuiStateSnapshot
 }
 
 async fn wait_for_empty_registrations(client: &CadderClient, failure_message: &str) {
-  for _ in 0..50 {
+  for _ in 0..COMMAND_LOG_WAIT_ATTEMPTS {
     if query_state(client).await.registrations.is_empty() {
       return;
     }
