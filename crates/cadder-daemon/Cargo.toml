@@ -20,6 +20,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 directories = "6.0.0"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 fs4 = "1.1.0"
+getrandom = "=0.4.2"
 hex = "0.4.3"
 interprocess = { version = "2.4.2", features = ["tokio"] }
 process-wrap = { version = "=9.1.0", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop", "creation-flags"] }
@@ -38,7 +39,7 @@ testcontainers = "0.27.3"
 is_elevated = "=0.1.2"
 widestring = "=1.2.1"
 windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Threading"] }
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.186"

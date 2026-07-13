@@ -1,9 +1,13 @@
 //! Windows ownership and peer-authentication primitives for local IPC.
 
 use std::{
+  ffi::c_void,
+  fs::File,
   io,
   mem::size_of,
+  os::windows::ffi::OsStrExt,
   os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle},
+  path::Path,
   process,
   ptr::{NonNull, null_mut},
   time::Duration,
@@ -20,10 +24,26 @@ use tokio::{
 use widestring::{U16CStr, U16CString};
 use windows_sys::{
   Win32::{
-    Foundation::{ERROR_INSUFFICIENT_BUFFER, LocalFree},
+    Foundation::{
+      ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+      LocalFree,
+    },
     Security::{
-      Authorization::ConvertSidToStringSidW, GetTokenInformation, PSID, RevertToSelf, TOKEN_QUERY,
-      TOKEN_USER, TokenUser,
+      ACL,
+      Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
+      },
+      DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+      OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, RevertToSelf,
+      SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    },
+    Storage::FileSystem::{
+      BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
+      FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+      FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+      FlushFileBuffers, GetFileInformationByHandle, GetFullPathNameW, MOVEFILE_WRITE_THROUGH,
+      MoveFileExW, OPEN_EXISTING, READ_CONTROL, ReplaceFileW, WRITE_DAC,
     },
     System::{
       Pipes::ImpersonateNamedPipeClient,
@@ -32,6 +52,9 @@ use windows_sys::{
   },
   core::PWSTR,
 };
+
+#[cfg(test)]
+use windows_sys::Win32::Security::SetFileSecurityW;
 
 const AUTHENTICATION_PREFACE: [u8; 1] = [b' '];
 const AUTHENTICATION_PREFACE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -141,6 +164,391 @@ pub(crate) fn secure_listener_options<'a>(
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
   let descriptor = SecurityDescriptor::deserialize(sddl.as_ucstr())?;
   Ok(options.security_descriptor(descriptor))
+}
+
+/// Creates a new regular runtime file with a protected owner-only DACL.
+pub(crate) fn create_owner_only_runtime_file(path: &Path) -> io::Result<File> {
+  let descriptor = owner_only_security_descriptor()?;
+  let security_attributes = SECURITY_ATTRIBUTES {
+    nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+    lpSecurityDescriptor: descriptor.as_ptr(),
+    bInheritHandle: 0,
+  };
+  let path = wide_path(path)?;
+  // SAFETY: `path` is NUL-terminated, `security_attributes` and its descriptor remain live for
+  // the call, `CREATE_NEW` prevents replacement, and the returned handle is adopted exactly once.
+  let handle = unsafe {
+    CreateFileW(
+      path.as_ptr(),
+      GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      &security_attributes,
+      CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL,
+      null_mut(),
+    )
+  };
+  if handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: `CreateFileW` returned a fresh owned file handle and `File` closes it exactly once.
+  Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// Opens or creates the persistent owner-only discovery lock file.
+pub(crate) fn open_owner_only_lock_file(path: &Path) -> io::Result<File> {
+  match create_owner_only_runtime_file(path) {
+    Ok(file) => Ok(file),
+    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+      open_owner_only_runtime_file(path)
+    }
+    Err(error) => Err(error),
+  }
+}
+
+/// Rejects reparse points and non-files before applying the owner-only DACL.
+pub(crate) fn validate_owner_only_runtime_file(path: &Path) -> io::Result<()> {
+  open_owner_only_runtime_file(path).map(drop)
+}
+
+/// Opens the runtime directory without following reparse points and applies owner-only security
+/// through that verified handle.
+pub(crate) fn secure_owner_only_runtime_directory(path: &Path) -> io::Result<()> {
+  let path = wide_path(path)?;
+  // SAFETY: `path` is NUL-terminated. Backup semantics permits a directory handle and
+  // `OPEN_REPARSE_POINT` ensures a junction or symbolic link itself is inspected, not followed.
+  let handle = unsafe {
+    CreateFileW(
+      path.as_ptr(),
+      READ_CONTROL | WRITE_DAC,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      std::ptr::null(),
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+      null_mut(),
+    )
+  };
+  if handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: `CreateFileW` returned a fresh owned directory handle.
+  let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+  validate_runtime_directory_handle(&handle)?;
+  validate_current_owner(handle.as_raw_handle())?;
+  apply_owner_only_security(handle.as_raw_handle())?;
+  validate_runtime_directory_handle(&handle)
+}
+
+/// Applies the current process owner's protected owner-only DACL to a path.
+pub(crate) fn secure_owner_only_path(path: &Path) -> io::Result<()> {
+  open_owner_only_runtime_file(path).map(drop)
+}
+
+fn open_owner_only_runtime_file(path: &Path) -> io::Result<File> {
+  let path = wide_path(path)?;
+  // SAFETY: `path` is NUL-terminated. `OPEN_REPARSE_POINT` ensures the final component itself is
+  // inspected, and the returned handle is adopted exactly once.
+  let handle = unsafe {
+    CreateFileW(
+      path.as_ptr(),
+      GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      std::ptr::null(),
+      OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT,
+      null_mut(),
+    )
+  };
+  if handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: `CreateFileW` returned a fresh owned file handle.
+  let file = unsafe { File::from_raw_handle(handle) };
+  validate_runtime_file_handle(&file)?;
+  validate_current_owner(file.as_raw_handle())?;
+  apply_owner_only_security(file.as_raw_handle())?;
+  validate_runtime_file_handle(&file)?;
+  Ok(file)
+}
+
+/// Flushes a discovery file through the Windows file handle.
+pub(crate) fn flush_file(file: &File) -> io::Result<()> {
+  // SAFETY: The raw handle is borrowed from a live file and remains valid for the call.
+  if unsafe { FlushFileBuffers(file.as_raw_handle()) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
+}
+
+/// Atomically installs a complete discovery file.
+pub(crate) fn install_discovery_file(temporary: &Path, destination: &Path) -> io::Result<()> {
+  let temporary_wide = wide_path(temporary)?;
+  let destination_wide = wide_path(destination)?;
+  let replaced = if destination.exists() {
+    validate_owner_only_runtime_file(destination)?;
+    // SAFETY: Both paths are NUL-terminated and point to files on the same runtime volume. No
+    // backup, exclusion list, or reserved flags are supplied.
+    unsafe {
+      ReplaceFileW(
+        destination_wide.as_ptr(),
+        temporary_wide.as_ptr(),
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+      )
+    }
+  } else {
+    // SAFETY: Both paths are NUL-terminated. The write-through move is the first publication and
+    // does not replace an existing destination.
+    unsafe {
+      MoveFileExW(
+        temporary_wide.as_ptr(),
+        destination_wide.as_ptr(),
+        MOVEFILE_WRITE_THROUGH,
+      )
+    }
+  };
+  if replaced == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
+}
+
+fn owner_only_security_descriptor() -> io::Result<OwnedSecurityDescriptor> {
+  let owner_sid = current_process_sid()?;
+  security_descriptor_from_sddl(&format!("O:{owner_sid}D:P(A;;GA;;;{owner_sid})"))
+}
+
+fn security_descriptor_from_sddl(sddl: &str) -> io::Result<OwnedSecurityDescriptor> {
+  let sddl = U16CString::from_str(sddl)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+  let mut descriptor = null_mut();
+  // SAFETY: The SDDL is NUL-terminated, the output pointer is valid, and Windows allocates the
+  // returned self-relative descriptor with `LocalAlloc` semantics.
+  if unsafe {
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+      sddl.as_ptr(),
+      SDDL_REVISION_1,
+      &mut descriptor,
+      null_mut(),
+    )
+  } == 0
+  {
+    return Err(io::Error::last_os_error());
+  }
+  OwnedSecurityDescriptor::new(descriptor)
+}
+
+#[cfg(test)]
+fn apply_world_access_for_test(path: &Path) -> io::Result<()> {
+  let descriptor = security_descriptor_from_sddl("D:P(A;;GA;;;WD)")?;
+  let path = wide_path(path)?;
+  // SAFETY: The test path is NUL-terminated and the descriptor remains live for the call.
+  if unsafe {
+    SetFileSecurityW(
+      path.as_ptr(),
+      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+      descriptor.as_ptr(),
+    )
+  } == 0
+  {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
+}
+
+fn validate_runtime_directory_handle(handle: &OwnedHandle) -> io::Result<()> {
+  let mut information = BY_HANDLE_FILE_INFORMATION::default();
+  // SAFETY: The handle remains live and the output pointer references the exact documented
+  // structure for `GetFileInformationByHandle`.
+  if unsafe { GetFileInformationByHandle(handle.as_raw_handle(), &mut information) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  let attributes = information.dwFileAttributes;
+  if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      "Cadder refuses to use a non-directory or reparse-point runtime path",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_runtime_file_handle(file: &File) -> io::Result<()> {
+  let mut information = BY_HANDLE_FILE_INFORMATION::default();
+  // SAFETY: The file handle remains live and the output points to the documented structure.
+  if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  let attributes = information.dwFileAttributes;
+  if attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::PermissionDenied,
+      "Cadder refuses to use a non-regular or reparse-point runtime file",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_current_owner(handle: std::os::windows::io::RawHandle) -> io::Result<()> {
+  let actual = handle_owner_sid(handle)?;
+  let expected = current_process_sid()?;
+  validate_owner_sid(&actual, &expected)
+}
+
+fn validate_owner_sid(actual: &str, expected: &str) -> io::Result<()> {
+  if actual == expected {
+    return Ok(());
+  }
+  Err(io::Error::new(
+    io::ErrorKind::PermissionDenied,
+    "Cadder refuses to use a runtime artifact owned by another Windows account",
+  ))
+}
+
+fn handle_owner_sid(handle: std::os::windows::io::RawHandle) -> io::Result<Box<str>> {
+  let mut owner: PSID = null_mut();
+  let mut descriptor = null_mut();
+  // SAFETY: The handle remains live, output pointers are valid, and Windows allocates the
+  // returned descriptor with `LocalAlloc` semantics.
+  let status = unsafe {
+    GetSecurityInfo(
+      handle,
+      SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION,
+      &mut owner,
+      null_mut(),
+      null_mut(),
+      null_mut(),
+      &mut descriptor,
+    )
+  };
+  if status != ERROR_SUCCESS {
+    return Err(io::Error::from_raw_os_error(status as i32));
+  }
+  let _descriptor = OwnedSecurityDescriptor::new(descriptor)?;
+  sid_to_string(owner)
+}
+
+fn apply_owner_only_security(handle: std::os::windows::io::RawHandle) -> io::Result<()> {
+  let descriptor = owner_only_security_descriptor()?;
+  let mut dacl: *mut ACL = null_mut();
+  let mut dacl_present = 0;
+  let mut dacl_defaulted = 0;
+  // SAFETY: The descriptor remains live and every out pointer references initialized storage.
+  if unsafe {
+    GetSecurityDescriptorDacl(
+      descriptor.as_ptr(),
+      &mut dacl_present,
+      &mut dacl,
+      &mut dacl_defaulted,
+    )
+  } == 0
+    || dacl_present == 0
+    || dacl.is_null()
+  {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: The verified owner-controlled handle has `WRITE_DAC`, and the DACL points into the
+  // live descriptor for the duration of the call. Ownership is deliberately not changed.
+  let status = unsafe {
+    SetSecurityInfo(
+      handle,
+      SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+      null_mut(),
+      null_mut(),
+      dacl,
+      std::ptr::null(),
+    )
+  };
+  if status != ERROR_SUCCESS {
+    return Err(io::Error::from_raw_os_error(status as i32));
+  }
+  Ok(())
+}
+
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+  let encoded = normalized_absolute_path(path)?;
+  const SEPARATOR: u16 = b'\\' as u16;
+  const QUESTION_MARK: u16 = b'?' as u16;
+  let verbatim_prefix = [SEPARATOR, SEPARATOR, QUESTION_MARK, SEPARATOR];
+  let unc_prefix = [SEPARATOR, SEPARATOR];
+  let mut result = if encoded.starts_with(&verbatim_prefix) {
+    encoded
+  } else if encoded.starts_with(&unc_prefix) {
+    let mut path = "\\\\?\\UNC\\".encode_utf16().collect::<Vec<_>>();
+    path.extend_from_slice(&encoded[unc_prefix.len()..]);
+    path
+  } else {
+    let mut path = verbatim_prefix.to_vec();
+    path.extend_from_slice(&encoded);
+    path
+  };
+  result.push(0);
+  Ok(result)
+}
+
+fn normalized_absolute_path(path: &Path) -> io::Result<Vec<u16>> {
+  let mut input: Vec<u16> = path.as_os_str().encode_wide().collect();
+  if input.contains(&0) {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Windows runtime path contains a NUL character",
+    ));
+  }
+  input.push(0);
+  // SAFETY: `input` is NUL-terminated. A zero-length output query returns the required size.
+  let required = unsafe { GetFullPathNameW(input.as_ptr(), 0, null_mut(), null_mut()) };
+  if required == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  let mut output = vec![0_u16; required as usize];
+  // SAFETY: Both buffers remain live, and the output capacity is the size returned above.
+  let written = unsafe {
+    GetFullPathNameW(
+      input.as_ptr(),
+      output.len() as u32,
+      output.as_mut_ptr(),
+      null_mut(),
+    )
+  };
+  if written == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  if written as usize >= output.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "Windows runtime path changed while it was normalized",
+    ));
+  }
+  output.truncate(written as usize);
+  Ok(output)
+}
+
+struct OwnedSecurityDescriptor(NonNull<c_void>);
+
+impl OwnedSecurityDescriptor {
+  fn new(pointer: *mut c_void) -> io::Result<Self> {
+    NonNull::new(pointer).map(Self).ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Windows returned a null security descriptor",
+      )
+    })
+  }
+
+  fn as_ptr(&self) -> *mut c_void {
+    self.0.as_ptr()
+  }
+}
+
+impl Drop for OwnedSecurityDescriptor {
+  fn drop(&mut self) {
+    // SAFETY: The descriptor was allocated by the SDDL conversion API and remains owned here.
+    let _ = unsafe { LocalFree(self.0.as_ptr()) };
+  }
 }
 
 fn open_process_token() -> io::Result<OwnedHandle> {
@@ -350,6 +758,7 @@ mod tests {
     fs, io,
     mem::size_of,
     os::windows::io::{AsHandle, AsRawHandle},
+    path::Path,
     ptr::{NonNull, addr_of, null_mut},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -373,11 +782,14 @@ mod tests {
   };
 
   use super::{
-    FORCE_REVERT_FAILURE_MARKER, current_process_sid, is_canonical_sid, open_thread_token,
-    peer_sid_after_preface, receive_authentication_preface,
-    receive_authentication_preface_with_timeout, secure_listener_options,
-    send_authentication_preface, sid_to_string, with_impersonated_peer,
+    FORCE_REVERT_FAILURE_MARKER, apply_world_access_for_test, create_owner_only_runtime_file,
+    current_process_sid, is_canonical_sid, open_thread_token, peer_sid_after_preface,
+    receive_authentication_preface, receive_authentication_preface_with_timeout,
+    secure_listener_options, secure_owner_only_path, secure_owner_only_runtime_directory,
+    send_authentication_preface, sid_to_string, validate_owner_sid, wide_path,
+    with_impersonated_peer,
   };
+  use crate::{IpcEndpointMetadata, IpcEndpointPublication, RuntimePaths};
 
   // Named pipes use file-object generic mapping, so SDDL `GA` materializes as `FILE_ALL_ACCESS`.
   const NAMED_PIPE_ALL_ACCESS: u32 = 0x001F_01FF;
@@ -391,6 +803,28 @@ mod tests {
   #[test]
   fn windows_ipc_security_rejects_sddl_injection() {
     assert!(!is_canonical_sid("S-1-5-21-1)(A;;GA;;;WD"));
+  }
+
+  #[test]
+  fn windows_runtime_security_rejects_a_different_owner_sid() {
+    let error = validate_owner_sid("S-1-5-21-1", "S-1-5-21-2").unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+  }
+
+  #[test]
+  fn windows_runtime_paths_normalize_relative_components_before_verbatim_prefixing() {
+    let path = Path::new(".")
+      .join("target")
+      .join("..")
+      .join("runtime")
+      .join("cadder-ipc.json");
+    let encoded = wide_path(&path).unwrap();
+    let normalized = String::from_utf16(&encoded[..encoded.len() - 1]).unwrap();
+
+    assert!(normalized.starts_with(r"\\?\"));
+    assert!(!normalized.contains(r"\.\"));
+    assert!(!normalized.contains(r"\..\"));
   }
 
   #[tokio::test]
@@ -416,6 +850,58 @@ mod tests {
     assert_eq!(evidence.ace_flags, 0);
     assert_eq!(evidence.access_mask, NAMED_PIPE_ALL_ACCESS);
     assert_eq!(evidence.trustee_sid, owner_sid);
+  }
+
+  #[test]
+  fn discovery_publication_windows_files_use_a_protected_owner_only_dacl() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cadder-ipc.json");
+    let file = create_owner_only_runtime_file(&path).unwrap();
+    secure_owner_only_path(&path).unwrap();
+
+    let evidence = inspect_handle_security(file.as_raw_handle()).unwrap();
+    let owner_sid = current_process_sid().unwrap();
+
+    assert!(evidence.dacl_protected);
+    assert_eq!(evidence.owner_sid, owner_sid);
+    assert_eq!(evidence.ace_flags, 0);
+    assert_eq!(evidence.access_mask, NAMED_PIPE_ALL_ACCESS);
+    assert_eq!(evidence.trustee_sid, owner_sid);
+  }
+
+  #[test]
+  fn discovery_publication_windows_final_target_replaces_a_wider_legacy_dacl() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let first = IpcEndpointMetadata::new(&paths).unwrap();
+    let first_guard = IpcEndpointPublication::publish(&paths, &first).unwrap();
+    let first_file = fs::File::open(paths.ipc_endpoint_path()).unwrap();
+    assert_owner_only_security(inspect_handle_security(first_file.as_raw_handle()).unwrap());
+    drop(first_file);
+    apply_world_access_for_test(&paths.ipc_endpoint_path()).unwrap();
+    let second = IpcEndpointMetadata::new(&paths).unwrap();
+    let mut second_guard = IpcEndpointPublication::publish(&paths, &second).unwrap();
+    let second_file = fs::File::open(paths.ipc_endpoint_path()).unwrap();
+
+    assert_owner_only_security(inspect_handle_security(second_file.as_raw_handle()).unwrap());
+    drop(second_file);
+    drop(first_guard);
+    second_guard.cleanup().unwrap();
+  }
+
+  #[test]
+  fn discovery_publication_windows_rejects_a_reparse_point_runtime_directory() {
+    use std::os::windows::fs::symlink_dir;
+
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    let link = temp.path().join("runtime-link");
+    fs::create_dir(&target).unwrap();
+    symlink_dir(&target, &link).unwrap();
+
+    let error = secure_owner_only_runtime_directory(&link).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
   }
 
   #[tokio::test]
@@ -530,6 +1016,12 @@ mod tests {
 
   fn inspect_pipe_security(stream: &Stream) -> io::Result<PipeSecurityEvidence> {
     let Stream::NamedPipe(pipe) = stream;
+    inspect_handle_security(pipe.as_handle().as_raw_handle())
+  }
+
+  fn inspect_handle_security(
+    handle: std::os::windows::io::RawHandle,
+  ) -> io::Result<PipeSecurityEvidence> {
     let mut owner_sid: PSID = null_mut();
     let mut dacl: *mut ACL = null_mut();
     let mut descriptor = null_mut();
@@ -537,7 +1029,7 @@ mod tests {
     // and the returned descriptor is owned by `LocalSecurityDescriptor` for the full inspection.
     let status = unsafe {
       GetSecurityInfo(
-        pipe.as_handle().as_raw_handle(),
+        handle,
         SE_KERNEL_OBJECT,
         OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
         &mut owner_sid,
@@ -652,6 +1144,15 @@ mod tests {
       access_mask: ace.Mask,
       trustee_sid: sid_to_string(trustee_sid)?,
     })
+  }
+
+  fn assert_owner_only_security(evidence: PipeSecurityEvidence) {
+    let owner_sid = current_process_sid().unwrap();
+    assert!(evidence.dacl_protected);
+    assert_eq!(evidence.owner_sid, owner_sid);
+    assert_eq!(evidence.ace_flags, 0);
+    assert_eq!(evidence.access_mask, NAMED_PIPE_ALL_ACCESS);
+    assert_eq!(evidence.trustee_sid, owner_sid);
   }
 
   #[derive(Debug)]

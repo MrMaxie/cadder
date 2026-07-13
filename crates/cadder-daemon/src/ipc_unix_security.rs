@@ -47,32 +47,46 @@ pub(crate) fn secure_runtime_paths(paths: &RuntimePaths) -> io::Result<()> {
   secure_socket_directory()
 }
 
-/// Opens the IPC discovery file for replacement with owner-only permissions.
-///
-/// New files are created with mode `0600`. Existing files are checked without following symlinks,
-/// opened without `O_TRUNC`, checked again through the opened descriptor, and only then truncated.
-/// The runtime directory is secured before either creation path is attempted.
-///
-/// # Errors
-///
-/// Returns an error when the runtime directory cannot be secured, or when the discovery path is a
-/// symlink, is not a regular file, belongs to a different effective user, or cannot be opened with
-/// owner-only permissions.
-pub(crate) fn open_discovery_file_for_write(paths: &RuntimePaths) -> io::Result<File> {
+/// Creates a new owner-only regular file without following symbolic links.
+pub(crate) fn create_owner_only_runtime_file(
+  paths: &RuntimePaths,
+  path: &Path,
+) -> io::Result<File> {
   secure_runtime_paths(paths)?;
-  let path = paths.ipc_endpoint_path();
+  create_owner_only_file(path)
+}
 
-  match create_owner_only_file(&path) {
+/// Opens or creates a persistent owner-only file suitable for advisory locking.
+pub(crate) fn open_owner_only_lock_file(paths: &RuntimePaths, path: &Path) -> io::Result<File> {
+  secure_runtime_paths(paths)?;
+
+  match create_owner_only_lock_file(path) {
     Ok(file) => Ok(file),
     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-      validate_owned_path(&path, ExpectedFileType::RegularFile)?;
-      let file = open_existing_file_without_following_symlinks(&path)?;
-      secure_open_file(&file, &path)?;
-      file.set_len(0)?;
+      validate_owned_path(path, ExpectedFileType::RegularFile)?;
+      let file = open_existing_lock_file_without_following_symlinks(path)?;
+      secure_open_file(&file, path)?;
       Ok(file)
     }
     Err(error) => Err(error),
   }
+}
+
+/// Verifies that a runtime file is regular, owner-controlled, and mode `0600`.
+pub(crate) fn validate_owner_only_runtime_file(path: &Path) -> io::Result<()> {
+  validate_owned_path(path, ExpectedFileType::RegularFile)?;
+  validate_mode(&fs::symlink_metadata(path)?, path, OWNER_FILE_MODE)
+}
+
+/// Persists a directory entry update on Unix filesystems.
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+  let parent = path.parent().ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "the IPC discovery path does not have a parent directory",
+    )
+  })?;
+  File::open(parent)?.sync_all()
 }
 
 /// Returns the owner-only filesystem path used for the Unix domain socket.
@@ -218,9 +232,25 @@ fn create_owner_only_file(path: &Path) -> io::Result<File> {
   Ok(file)
 }
 
-fn open_existing_file_without_following_symlinks(path: &Path) -> io::Result<File> {
+fn create_owner_only_lock_file(path: &Path) -> io::Result<File> {
   let mut options = OpenOptions::new();
-  options.write(true).custom_flags(libc::O_NOFOLLOW);
+  options
+    .read(true)
+    .write(true)
+    .create_new(true)
+    .mode(OWNER_FILE_MODE)
+    .custom_flags(libc::O_NOFOLLOW);
+  let file = options.open(path)?;
+  secure_open_file(&file, path)?;
+  Ok(file)
+}
+
+fn open_existing_lock_file_without_following_symlinks(path: &Path) -> io::Result<File> {
+  let mut options = OpenOptions::new();
+  options
+    .read(true)
+    .write(true)
+    .custom_flags(libc::O_NOFOLLOW);
   options.open(path)
 }
 
@@ -360,16 +390,16 @@ mod tests {
     let paths = runtime_paths(root.path());
     secure_runtime_paths(&paths).unwrap();
 
-    let mut file = open_discovery_file_for_write(&paths).unwrap();
+    let path = paths.runtime_dir().join(".cadder-ipc.test.tmp");
+    let mut file = create_owner_only_runtime_file(&paths, &path).unwrap();
     file.write_all(b"first").unwrap();
     drop(file);
-    fs::set_permissions(paths.ipc_endpoint_path(), fs::Permissions::from_mode(0o666)).unwrap();
-    let mut file = open_discovery_file_for_write(&paths).unwrap();
-    file.write_all(b"second").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    let file = open_owner_only_lock_file(&paths, &path).unwrap();
     drop(file);
 
-    assert_eq!(mode(&paths.ipc_endpoint_path()), OWNER_FILE_MODE);
-    assert_eq!(fs::read(paths.ipc_endpoint_path()).unwrap(), b"second");
+    assert_eq!(mode(&path), OWNER_FILE_MODE);
+    assert_eq!(fs::read(path).unwrap(), b"first");
   }
 
   #[test]
@@ -381,7 +411,7 @@ mod tests {
     fs::write(&target, b"keep").unwrap();
     symlink(&target, paths.ipc_endpoint_path()).unwrap();
 
-    let error = open_discovery_file_for_write(&paths).unwrap_err();
+    let error = open_owner_only_lock_file(&paths, &paths.ipc_endpoint_path()).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(fs::read(target).unwrap(), b"keep");

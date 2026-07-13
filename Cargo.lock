@@ -420,6 +420,7 @@ dependencies = [
  "directories",
  "figment",
  "fs4",
+ "getrandom 0.4.2",
  "hex",
  "interprocess",
  "is_elevated",

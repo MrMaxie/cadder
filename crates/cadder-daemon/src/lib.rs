@@ -4,6 +4,7 @@ mod config;
 mod iis;
 mod ipc;
 mod ipc_client_error;
+mod ipc_discovery;
 mod ipc_security;
 #[cfg(unix)]
 mod ipc_unix_security;
@@ -33,9 +34,11 @@ pub use ipc_client_error::{
   IpcClientError, IpcClientPhase, IpcClientResult, LocalIpcError, LocalIpcErrorCode,
   LocalIpcErrorKind,
 };
+pub use ipc_discovery::{
+  IpcEndpoint, IpcEndpointMetadata, IpcEndpointPublication, discover_ipc_endpoint,
+};
 pub use ipc_security::{
-  IpcAccessDecision, IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcOperationKind,
-  IpcPrincipal, IpcSecurityPolicy, discover_ipc_endpoint,
+  IpcAccessDecision, IpcOperation, IpcOperationKind, IpcPrincipal, IpcSecurityPolicy,
 };
 pub use logs::{CaddyLogStore, Redactor};
 pub use paths::{RuntimePaths, RuntimeProfile};

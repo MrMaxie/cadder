@@ -93,7 +93,8 @@ impl DaemonServer {
       .context("secure the local IPC runtime directory")?;
     let owner_principal = IpcPrincipal::current_process(crate::current_privilege_status())
       .context("authenticate the Cadder runtime-owner identity")?;
-    let endpoint = IpcEndpointMetadata::new(&self.paths, owner_principal.privilege_status());
+    let endpoint =
+      IpcEndpointMetadata::new(&self.paths).context("create the daemon discovery identity")?;
     let name = local_socket_name(&self.paths)?;
     let listener_options = ListenerOptions::new().name(name).try_overwrite(true);
     let listener = secure_listener_options(listener_options, &owner_principal)
@@ -101,7 +102,7 @@ impl DaemonServer {
       .create_tokio()
       .context("create local IPC listener")?;
     secure_bound_socket(&self.paths).context("verify the local IPC socket permissions")?;
-    let _endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
+    let mut endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
     let shutdown_signal = self.state.shutdown_signal();
 
     loop {
@@ -140,6 +141,9 @@ impl DaemonServer {
       }
     }
 
+    endpoint_publication
+      .cleanup()
+      .context("remove the current IPC discovery generation")?;
     Ok(())
   }
 }
@@ -1843,8 +1847,8 @@ fn prepend_path_dir(command: &mut Command, dir: &std::path::Path) {
 mod tests {
   use super::*;
   use crate::{
-    CaddyConfigCoordinator, IisBindingRecord, IisProvider, PrivilegeStatus, discover_ipc_endpoint,
-    logs::LogQuery,
+    CaddyConfigCoordinator, IisBindingRecord, IisProvider, IpcEndpoint, PrivilegeStatus,
+    discover_ipc_endpoint, logs::LogQuery,
   };
   use cadder_protocol::{
     AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorCode,
@@ -3207,7 +3211,10 @@ mod tests {
       true,
     );
 
-    assert_eq!(endpoint.socket_name, paths.socket_name());
+    assert!(matches!(
+      endpoint.endpoint,
+      IpcEndpoint::UnixSocket { .. } | IpcEndpoint::WindowsNamedPipe { .. }
+    ));
     assert!(denial_log.entries.iter().any(|entry| {
       entry.operation.as_deref() == Some("ipc-peer-denied")
         && entry

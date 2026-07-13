@@ -1,22 +1,9 @@
-use anyhow::{Context, Result};
-use cadder_protocol::{MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolCapabilities};
-use chrono::{DateTime, Utc};
 use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::tokio::Stream;
 use serde::{Deserialize, Serialize};
-use std::{
-  env, fs,
-  io::{self, Write},
-  path::PathBuf,
-};
+use std::io;
 
-use crate::{
-  IpcClientError, IpcClientPhase, IpcClientResult, LocalIpcErrorCode, LocalIpcErrorKind,
-  PrivilegeStatus, RuntimePaths, current_privilege_status, ipc_client_error::LocalIpcErrorContext,
-};
-
-const IPC_ENDPOINT_METADATA_VERSION: u16 = 1;
-const IPC_SECURITY_POLICY_VERSION: u16 = 1;
+use crate::{PrivilegeStatus, RuntimePaths};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpcPrincipal {
@@ -233,79 +220,6 @@ impl IpcOperation {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct IpcSecurityPolicySummary {
-  pub policy_version: u16,
-  pub allowed_principal: String,
-  pub allowed_operations: Box<[String]>,
-  pub denied_principals: Box<[String]>,
-}
-
-impl IpcSecurityPolicySummary {
-  fn current() -> Self {
-    Self {
-      policy_version: IPC_SECURITY_POLICY_VERSION,
-      allowed_principal: "same-runtime-owner-identity".to_string(),
-      allowed_operations: ["read-only", "state-changing"]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-      denied_principals: ["different-local-account", "unknown-local-account"]
-        .into_iter()
-        .map(String::from)
-        .collect(),
-    }
-  }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct IpcEndpointMetadata {
-  pub metadata_version: u16,
-  pub cadder_version: String,
-  pub protocol_version: u16,
-  pub minimum_compatible_protocol_version: u16,
-  pub capabilities: ProtocolCapabilities,
-  pub runtime_profile: String,
-  pub runtime_dir: String,
-  pub instance_key: String,
-  pub socket_name: String,
-  pub process_id: u32,
-  pub published_at_utc: DateTime<Utc>,
-  pub executable_path: Option<String>,
-  pub privilege_status: PrivilegeStatus,
-  pub security_policy: IpcSecurityPolicySummary,
-}
-
-impl IpcEndpointMetadata {
-  pub fn current(paths: &RuntimePaths) -> io::Result<Self> {
-    let privilege_status = current_privilege_status();
-    IpcPrincipal::current_process(privilege_status).map(|_| Self::new(paths, privilege_status))
-  }
-
-  pub fn new(paths: &RuntimePaths, privilege_status: PrivilegeStatus) -> Self {
-    Self {
-      metadata_version: IPC_ENDPOINT_METADATA_VERSION,
-      cadder_version: env!("CARGO_PKG_VERSION").to_string(),
-      protocol_version: PROTOCOL_VERSION,
-      minimum_compatible_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
-      capabilities: ProtocolCapabilities::current(),
-      runtime_profile: paths.runtime_profile().to_string(),
-      runtime_dir: paths.runtime_dir().display().to_string(),
-      instance_key: paths.instance_key().to_string(),
-      socket_name: paths.socket_name().to_string(),
-      process_id: std::process::id(),
-      published_at_utc: Utc::now(),
-      executable_path: env::current_exe()
-        .ok()
-        .map(|path| path.display().to_string()),
-      privilege_status,
-      security_policy: IpcSecurityPolicySummary::current(),
-    }
-  }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct IpcSecurityPolicy;
 
@@ -390,129 +304,6 @@ impl IpcAccessDecision {
   }
 }
 
-#[derive(Debug)]
-pub struct IpcEndpointPublication {
-  path: PathBuf,
-}
-
-impl IpcEndpointPublication {
-  pub fn publish_current(paths: &RuntimePaths) -> Result<Self> {
-    let metadata = IpcEndpointMetadata::current(paths)
-      .context("authenticate the Cadder runtime-owner identity")?;
-    Self::publish(paths, &metadata)
-  }
-
-  pub fn publish(paths: &RuntimePaths, metadata: &IpcEndpointMetadata) -> Result<Self> {
-    let path = paths.ipc_endpoint_path();
-    write_ipc_endpoint_metadata(paths, metadata)
-      .with_context(|| format!("write IPC endpoint metadata {}", path.display()))?;
-    Ok(Self { path })
-  }
-}
-
-impl Drop for IpcEndpointPublication {
-  fn drop(&mut self) {
-    let _ = fs::remove_file(&self.path);
-  }
-}
-
-pub fn discover_ipc_endpoint(paths: &RuntimePaths) -> IpcClientResult<IpcEndpointMetadata> {
-  let path = paths.ipc_endpoint_path();
-  let content = fs::read(&path).map_err(discovery_read_error)?;
-  serde_json::from_slice(&content).map_err(|error| {
-    IpcClientError::local(LocalIpcErrorContext {
-      kind: LocalIpcErrorKind::Discovery,
-      phase: IpcClientPhase::DiscoveryDecode,
-      code: LocalIpcErrorCode::InvalidDiscovery,
-      message: "Cadder IPC discovery is invalid; no request was sent.".into(),
-      guidance: Some(
-        "Restart the Cadder daemon for this runtime. If the error remains, inspect the discovery diagnostics."
-          .into(),
-      ),
-      retryable: false,
-      request_id: None,
-      operation: Some("discover-ipc-endpoint".into()),
-      source: Some(Box::new(error)),
-    })
-  })
-}
-
-fn discovery_read_error(error: std::io::Error) -> IpcClientError {
-  let (code, message, guidance, retryable) = match error.kind() {
-    std::io::ErrorKind::PermissionDenied => (
-      LocalIpcErrorCode::PermissionDenied,
-      "Cadder cannot read IPC discovery for this runtime; no request was sent.",
-      "Use the account that owns this Cadder runtime or select an accessible profile.",
-      false,
-    ),
-    std::io::ErrorKind::NotFound => (
-      LocalIpcErrorCode::DiscoveryUnavailable,
-      "Cadder IPC discovery is unavailable; no request was sent.",
-      "Start the Cadder daemon for this runtime, then retry.",
-      true,
-    ),
-    std::io::ErrorKind::Interrupted => (
-      LocalIpcErrorCode::DiscoveryReadFailed,
-      "Cadder could not finish reading IPC discovery; no request was sent.",
-      "Retry once. If the error remains, inspect the runtime-directory diagnostics.",
-      true,
-    ),
-    _ => (
-      LocalIpcErrorCode::DiscoveryReadFailed,
-      "Cadder could not read IPC discovery; no request was sent.",
-      "Inspect the runtime directory and local filesystem diagnostics before retrying.",
-      false,
-    ),
-  };
-  IpcClientError::local(LocalIpcErrorContext {
-    kind: LocalIpcErrorKind::Discovery,
-    phase: IpcClientPhase::DiscoveryRead,
-    code,
-    message: message.into(),
-    guidance: Some(guidance.into()),
-    retryable,
-    request_id: None,
-    operation: Some("discover-ipc-endpoint".into()),
-    source: Some(Box::new(error)),
-  })
-}
-
-fn write_ipc_endpoint_metadata(paths: &RuntimePaths, metadata: &IpcEndpointMetadata) -> Result<()> {
-  let path = paths.ipc_endpoint_path();
-  #[cfg(unix)]
-  let mut file = {
-    crate::ipc_unix_security::secure_runtime_paths(paths).with_context(|| {
-      format!(
-        "secure IPC runtime directory {}",
-        paths.runtime_dir().display()
-      )
-    })?;
-    crate::ipc_unix_security::open_discovery_file_for_write(paths)
-      .with_context(|| format!("open IPC endpoint metadata {}", path.display()))?
-  };
-  #[cfg(not(unix))]
-  let mut file = {
-    if let Some(parent) = path.parent() {
-      fs::create_dir_all(parent).with_context(|| {
-        format!(
-          "create IPC endpoint metadata directory {}",
-          parent.display()
-        )
-      })?;
-    }
-    std::fs::OpenOptions::new()
-      .write(true)
-      .create(true)
-      .truncate(true)
-      .open(&path)
-      .with_context(|| format!("open IPC endpoint metadata {}", path.display()))?
-  };
-  serde_json::to_writer_pretty(&mut file, metadata)?;
-  file.write_all(b"\n")?;
-  file.sync_data()?;
-  Ok(())
-}
-
 #[cfg(unix)]
 fn current_process_identity() -> io::Result<IpcOsIdentity> {
   Ok(IpcOsIdentity::UnixUid(
@@ -556,44 +347,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn typed_error_discovery_reads_distinguish_absent_permission_and_io_failures() {
-    let cases = [
-      (
-        std::io::ErrorKind::NotFound,
-        LocalIpcErrorCode::DiscoveryUnavailable,
-        true,
-      ),
-      (
-        std::io::ErrorKind::PermissionDenied,
-        LocalIpcErrorCode::PermissionDenied,
-        false,
-      ),
-      (
-        std::io::ErrorKind::Other,
-        LocalIpcErrorCode::DiscoveryReadFailed,
-        false,
-      ),
-      (
-        std::io::ErrorKind::Interrupted,
-        LocalIpcErrorCode::DiscoveryReadFailed,
-        true,
-      ),
-    ];
-
-    for (kind, code, retryable) in cases {
-      let error = discovery_read_error(std::io::Error::new(kind, "test discovery failure"));
-      let local = error
-        .local_error()
-        .expect("expected a local discovery error");
-      assert_eq!(local.kind(), LocalIpcErrorKind::Discovery);
-      assert_eq!(local.phase(), IpcClientPhase::DiscoveryRead);
-      assert_eq!(local.code(), code);
-      assert_eq!(local.retryable(), retryable);
-      assert!(std::error::Error::source(local).is_some());
-    }
-  }
-
-  #[test]
   fn policy_allows_same_user_non_elevated_client_to_elevated_endpoint() {
     let owner = IpcPrincipal::test("owner-identity", PrivilegeStatus::Elevated);
     let peer = IpcPrincipal::test("owner-identity", PrivilegeStatus::NormalUser);
@@ -620,37 +373,6 @@ mod tests {
   }
 
   #[test]
-  fn endpoint_metadata_roundtrips_policy_and_capabilities() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    let endpoint = IpcEndpointMetadata::new(&paths, PrivilegeStatus::NormalUser);
-    let json = serde_json::to_string(&endpoint).unwrap();
-    let decoded: IpcEndpointMetadata = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(decoded, endpoint);
-    assert_eq!(decoded.socket_name, paths.socket_name());
-    assert_eq!(
-      decoded.security_policy.allowed_principal,
-      "same-runtime-owner-identity"
-    );
-    assert!(decoded.capabilities.supports("logs"));
-  }
-
-  #[test]
-  fn publication_writes_and_removes_endpoint_metadata() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    let metadata = IpcEndpointMetadata::new(&paths, PrivilegeStatus::NormalUser);
-
-    let publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
-    let discovered = discover_ipc_endpoint(&paths).unwrap();
-
-    assert_eq!(discovered.socket_name, paths.socket_name());
-    drop(publication);
-    assert!(!paths.ipc_endpoint_path().exists());
-  }
-
-  #[test]
   fn peer_identity_missing_or_unknown_fails_closed() {
     let owner = IpcPrincipal::unknown(PrivilegeStatus::Unknown);
     let peer = IpcPrincipal::unknown(PrivilegeStatus::Unknown);
@@ -663,7 +385,7 @@ mod tests {
 
   #[test]
   fn current_process_identity_is_authenticated() {
-    let principal = IpcPrincipal::current_process(current_privilege_status()).unwrap();
+    let principal = IpcPrincipal::current_process(crate::current_privilege_status()).unwrap();
 
     assert!(principal.is_authenticated());
     assert!(matches!(

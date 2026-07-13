@@ -113,7 +113,15 @@ impl RuntimePaths {
         .with_context(|| format!("secure runtime directory {}", self.runtime_dir.display()))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+      fs::create_dir_all(&self.runtime_dir)
+        .with_context(|| format!("create runtime directory {}", self.runtime_dir.display()))?;
+      crate::ipc_windows_security::secure_owner_only_runtime_directory(&self.runtime_dir)
+        .with_context(|| format!("secure runtime directory {}", self.runtime_dir.display()))
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
       fs::create_dir_all(&self.runtime_dir)
         .with_context(|| format!("create runtime directory {}", self.runtime_dir.display()))
@@ -146,6 +154,10 @@ impl RuntimePaths {
 
   pub fn ipc_endpoint_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-ipc.json")
+  }
+
+  pub fn ipc_discovery_lock_path(&self) -> PathBuf {
+    self.runtime_dir.join("cadder-ipc.lock")
   }
 
   pub fn metadata_path(&self) -> PathBuf {
