@@ -37,13 +37,14 @@ use serde::{Serialize, de::DeserializeOwned};
 #[cfg(not(any(unix, windows)))]
 use std::fs::OpenOptions;
 use std::{
-  collections::BTreeMap, env, fs::File, io, path::PathBuf, process::Stdio, time::Duration,
+  collections::BTreeMap, env, fs::File, io, path::PathBuf, process::Stdio, sync::Arc,
+  time::Duration,
 };
 use tokio::{
-  io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+  io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
   process::Command,
-  sync::watch,
-  time::sleep,
+  sync::{Semaphore, watch},
+  time::{Instant, sleep, timeout_at},
 };
 use tokio_util::codec::FramedRead;
 
@@ -74,12 +75,30 @@ impl From<&IpcEndpointMetadata> for ServerHandshakeIdentity {
   }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct IpcLimits {
+  max_connections: usize,
+  first_frame_byte: Duration,
+  frame_completion: Duration,
+}
+
+impl Default for IpcLimits {
+  fn default() -> Self {
+    Self {
+      max_connections: 64,
+      first_frame_byte: Duration::from_secs(5),
+      frame_completion: Duration::from_secs(30),
+    }
+  }
+}
+
 #[derive(Debug)]
 pub struct DaemonServer {
   paths: RuntimePaths,
   state: DaemonState,
   security_policy: IpcSecurityPolicy,
   peer_identity_resolver: IpcPeerIdentityResolver,
+  limits: IpcLimits,
 }
 
 impl DaemonServer {
@@ -89,6 +108,7 @@ impl DaemonServer {
       state,
       security_policy: IpcSecurityPolicy,
       peer_identity_resolver: IpcPeerIdentityResolver::System,
+      limits: IpcLimits::default(),
     }
   }
 
@@ -117,6 +137,12 @@ impl DaemonServer {
     self
   }
 
+  #[cfg(test)]
+  fn with_limits(mut self, limits: IpcLimits) -> Self {
+    self.limits = limits;
+    self
+  }
+
   pub async fn run_until(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
     self
       .paths
@@ -136,6 +162,7 @@ impl DaemonServer {
     secure_bound_socket(&self.paths).context("verify the local IPC socket permissions")?;
     let mut endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
     let shutdown_signal = self.state.shutdown_signal();
+    let connection_permits = Arc::new(Semaphore::new(self.limits.max_connections));
 
     loop {
       tokio::select! {
@@ -148,27 +175,41 @@ impl DaemonServer {
           accepted = listener.accept() => {
               match accepted {
                   Ok(conn) => {
+                      let accepted_at = Instant::now();
+                      let Ok(connection_permit) = connection_permits.clone().try_acquire_owned()
+                      else {
+                        drop(conn);
+                        continue;
+                      };
                       let state = self.state.clone();
                       let owner_principal = owner_principal.clone();
                       let policy = self.security_policy.clone();
                       let peer_identity_resolver = self.peer_identity_resolver.clone();
                       let handshake_identity = handshake_identity.clone();
+                      let limits = self.limits;
                       tokio::spawn(async move {
-                          match authenticate_accepted_connection(
-                            conn,
-                            owner_principal,
-                            policy,
-                            peer_identity_resolver,
+                          let _connection_permit = connection_permit;
+                          match timeout_at(
+                            accepted_at + limits.first_frame_byte,
+                            authenticate_accepted_connection(
+                              conn,
+                              owner_principal,
+                              policy,
+                              peer_identity_resolver,
+                            ),
                           ).await {
-                            Ok((conn, security)) => {
+                            Ok(Ok((conn, security))) => {
                               let _ = handle_connection(
                                 conn,
                                 state,
                                 security,
                                 handshake_identity,
+                                accepted_at,
+                                limits,
                               ).await;
                             }
-                            Err(error) => log_peer_authentication_denial(&state, &error),
+                            Ok(Err(error)) => log_peer_authentication_denial(&state, &error),
+                            Err(_) => {}
                           }
                       });
                   }
@@ -299,6 +340,8 @@ async fn handle_connection(
   state: DaemonState,
   security: ConnectionSecurityContext,
   handshake_identity: ServerHandshakeIdentity,
+  accepted_at: Instant,
+  limits: IpcLimits,
 ) -> Result<()> {
   let mut owned = ConnectionRegistrations::default();
   let result = handle_connection_loop(
@@ -307,6 +350,8 @@ async fn handle_connection(
     &mut owned,
     &security,
     &handshake_identity,
+    accepted_at,
+    limits,
   )
   .await;
   for (id, nonce) in owned.into_entries() {
@@ -321,11 +366,19 @@ async fn handle_connection_loop(
   owned: &mut ConnectionRegistrations,
   security: &ConnectionSecurityContext,
   handshake_identity: &ServerHandshakeIdentity,
+  accepted_at: Instant,
+  limits: IpcLimits,
 ) -> Result<()> {
   let (read_half, mut write_half) = tokio::io::split(conn);
   let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
-  let Some(_negotiation) =
-    accept_client_handshake(&mut reader, &mut write_half, handshake_identity).await?
+  let Some(_negotiation) = accept_client_handshake(
+    &mut reader,
+    &mut write_half,
+    handshake_identity,
+    accepted_at,
+    limits,
+  )
+  .await?
   else {
     return Ok(());
   };
@@ -507,14 +560,14 @@ async fn accept_client_handshake<W>(
   reader: &mut IpcFrameReader,
   writer: &mut W,
   identity: &ServerHandshakeIdentity,
+  accepted_at: Instant,
+  limits: IpcLimits,
 ) -> Result<Option<NegotiatedSession>>
 where
   W: AsyncWrite + Unpin,
 {
-  let line = match reader.next().await {
-    Some(Ok(line)) => line,
-    Some(Err(error)) => return Err(error).context("read bounded IPC client handshake"),
-    None => return Ok(None),
+  let Some(line) = read_first_frame(reader, accepted_at, limits).await? else {
+    return Ok(None);
   };
   let hello: ClientHello = serde_json::from_str(&line).context("decode IPC client handshake")?;
 
@@ -565,6 +618,31 @@ where
     version,
     capabilities,
   }))
+}
+
+async fn read_first_frame(
+  reader: &mut IpcFrameReader,
+  accepted_at: Instant,
+  limits: IpcLimits,
+) -> Result<Option<String>> {
+  let mut first_byte = [0_u8; 1];
+  match timeout_at(
+    accepted_at + limits.first_frame_byte,
+    reader.get_mut().read_exact(&mut first_byte),
+  )
+  .await
+  {
+    Ok(Ok(_)) => reader.read_buffer_mut().extend_from_slice(&first_byte),
+    Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+    Ok(Err(error)) => return Err(error).context("read first IPC frame byte"),
+    Err(_) => return Ok(None),
+  }
+
+  match timeout_at(Instant::now() + limits.frame_completion, reader.next()).await {
+    Ok(Some(Ok(line))) => Ok(Some(line)),
+    Ok(Some(Err(error))) => Err(error).context("read bounded IPC client handshake"),
+    Ok(None) | Err(_) => Ok(None),
+  }
 }
 
 async fn write_handshake_frame<W>(writer: &mut W, frame: &ServerHandshakeFrame) -> Result<()>
@@ -2751,6 +2829,65 @@ mod tests {
     server.abort().await;
   }
 
+  #[tokio::test]
+  async fn ipc_limits_close_a_connection_that_sends_no_first_frame_byte() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      first_frame_byte: Duration::from_millis(100),
+      ..IpcLimits::default()
+    })
+    .await;
+    let conn = connect_authenticated_transport(&daemon.paths).await;
+
+    assert_transport_closes(conn).await;
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_close_a_connection_that_does_not_complete_its_first_frame() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      first_frame_byte: Duration::from_secs(1),
+      frame_completion: Duration::from_millis(100),
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut conn = connect_authenticated_transport(&daemon.paths).await;
+    conn.write_all(b"{").await.unwrap();
+
+    assert_transport_closes(conn).await;
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn ipc_limits_reject_capacity_without_disrupting_an_accepted_session() {
+    let daemon = RunningTestDaemon::start_with_limits(IpcLimits {
+      max_connections: 1,
+      ..IpcLimits::default()
+    })
+    .await;
+    let mut accepted = connect_session_eventually(&daemon.paths).await;
+    let rejected = connect_transport(&daemon.paths).await;
+
+    assert_transport_closes(rejected).await;
+    let response = accepted
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "ipc-limits-capacity-query-1".to_string(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(response.accepted);
+
+    drop(accepted);
+    let replacement = connect_session_eventually(&daemon.paths).await;
+    drop(replacement);
+    daemon.stop().await;
+  }
+
   #[test]
   fn daemon_launch_lock_serializes_start_attempts() {
     let temp = tempfile::tempdir().unwrap();
@@ -4524,6 +4661,10 @@ mod tests {
 
   impl RunningTestDaemon {
     async fn start() -> Self {
+      Self::start_with_limits(IpcLimits::default()).await
+    }
+
+    async fn start_with_limits(limits: IpcLimits) -> Self {
       let temp = tempfile::tempdir().unwrap();
       let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
       let state = DaemonState::with_runtime_paths(
@@ -4533,7 +4674,11 @@ mod tests {
       .await
       .unwrap();
       let (shutdown, shutdown_rx) = watch::channel(false);
-      let task = tokio::spawn(DaemonServer::new(paths.clone(), state).run_until(shutdown_rx));
+      let task = tokio::spawn(
+        DaemonServer::new(paths.clone(), state)
+          .with_limits(limits)
+          .run_until(shutdown_rx),
+      );
       wait_for_ready(&paths).await;
       Self {
         paths,
@@ -4553,17 +4698,46 @@ mod tests {
     }
   }
 
+  async fn connect_transport(paths: &RuntimePaths) -> Stream {
+    let discovery = discover_ipc_endpoint(paths).unwrap();
+    Stream::connect(discovered_socket_name(&discovery).unwrap())
+      .await
+      .unwrap()
+  }
+
+  async fn connect_authenticated_transport(paths: &RuntimePaths) -> Stream {
+    let mut conn = connect_transport(paths).await;
+    send_peer_authentication_preface(&mut conn).await.unwrap();
+    conn
+  }
+
   async fn connect_authenticated(paths: &RuntimePaths) -> Stream {
     let discovery = discover_ipc_endpoint(paths).unwrap();
-    let name = discovered_socket_name(&discovery).unwrap();
-    let mut conn = Stream::connect(name).await.unwrap();
-    send_peer_authentication_preface(&mut conn).await.unwrap();
+    let conn = connect_authenticated_transport(paths).await;
     let (read_half, mut writer) = tokio::io::split(conn);
     let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
     perform_client_handshake(&mut reader, &mut writer, &discovery)
       .await
       .unwrap();
     reader.into_inner().unsplit(writer)
+  }
+
+  async fn connect_session_eventually(paths: &RuntimePaths) -> CadderSession {
+    for _ in 0..50 {
+      match CadderSession::connect(paths).await {
+        Ok(session) => return session,
+        Err(_) => sleep(Duration::from_millis(10)).await,
+      }
+    }
+    panic!("the daemon did not release an IPC connection permit");
+  }
+
+  async fn assert_transport_closes(mut conn: Stream) {
+    let mut byte = [0_u8; 1];
+    let result = timeout(Duration::from_secs(1), conn.read(&mut byte))
+      .await
+      .expect("daemon should close the rejected connection");
+    assert!(result.is_err() || result.unwrap() == 0);
   }
 
   async fn read_raw_envelope(conn: &mut Stream) -> IpcEnvelope {
@@ -4704,10 +4878,16 @@ mod tests {
     let (read_half, mut writer) = tokio::io::split(conn);
     let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
     assert!(
-      accept_client_handshake(&mut reader, &mut writer, identity)
-        .await
-        .unwrap()
-        .is_some(),
+      accept_client_handshake(
+        &mut reader,
+        &mut writer,
+        identity,
+        Instant::now(),
+        IpcLimits::default(),
+      )
+      .await
+      .unwrap()
+      .is_some(),
       "scripted client handshake should be accepted"
     );
     reader.into_inner().unsplit(writer)
