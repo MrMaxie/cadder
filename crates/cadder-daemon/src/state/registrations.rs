@@ -78,66 +78,48 @@ impl DaemonState {
     let id = prepared.registration_id.clone();
     let domain_count = prepared.registered_domains.len();
     candidate_registrations.insert(id.clone(), prepared);
-    let registrations = candidate_registrations
-      .values()
-      .cloned()
-      .collect::<Vec<_>>();
-    let runtime = candidate_coordinator.runtime();
-    let mut runtime_receipt = None;
-    match candidate_coordinator.begin_apply(&registrations) {
-      CaddyApplyAction::Current(_) => {}
-      CaddyApplyAction::Stop { attempted } => {
-        if runtime.inspect().await.status != cadder_protocol::RuntimeStatus::Idle {
-          return Ok(registration_runtime_rejected(
-            request_id,
-            "the running Caddy runtime requires a rollback-capable stop",
-          ));
-        }
-        candidate_coordinator.finish_idle(attempted);
-      }
-      CaddyApplyAction::Apply {
-        attempted,
-        rendered,
-        hash,
-        source_config_paths,
-      } => {
-        fence.commit(|| ())?;
-        match runtime.begin_apply_config(&rendered, &self.logs).await {
-          Ok(attempt) => {
-            let (receipt, outcome) = attempt.into_parts();
-            match outcome {
-              Ok(()) => {
-                runtime_receipt = Some(receipt);
-                candidate_coordinator.finish_runtime_apply(
-                  attempted,
-                  hash,
-                  source_config_paths,
-                  Ok(()),
-                );
-              }
-              Err(error) => {
-                rollback_runtime_receipt(self, Some(receipt)).await;
-                candidate_coordinator.finish_runtime_apply(
-                  attempted,
-                  hash,
-                  source_config_paths,
-                  Err(error),
-                );
-              }
-            }
-          }
-          Err(error) => {
-            candidate_coordinator.finish_runtime_apply(
-              attempted,
-              hash,
-              source_config_paths,
-              Err(error),
-            );
-          }
-        }
+    let transaction = RegistrationTransaction {
+      coordinator: candidate_coordinator,
+      registrations: candidate_registrations,
+      history: RegistrationHistoryDraft {
+        summary: format!("Registered entrypoint `{id}`."),
+        registration_id: Some(id.clone()),
+        domain_key: None,
+        details: serde_json::json!({
+          "registrationId": id,
+          "domainCount": domain_count
+        }),
+      },
+      event_registration_id: Some(id.clone()),
+    };
+    match self
+      .execute_registration_transaction(transaction, fence)
+      .await
+    {
+      Ok(()) => {}
+      Err(RegistrationTransactionFailure::Fenced(rejection)) => return Err(rejection),
+      Err(RegistrationTransactionFailure::Runtime(error)) => {
+        return Ok(registration_runtime_rejected(request_id, error));
       }
     }
 
+    Ok(RegisterEntrypointResponse {
+      request_id,
+      accepted: true,
+      message: "Entrypoint registered.".to_string(),
+      registration_id: Some(id),
+    })
+  }
+
+  async fn execute_registration_transaction(
+    &self,
+    mut transaction: RegistrationTransaction,
+    fence: &OperationFence,
+  ) -> Result<(), RegistrationTransactionFailure> {
+    let mut runtime_receipt = self
+      .apply_runtime_transition(&mut transaction, fence)
+      .await?;
+    let runtime = transaction.coordinator.runtime();
     let runtime_state = match &runtime_receipt {
       Some(receipt) => receipt.projected_state().await,
       None => runtime.inspect().await,
@@ -151,29 +133,26 @@ impl DaemonState {
       let _publish = self.publish_operation.lock().await;
       let mut coordinator = self.coordinator.lock().await;
       let mut inner = self.inner.lock().await;
-      merge_live_heartbeats(&mut candidate_registrations, &inner.registrations);
+      merge_live_heartbeats(&mut transaction.registrations, &inner.registrations);
       let snapshot = GuiStateSnapshot {
         captured_at_utc: Utc::now(),
-        registrations: candidate_registrations.values().cloned().collect(),
+        registrations: transaction.registrations.values().cloned().collect(),
         runtime: runtime_state,
-        config: candidate_coordinator.current_state(),
+        config: transaction.coordinator.current_state(),
         storage: Some(storage_state),
       };
       fence.commit_final(|| -> Result<()> {
         if let Some(receipt) = runtime_receipt.as_mut() {
           receipt.accept(&self.logs)?;
         }
-        *coordinator = candidate_coordinator;
-        inner.registrations = candidate_registrations;
+        *coordinator = transaction.coordinator;
+        inner.registrations = transaction.registrations;
         self.store.record_history(
           HistoryKind::Registration,
-          format!("Registered entrypoint `{id}`."),
-          Some(&id),
-          None,
-          &serde_json::json!({
-            "registrationId": id,
-            "domainCount": domain_count
-          }),
+          transaction.history.summary,
+          transaction.history.registration_id.as_deref(),
+          transaction.history.domain_key.as_deref(),
+          &transaction.history.details,
         );
         inner.sequence += 1;
         let _ = self.events.send(StateChangedEvent {
@@ -181,30 +160,78 @@ impl DaemonState {
           sequence_number: inner.sequence,
           change_kind: StateChangeKind::RegistrationsChanged,
           snapshot,
-          registration_id: Some(id.clone()),
+          registration_id: transaction.event_registration_id,
         });
         Ok(())
       })
     };
 
     match publish_result {
-      Ok(Ok(())) => {}
+      Ok(Ok(())) => Ok(()),
       Err(rejection) => {
-        rollback_runtime_receipt(self, runtime_receipt).await;
-        return Err(rejection);
+        rollback_runtime_transition(self, runtime_receipt).await;
+        Err(RegistrationTransactionFailure::Fenced(rejection))
       }
       Ok(Err(error)) => {
-        rollback_runtime_receipt(self, runtime_receipt).await;
-        return Ok(registration_runtime_rejected(request_id, error));
+        rollback_runtime_transition(self, runtime_receipt).await;
+        Err(RegistrationTransactionFailure::Runtime(error))
       }
     }
+  }
 
-    Ok(RegisterEntrypointResponse {
-      request_id,
-      accepted: true,
-      message: "Entrypoint registered.".to_string(),
-      registration_id: Some(id),
-    })
+  async fn apply_runtime_transition(
+    &self,
+    transaction: &mut RegistrationTransaction,
+    fence: &OperationFence,
+  ) -> Result<Option<RuntimeTransitionReceipt>, RegistrationTransactionFailure> {
+    let registrations = transaction
+      .registrations
+      .values()
+      .cloned()
+      .collect::<Vec<_>>();
+    let runtime = transaction.coordinator.runtime();
+    match transaction.coordinator.begin_apply(&registrations) {
+      CaddyApplyAction::Current(_) => Ok(None),
+      CaddyApplyAction::Stop { attempted } => {
+        fence
+          .commit(|| ())
+          .map_err(RegistrationTransactionFailure::Fenced)?;
+        let attempt = runtime
+          .begin_stop(&self.logs)
+          .await
+          .map_err(RegistrationTransactionFailure::Runtime)?;
+        let (receipt, outcome) = attempt.into_parts();
+        if let Err(error) = outcome {
+          rollback_runtime_transition(self, Some(RuntimeTransitionReceipt::Stop(receipt))).await;
+          return Err(RegistrationTransactionFailure::Runtime(error));
+        }
+        transaction.coordinator.finish_idle(attempted);
+        Ok(Some(RuntimeTransitionReceipt::Stop(receipt)))
+      }
+      CaddyApplyAction::Apply {
+        attempted,
+        rendered,
+        hash,
+        source_config_paths,
+      } => {
+        fence
+          .commit(|| ())
+          .map_err(RegistrationTransactionFailure::Fenced)?;
+        let attempt = runtime
+          .begin_apply_config(&rendered, &self.logs)
+          .await
+          .map_err(RegistrationTransactionFailure::Runtime)?;
+        let (receipt, outcome) = attempt.into_parts();
+        if let Err(error) = outcome {
+          rollback_runtime_transition(self, Some(RuntimeTransitionReceipt::Apply(receipt))).await;
+          return Err(RegistrationTransactionFailure::Runtime(error));
+        }
+        transaction
+          .coordinator
+          .finish_runtime_apply(attempted, hash, source_config_paths, Ok(()));
+        Ok(Some(RuntimeTransitionReceipt::Apply(receipt)))
+      }
+    }
   }
 
   pub async fn unregister(
@@ -578,9 +605,56 @@ fn merge_live_heartbeats(
   }
 }
 
-async fn rollback_runtime_receipt(
+struct RegistrationTransaction {
+  coordinator: CaddyConfigCoordinator,
+  registrations: BTreeMap<String, EntrypointRegistration>,
+  history: RegistrationHistoryDraft,
+  event_registration_id: Option<String>,
+}
+
+struct RegistrationHistoryDraft {
+  summary: String,
+  registration_id: Option<String>,
+  domain_key: Option<String>,
+  details: serde_json::Value,
+}
+
+enum RegistrationTransactionFailure {
+  Fenced(CommitRejection),
+  Runtime(anyhow::Error),
+}
+
+enum RuntimeTransitionReceipt {
+  Apply(crate::runtime::RuntimeApplyReceipt),
+  Stop(crate::runtime::RuntimeStopReceipt),
+}
+
+impl RuntimeTransitionReceipt {
+  fn accept(&mut self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Apply(receipt) => receipt.accept(logs),
+      Self::Stop(receipt) => receipt.accept(),
+    }
+  }
+
+  async fn rollback(self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Apply(receipt) => receipt.rollback(logs).await,
+      Self::Stop(receipt) => receipt.rollback(logs).await,
+    }
+  }
+
+  async fn projected_state(&self) -> cadder_protocol::RuntimeState {
+    match self {
+      Self::Apply(receipt) => receipt.projected_state().await,
+      Self::Stop(receipt) => receipt.projected_state(),
+    }
+  }
+}
+
+async fn rollback_runtime_transition(
   state: &DaemonState,
-  receipt: Option<crate::runtime::RuntimeApplyReceipt>,
+  receipt: Option<RuntimeTransitionReceipt>,
 ) {
   let Some(receipt) = receipt else {
     return;
@@ -591,7 +665,7 @@ async fn rollback_runtime_receipt(
       LogStreamIdentity::runtime_control(),
       LogSeverity::Error,
       format!(
-        "runtime rollback failed after rejected registration; Cadder entered read-only drain: {error:#}"
+        "runtime transition rollback failed after rejected registration; Cadder entered read-only drain: {error:#}"
       ),
       LogAttributionKind::RuntimeControl,
       Some("registration-rollback".to_string()),

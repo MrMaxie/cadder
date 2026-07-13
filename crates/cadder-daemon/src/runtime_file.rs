@@ -256,7 +256,7 @@ fn finalize_owner_only_file(_destination: &Path) -> io::Result<()> {
   Ok(())
 }
 
-fn remove_effective_config(paths: &RuntimePaths) -> Result<()> {
+pub(crate) fn remove_effective_config(paths: &RuntimePaths) -> Result<()> {
   let path = paths.effective_config_path();
   if !path.exists() {
     return Ok(());

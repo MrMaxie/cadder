@@ -747,7 +747,6 @@ async fn disabled_adapt_failure_does_not_block_effective_config() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture).fail_adapt()).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
-
   assert!(
     register_on_session(
       &mut session,
@@ -1062,14 +1061,12 @@ async fn immediate_runtime_exit_reports_start_failure() {
   .await;
   let snapshot = query_state(&harness.client).await;
 
-  assert!(response.accepted, "{response:?}");
-  assert_eq!(snapshot.config.status, ConfigApplyStatus::Failed);
-  assert_eq!(snapshot.config.diagnostics[0].code, "runtime-apply-failed");
-  assert!(
-    snapshot.config.diagnostics[0]
-      .message
-      .contains("exited immediately")
-  );
+  assert!(!response.accepted);
+  assert!(response.message.contains("exited immediately"));
+  assert!(snapshot.registrations.is_empty());
+  assert_eq!(snapshot.runtime.status, RuntimeStatus::Idle);
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Idle);
+  assert!(snapshot.config.diagnostics.is_empty());
   harness.shutdown().await;
 }
 

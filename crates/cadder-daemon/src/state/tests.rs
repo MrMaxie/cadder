@@ -1847,6 +1847,29 @@ async fn registration_event_matches_the_published_mock_runtime_state() {
 }
 
 #[tokio::test]
+async fn inactive_registration_commits_through_the_stop_transaction() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+  let mut candidate = registration("shim-1", "nonce-1");
+  candidate.activation_state = ActivationState::Inactive;
+
+  let response = state
+    .register("register-inactive".to_string(), candidate)
+    .await;
+  let snapshot = state.snapshot().await;
+
+  assert!(response.accepted);
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Idle
+  );
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Idle);
+  assert_eq!(snapshot.registrations.len(), 1);
+  assert!(!paths.effective_config_path().exists());
+}
+
+#[tokio::test]
 async fn heartbeat_accepts_owner_and_rejects_wrong_nonce() {
   let state = state();
   state
@@ -2223,6 +2246,85 @@ async fn operation_fence_revoke_after_runtime_apply_rolls_back_before_worker_fin
   assert!(!paths.effective_config_path().exists());
   assert!(history.records.is_empty());
   assert_eq!(state.inner.lock().await.sequence, 0);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
+async fn operation_fence_revoke_after_runtime_stop_restores_previous_registration() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+  assert!(
+    state
+      .register(
+        "register-active".to_string(),
+        registration("shim-1", "nonce-1")
+      )
+      .await
+      .accepted
+  );
+  let previous_config = fs::read(paths.effective_config_path()).unwrap();
+  let sequence_before = state.inner.lock().await.sequence;
+  let history_before = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "stop-rollback-history-before".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+  let mut events = state.subscribe();
+  let hook = RegisterPublishTestHook::new();
+  state.register_publish_hook = Some(hook.clone());
+  let registering_state = state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+  let mut inactive = registration("shim-1", "nonce-1");
+  inactive.activation_state = ActivationState::Inactive;
+
+  let pending = tokio::spawn(async move {
+    registering_state
+      .register_fenced("replace-inactive".to_string(), inactive, &pending_fence)
+      .await
+  });
+  hook.wait_until_reached().await;
+  fence.revoke();
+  hook.release();
+
+  assert_eq!(
+    pending.await.unwrap().unwrap_err(),
+    CommitRejection::Revoked
+  );
+  let snapshot = state.snapshot().await;
+  let history_after = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "stop-rollback-history-after".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+
+  assert_eq!(
+    snapshot.registrations[0].activation_state,
+    ActivationState::Active
+  );
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Running
+  );
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(
+    fs::read(paths.effective_config_path()).unwrap(),
+    previous_config
+  );
+  assert_eq!(state.inner.lock().await.sequence, sequence_before);
+  assert_eq!(history_after, history_before);
   assert!(matches!(
     events.try_recv(),
     Err(broadcast::error::TryRecvError::Empty)
