@@ -339,6 +339,27 @@ impl ProtocolError {
     })
   }
 
+  /// Reports that the connected daemon does not match the instance selected from discovery.
+  pub fn stale_instance() -> Self {
+    Self::from_data(ProtocolErrorData {
+      kind: ProtocolErrorKind::StaleInstance,
+      code: ProtocolErrorCode::known("stale_instance"),
+      message: "The connected Cadder daemon does not match the discovered runtime instance.".into(),
+      guidance: Some("Reread Cadder IPC discovery and retry the connection once.".into()),
+      retryable: true,
+      request_id: None,
+      protocol_version: None,
+      minimum_compatible_protocol_version: None,
+      current_protocol_version: None,
+      required_capability: None,
+      required_capability_version: None,
+      denied_operation: None,
+      supported_capabilities: current_capabilities(),
+      supported_capability_versions: current_capability_versions(),
+      legacy_version_metadata_present: false,
+    })
+  }
+
   pub fn unsupported_capability(
     required_capability: impl Into<String>,
     supported_capabilities: impl Into<Box<[String]>>,

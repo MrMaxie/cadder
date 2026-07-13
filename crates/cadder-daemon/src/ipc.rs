@@ -1,7 +1,7 @@
 use crate::{
-  CaddyBackendMode, DaemonState, IpcClientError, IpcClientPhase, IpcClientResult,
+  CaddyBackendMode, DaemonState, IpcClientError, IpcClientPhase, IpcClientResult, IpcEndpoint,
   IpcEndpointMetadata, IpcEndpointPublication, IpcOperation, IpcPrincipal, IpcSecurityPolicy,
-  LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile,
+  LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile, discover_ipc_endpoint,
   ipc_client_error::LocalIpcErrorContext,
   ipc_codec::{BoundedNdjsonCodec, IpcCodecError, encode_json_frame},
   ipc_security::{
@@ -12,17 +12,21 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use cadder_protocol::{
-  HeartbeatEntrypointRequest, IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind,
-  LogSeverity, LogStreamIdentity, OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass,
-  PROTOCOL_VERSION, ProtocolCapabilities, ProtocolError, ProtocolErrorCode, ProtocolErrorKind,
-  ProtocolErrorResponse, QueryAutostartRequest, QueryIisBindingsRequest, QueryLogsRequest,
-  QueryStateRequest, RegisterEntrypointRequest, RequestId, SetAutostartRequest,
-  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  ShutdownDaemonRequest, StateChangedEvent, SubscribeStateRequest, UnregisterEntrypointRequest,
-  ensure_compatible_protocol_version, message_types,
+  CLIENT_HELLO_OPERATION, CapabilityId, ClientHello, HeartbeatEntrypointRequest, IpcEnvelope,
+  LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity, OPERATION_REGISTRY,
+  OperationAccess, OperationDeadlineClass, PROTOCOL_VERSION, ProtocolCapabilities, ProtocolError,
+  ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, ProtocolVersion,
+  ProtocolVersionRange, QueryAutostartRequest, QueryIisBindingsRequest, QueryLogsRequest,
+  QueryStateRequest, RegisterEntrypointRequest, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
+  ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
+  SetEntrypointEnabledRequest, SetIisHandoffRequest, ShutdownDaemonRequest, StateChangedEvent,
+  SubscribeStateRequest, UnregisterEntrypointRequest, ensure_compatible_protocol_version,
+  message_types, new_request_id,
 };
 use fs4::{FileExt, TryLockError};
 use futures_util::StreamExt;
+#[cfg(unix)]
+use interprocess::local_socket::{GenericFilePath, ToFsName};
 #[cfg(windows)]
 use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{
@@ -30,22 +34,45 @@ use interprocess::local_socket::{
   tokio::{Stream, prelude::*},
 };
 use serde::{Serialize, de::DeserializeOwned};
+#[cfg(not(any(unix, windows)))]
+use std::fs::OpenOptions;
 use std::{
-  collections::BTreeMap,
-  env,
-  fs::{File, OpenOptions, create_dir_all},
-  io,
-  path::PathBuf,
-  process::Stdio,
-  time::Duration,
+  collections::BTreeMap, env, fs::File, io, path::PathBuf, process::Stdio, time::Duration,
 };
 use tokio::{
   io::{AsyncRead, AsyncWrite, AsyncWriteExt},
   process::Command,
   sync::watch,
-  time::{sleep, timeout},
+  time::sleep,
 };
 use tokio_util::codec::FramedRead;
+
+type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NegotiatedSession {
+  version: ProtocolVersion,
+  capabilities: Box<[CapabilityId]>,
+}
+
+#[derive(Debug, Clone)]
+struct ServerHandshakeIdentity {
+  runtime_id: Box<str>,
+  daemon_instance_id: Box<str>,
+  supported_versions: ProtocolVersionRange,
+  capabilities: Box<[CapabilityId]>,
+}
+
+impl From<&IpcEndpointMetadata> for ServerHandshakeIdentity {
+  fn from(metadata: &IpcEndpointMetadata) -> Self {
+    Self {
+      runtime_id: metadata.runtime_id.clone().into_boxed_str(),
+      daemon_instance_id: metadata.daemon_instance_id.clone().into_boxed_str(),
+      supported_versions: metadata.supported_versions,
+      capabilities: metadata.capabilities.clone(),
+    }
+  }
+}
 
 #[derive(Debug)]
 pub struct DaemonServer {
@@ -99,6 +126,7 @@ impl DaemonServer {
       .context("authenticate the Cadder runtime-owner identity")?;
     let endpoint =
       IpcEndpointMetadata::new(&self.paths).context("create the daemon discovery identity")?;
+    let handshake_identity = ServerHandshakeIdentity::from(&endpoint);
     let name = local_socket_name(&self.paths)?;
     let listener_options = ListenerOptions::new().name(name).try_overwrite(true);
     let listener = secure_listener_options(listener_options, &owner_principal)
@@ -124,6 +152,7 @@ impl DaemonServer {
                       let owner_principal = owner_principal.clone();
                       let policy = self.security_policy.clone();
                       let peer_identity_resolver = self.peer_identity_resolver.clone();
+                      let handshake_identity = handshake_identity.clone();
                       tokio::spawn(async move {
                           match authenticate_accepted_connection(
                             conn,
@@ -132,7 +161,12 @@ impl DaemonServer {
                             peer_identity_resolver,
                           ).await {
                             Ok((conn, security)) => {
-                              let _ = handle_connection(conn, state, security).await;
+                              let _ = handle_connection(
+                                conn,
+                                state,
+                                security,
+                                handshake_identity,
+                              ).await;
                             }
                             Err(error) => log_peer_authentication_denial(&state, &error),
                           }
@@ -163,6 +197,34 @@ fn local_socket_name(paths: &RuntimePaths) -> io::Result<Name<'static>> {
     .socket_name()
     .to_ns_name::<GenericNamespaced>()
     .map(Name::into_owned)
+}
+
+#[cfg(unix)]
+fn discovered_socket_name(metadata: &IpcEndpointMetadata) -> io::Result<Name<'static>> {
+  match &metadata.endpoint {
+    IpcEndpoint::UnixSocket { path } => path
+      .clone()
+      .to_fs_name::<GenericFilePath>()
+      .map(Name::into_owned),
+    IpcEndpoint::WindowsNamedPipe { .. } => Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "IPC discovery selected a Windows transport on Unix",
+    )),
+  }
+}
+
+#[cfg(windows)]
+fn discovered_socket_name(metadata: &IpcEndpointMetadata) -> io::Result<Name<'static>> {
+  match &metadata.endpoint {
+    IpcEndpoint::WindowsNamedPipe { name } => name
+      .clone()
+      .to_ns_name::<GenericNamespaced>()
+      .map(Name::into_owned),
+    IpcEndpoint::UnixSocket { .. } => Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "IPC discovery selected a Unix transport on Windows",
+    )),
+  }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -236,9 +298,17 @@ async fn handle_connection(
   conn: Stream,
   state: DaemonState,
   security: ConnectionSecurityContext,
+  handshake_identity: ServerHandshakeIdentity,
 ) -> Result<()> {
   let mut owned = ConnectionRegistrations::default();
-  let result = handle_connection_loop(conn, state.clone(), &mut owned, &security).await;
+  let result = handle_connection_loop(
+    conn,
+    state.clone(),
+    &mut owned,
+    &security,
+    &handshake_identity,
+  )
+  .await;
   for (id, nonce) in owned.into_entries() {
     state.unregister_for_ipc_disconnect(&id, &nonce).await;
   }
@@ -250,9 +320,15 @@ async fn handle_connection_loop(
   state: DaemonState,
   owned: &mut ConnectionRegistrations,
   security: &ConnectionSecurityContext,
+  handshake_identity: &ServerHandshakeIdentity,
 ) -> Result<()> {
   let (read_half, mut write_half) = tokio::io::split(conn);
   let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+  let Some(_negotiation) =
+    accept_client_handshake(&mut reader, &mut write_half, handshake_identity).await?
+  else {
+    return Ok(());
+  };
   macro_rules! send_response {
     ($message_type:expr, $response:expr) => {
       write_envelope(&mut write_half, $message_type, &$response).await?;
@@ -425,6 +501,301 @@ async fn handle_connection_loop(
   }
 
   Ok(())
+}
+
+async fn accept_client_handshake<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  identity: &ServerHandshakeIdentity,
+) -> Result<Option<NegotiatedSession>>
+where
+  W: AsyncWrite + Unpin,
+{
+  let line = match reader.next().await {
+    Some(Ok(line)) => line,
+    Some(Err(error)) => return Err(error).context("read bounded IPC client handshake"),
+    None => return Ok(None),
+  };
+  let hello: ClientHello = serde_json::from_str(&line).context("decode IPC client handshake")?;
+
+  if hello.runtime_id.as_ref() != identity.runtime_id.as_ref()
+    || hello.daemon_instance_id.as_ref() != identity.daemon_instance_id.as_ref()
+  {
+    let frame = ServerHandshakeFrame::rejected(
+      hello.request_id,
+      identity.runtime_id.clone(),
+      identity.daemon_instance_id.clone(),
+      ProtocolError::stale_instance(),
+    );
+    write_handshake_frame(writer, &frame).await?;
+    return Ok(None);
+  }
+
+  let Some(version) = hello
+    .supported_versions
+    .negotiate(identity.supported_versions)
+  else {
+    let frame = ServerHandshakeFrame::rejected(
+      hello.request_id,
+      identity.runtime_id.clone(),
+      identity.daemon_instance_id.clone(),
+      ProtocolError::incompatible_protocol_range(
+        hello.supported_versions,
+        identity.supported_versions,
+      ),
+    );
+    write_handshake_frame(writer, &frame).await?;
+    return Ok(None);
+  };
+
+  let capabilities = OPERATION_REGISTRY
+    .negotiate_capabilities(version, &hello.capabilities)?
+    .into_iter()
+    .filter(|capability| identity.capabilities.contains(capability))
+    .collect::<Box<[_]>>();
+  let frame = ServerHandshakeFrame::accepted(ServerHello {
+    request_id: hello.request_id,
+    runtime_id: identity.runtime_id.clone(),
+    daemon_instance_id: identity.daemon_instance_id.clone(),
+    selected_version: version,
+    capabilities: capabilities.clone(),
+  });
+  write_handshake_frame(writer, &frame).await?;
+  Ok(Some(NegotiatedSession {
+    version,
+    capabilities,
+  }))
+}
+
+async fn write_handshake_frame<W>(writer: &mut W, frame: &ServerHandshakeFrame) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  let encoded = encode_json_frame(frame)?;
+  writer.write_all(&encoded).await?;
+  writer.flush().await?;
+  Ok(())
+}
+
+async fn perform_client_handshake<W>(
+  reader: &mut IpcFrameReader,
+  writer: &mut W,
+  discovery: &IpcEndpointMetadata,
+) -> IpcClientResult<NegotiatedSession>
+where
+  W: AsyncWrite + Unpin,
+{
+  let request_id =
+    RequestId::parse(new_request_id("hello")).expect("generated handshake request ID is valid");
+  let requested_capabilities = OPERATION_REGISTRY
+    .advertised_capabilities(SUPPORTED_PROTOCOL_VERSIONS.maximum())
+    .map_err(IpcClientError::daemon)?;
+  let hello = ClientHello {
+    request_id: request_id.clone(),
+    runtime_id: discovery.runtime_id.clone().into_boxed_str(),
+    daemon_instance_id: discovery.daemon_instance_id.clone().into_boxed_str(),
+    supported_versions: SUPPORTED_PROTOCOL_VERSIONS,
+    capabilities: requested_capabilities.clone(),
+  };
+  let encoded = encode_json_frame(&hello).map_err(|error| {
+    handshake_local_error(
+      IpcClientPhase::RequestEncode,
+      LocalIpcErrorCode::Frame,
+      "Cadder could not encode its local daemon handshake; no operation was sent.",
+      "Report this Cadder handshake serialization error.",
+      false,
+      request_id.clone(),
+      Some(Box::new(error)),
+    )
+  })?;
+  writer.write_all(&encoded).await.map_err(|error| {
+    handshake_local_error(
+      IpcClientPhase::RequestWrite,
+      LocalIpcErrorCode::TransportWrite,
+      "Cadder lost the local connection while sending the daemon handshake; no operation was sent.",
+      "Reread IPC discovery and retry the connection once.",
+      true,
+      request_id.clone(),
+      Some(Box::new(error)),
+    )
+  })?;
+  writer.flush().await.map_err(|error| {
+    handshake_local_error(
+      IpcClientPhase::RequestWrite,
+      LocalIpcErrorCode::TransportWrite,
+      "Cadder could not finish sending the local daemon handshake; no operation was sent.",
+      "Reread IPC discovery and retry the connection once.",
+      true,
+      request_id.clone(),
+      Some(Box::new(error)),
+    )
+  })?;
+
+  let line = match reader.next().await {
+    Some(Ok(line)) => line,
+    Some(Err(IpcCodecError::Io(error))) => {
+      return Err(handshake_local_error(
+        IpcClientPhase::ResponseRead,
+        LocalIpcErrorCode::TransportRead,
+        "Cadder lost the local connection while waiting for the daemon handshake; no operation was sent.",
+        "Reread IPC discovery and retry the connection once.",
+        true,
+        request_id,
+        Some(Box::new(error)),
+      ));
+    }
+    Some(Err(error)) => {
+      return Err(handshake_local_error(
+        IpcClientPhase::ResponseRead,
+        LocalIpcErrorCode::Frame,
+        "Cadder rejected an invalid or oversized daemon handshake response; no operation was sent.",
+        "Restart the Cadder daemon with a compatible build, then retry.",
+        false,
+        request_id,
+        Some(Box::new(error)),
+      ));
+    }
+    None => {
+      return Err(handshake_local_error(
+        IpcClientPhase::ResponseRead,
+        LocalIpcErrorCode::UnexpectedEof,
+        "The daemon closed the connection before confirming its discovered instance; no operation was sent.",
+        "Reread IPC discovery and retry the connection once.",
+        true,
+        request_id,
+        None,
+      ));
+    }
+  };
+  let frame: ServerHandshakeFrame = serde_json::from_str(&line).map_err(|error| {
+    handshake_local_error(
+      IpcClientPhase::ResponseDecode,
+      LocalIpcErrorCode::Frame,
+      "Cadder could not decode the daemon handshake response; no operation was sent.",
+      "Restart the Cadder daemon with a compatible build, then retry.",
+      false,
+      request_id.clone(),
+      Some(Box::new(error)),
+    )
+  })?;
+
+  match frame {
+    ServerHandshakeFrame::Accepted(hello) => {
+      validate_server_hello(hello, discovery, request_id, &requested_capabilities)
+    }
+    ServerHandshakeFrame::Rejected(rejection) => {
+      if rejection.error().request_id.as_ref() != Some(&request_id) {
+        return Err(handshake_protocol_violation(
+          request_id,
+          "The daemon handshake rejection used a different request ID.",
+        ));
+      }
+      if rejection.runtime_id() != discovery.runtime_id
+        || (rejection.error().kind != ProtocolErrorKind::StaleInstance
+          && rejection.daemon_instance_id() != discovery.daemon_instance_id)
+      {
+        return Err(stale_handshake_error(request_id));
+      }
+      Err(IpcClientError::daemon(rejection.error().clone()))
+    }
+  }
+}
+
+fn validate_server_hello(
+  hello: ServerHello,
+  discovery: &IpcEndpointMetadata,
+  request_id: RequestId,
+  requested_capabilities: &[CapabilityId],
+) -> IpcClientResult<NegotiatedSession> {
+  if hello.request_id != request_id {
+    return Err(handshake_protocol_violation(
+      request_id,
+      "The daemon handshake response used a different request ID.",
+    ));
+  }
+  if hello.runtime_id.as_ref() != discovery.runtime_id
+    || hello.daemon_instance_id.as_ref() != discovery.daemon_instance_id
+  {
+    return Err(stale_handshake_error(request_id));
+  }
+  let Some(expected_version) = SUPPORTED_PROTOCOL_VERSIONS.negotiate(discovery.supported_versions)
+  else {
+    return Err(handshake_protocol_violation(
+      request_id,
+      "The daemon accepted a handshake whose published protocol range is incompatible.",
+    ));
+  };
+  if hello.selected_version != expected_version {
+    return Err(handshake_protocol_violation(
+      request_id,
+      "The daemon selected a protocol version outside the discovered negotiation result.",
+    ));
+  }
+  let expected_capabilities = OPERATION_REGISTRY
+    .negotiate_capabilities(hello.selected_version, requested_capabilities)
+    .map_err(IpcClientError::daemon)?
+    .into_iter()
+    .filter(|capability| discovery.capabilities.contains(capability))
+    .collect::<Box<[_]>>();
+  if hello.capabilities != expected_capabilities {
+    return Err(handshake_protocol_violation(
+      request_id,
+      "The daemon handshake capabilities do not match the discovered intersection.",
+    ));
+  }
+  Ok(NegotiatedSession {
+    version: hello.selected_version,
+    capabilities: hello.capabilities,
+  })
+}
+
+fn handshake_local_error(
+  phase: IpcClientPhase,
+  code: LocalIpcErrorCode,
+  message: &'static str,
+  guidance: &'static str,
+  retryable: bool,
+  request_id: RequestId,
+  source: Option<crate::ipc_client_error::BoxError>,
+) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Transport,
+    phase,
+    code,
+    message: message.into(),
+    guidance: Some(guidance.into()),
+    retryable,
+    request_id: Some(request_id),
+    operation: Some(CLIENT_HELLO_OPERATION.into()),
+    source,
+  })
+}
+
+fn stale_handshake_error(request_id: RequestId) -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Discovery,
+    phase: IpcClientPhase::ResponseValidate,
+    code: LocalIpcErrorCode::StaleInstance,
+    message: "The connected daemon does not match the instance selected from IPC discovery; no operation was sent."
+      .into(),
+    guidance: Some("Reread Cadder IPC discovery and retry the connection once.".into()),
+    retryable: true,
+    request_id: Some(request_id),
+    operation: Some(CLIENT_HELLO_OPERATION.into()),
+    source: None,
+  })
+}
+
+fn handshake_protocol_violation(request_id: RequestId, message: &'static str) -> IpcClientError {
+  handshake_local_error(
+    IpcClientPhase::ResponseValidate,
+    LocalIpcErrorCode::ProtocolViolation,
+    message,
+    "Restart the Cadder daemon with a compatible build, then retry.",
+    false,
+    request_id,
+    None,
+  )
 }
 
 async fn authorize_or_reject<W>(
@@ -653,10 +1024,7 @@ impl CadderClient {
     let prepared = PreparedClientRequest::new(message_type, response_type, request)?;
     let request_id = prepared.context.request_id.clone();
     let operation = prepared.context.operation.clone();
-    let name = local_socket_name(&self.paths)
-      .map_err(endpoint_resolution_error)
-      .map_err(|error| error.with_request_context(request_id.clone(), operation.clone()))?;
-    let mut session = CadderSession::connect_name(name, self.deadlines)
+    let mut session = CadderSession::connect_with_deadlines(&self.paths, self.deadlines)
       .await
       .map_err(|error| error.with_request_context(request_id, operation))?;
     session
@@ -672,64 +1040,79 @@ impl CadderClient {
     )?;
     let correlation = prepared.context.request_id.clone();
     let operation = prepared.context.operation.clone();
-    let name = local_socket_name(&self.paths)
-      .map_err(endpoint_resolution_error)
-      .map_err(|error| error.with_request_context(correlation.clone(), operation.clone()))?;
-    let session = CadderSession::connect_name(name, self.deadlines)
+    let session = CadderSession::connect_with_deadlines(&self.paths, self.deadlines)
       .await
       .map_err(|error| error.with_request_context(correlation, operation))?;
     session.subscribe_prepared(prepared).await
   }
 }
 
-type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
-
 #[derive(Debug)]
 pub struct CadderSession {
   reader: Option<IpcFrameReader>,
   writer: Option<tokio::io::WriteHalf<Stream>>,
+  negotiation: NegotiatedSession,
   deadlines: IpcClientDeadlines,
   usable: bool,
 }
 
 impl CadderSession {
   pub async fn connect(paths: &RuntimePaths) -> IpcClientResult<Self> {
-    let name = local_socket_name(paths).map_err(endpoint_resolution_error)?;
-    Self::connect_name(name, IpcClientDeadlines::default()).await
+    Self::connect_with_deadlines(paths, IpcClientDeadlines::default()).await
   }
 
-  async fn connect_name(
-    name: interprocess::local_socket::Name<'_>,
+  async fn connect_with_deadlines(
+    paths: &RuntimePaths,
     deadlines: IpcClientDeadlines,
   ) -> IpcClientResult<Self> {
-    let mut conn = match timeout(deadlines.connect, Stream::connect(name)).await {
-      Ok(Ok(conn)) => conn,
-      Ok(Err(error)) => return Err(connection_error(error)),
-      Err(_) => {
-        return Err(IpcClientError::local(LocalIpcErrorContext {
-          kind: LocalIpcErrorKind::Timeout,
-          phase: IpcClientPhase::Connect,
-          code: LocalIpcErrorCode::Timeout,
-          message: "The Cadder daemon connection did not complete before the local deadline; no request was sent."
-            .into(),
-          guidance: Some("Check the daemon status, then retry once it is ready.".into()),
-          retryable: true,
-          request_id: None,
-          operation: None,
-          source: None,
-        }));
+    let deadline = tokio::time::Instant::now() + deadlines.connect;
+    let discovery = discover_ipc_endpoint(paths)?;
+    match Self::connect_discovered(&discovery, deadlines, deadline).await {
+      Err(error) if error.is_stale_instance() => {
+        let refreshed = discover_ipc_endpoint(paths)?;
+        Self::connect_discovered(&refreshed, deadlines, deadline).await
       }
-    };
-    send_peer_authentication_preface(&mut conn)
-      .await
-      .map_err(peer_authentication_preface_error)?;
-    let (read_half, writer) = tokio::io::split(conn);
-    Ok(Self {
-      reader: Some(FramedRead::new(read_half, BoundedNdjsonCodec::new())),
-      writer: Some(writer),
-      deadlines,
-      usable: true,
+      result => result,
+    }
+  }
+
+  async fn connect_discovered(
+    discovery: &IpcEndpointMetadata,
+    deadlines: IpcClientDeadlines,
+    deadline: tokio::time::Instant,
+  ) -> IpcClientResult<Self> {
+    let name = discovered_socket_name(discovery).map_err(endpoint_resolution_error)?;
+    let result = tokio::time::timeout_at(deadline, async {
+      let mut conn = Stream::connect(name)
+        .await
+        .map_err(discovered_connection_error)?;
+      send_peer_authentication_preface(&mut conn)
+        .await
+        .map_err(peer_authentication_preface_error)?;
+      let (read_half, mut writer) = tokio::io::split(conn);
+      let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+      let negotiation = perform_client_handshake(&mut reader, &mut writer, discovery).await?;
+      Ok(Self {
+        reader: Some(reader),
+        writer: Some(writer),
+        negotiation,
+        deadlines,
+        usable: true,
+      })
     })
+    .await;
+    match result {
+      Ok(session) => session,
+      Err(_) => Err(connection_timeout_error()),
+    }
+  }
+
+  pub fn negotiated_version(&self) -> ProtocolVersion {
+    self.negotiation.version
+  }
+
+  pub fn negotiated_capabilities(&self) -> &[CapabilityId] {
+    &self.negotiation.capabilities
   }
 
   pub async fn request<TRequest>(
@@ -1224,6 +1607,39 @@ fn connection_error(error: io::Error) -> IpcClientError {
     request_id: None,
     operation: None,
     source: Some(Box::new(error)),
+  })
+}
+
+fn discovered_connection_error(error: io::Error) -> IpcClientError {
+  if !daemon_not_ready_error(error.kind()) {
+    return connection_error(error);
+  }
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Discovery,
+    phase: IpcClientPhase::Connect,
+    code: LocalIpcErrorCode::StaleInstance,
+    message: "Cadder IPC discovery points to a daemon endpoint that is no longer available; no request was sent."
+      .into(),
+    guidance: Some("Reread Cadder IPC discovery and retry the connection once.".into()),
+    retryable: true,
+    request_id: None,
+    operation: Some(CLIENT_HELLO_OPERATION.into()),
+    source: Some(Box::new(error)),
+  })
+}
+
+fn connection_timeout_error() -> IpcClientError {
+  IpcClientError::local(LocalIpcErrorContext {
+    kind: LocalIpcErrorKind::Timeout,
+    phase: IpcClientPhase::Connect,
+    code: LocalIpcErrorCode::Timeout,
+    message: "Cadder could not confirm the discovered daemon before the local connection deadline; no request was sent."
+      .into(),
+    guidance: Some("Check the daemon status, then retry once it is ready.".into()),
+    retryable: true,
+    request_id: None,
+    operation: Some(CLIENT_HELLO_OPERATION.into()),
+    source: None,
   })
 }
 
@@ -1822,11 +2238,16 @@ struct DaemonLaunchLock {
 impl DaemonLaunchLock {
   fn try_acquire(paths: &RuntimePaths) -> Result<Option<Self>> {
     let path = paths.runtime_dir().join("cadder-launch.lock");
-    if let Some(parent) = path.parent() {
-      create_dir_all(parent)
-        .with_context(|| format!("create launch lock directory {}", parent.display()))?;
-    }
-
+    paths
+      .ensure_dirs()
+      .context("secure the daemon launch-lock directory")?;
+    #[cfg(unix)]
+    let file = crate::ipc_unix_security::open_owner_only_lock_file(paths, &path)
+      .with_context(|| format!("open daemon launch lock {}", path.display()))?;
+    #[cfg(windows)]
+    let file = crate::ipc_windows_security::open_owner_only_lock_file(&path)
+      .with_context(|| format!("open daemon launch lock {}", path.display()))?;
+    #[cfg(not(any(unix, windows)))]
     let file = OpenOptions::new()
       .read(true)
       .write(true)
@@ -1845,18 +2266,17 @@ impl DaemonLaunchLock {
 }
 
 async fn daemon_is_ready(paths: &RuntimePaths) -> IpcClientResult<bool> {
-  let name = local_socket_name(paths).map_err(endpoint_resolution_error)?;
-  match timeout(IpcClientDeadlines::default().connect, Stream::connect(name)).await {
-    Ok(Ok(mut conn)) => match send_peer_authentication_preface(&mut conn).await {
-      Ok(()) => Ok(true),
-      Err(error) if daemon_not_ready_error(error.kind()) => Ok(false),
-      Err(error) => Err(peer_authentication_preface_error(error)),
-    },
-    Ok(Err(error)) if daemon_not_ready_error(error.kind()) => Ok(false),
-    Ok(Err(error)) => Err(connection_error(error)),
-    Err(_) => Err(daemon_readiness_timeout(
-      "Cadder could not finish probing daemon readiness before the local deadline; no daemon was started.",
-    )),
+  daemon_is_ready_with_deadlines(paths, IpcClientDeadlines::default()).await
+}
+
+async fn daemon_is_ready_with_deadlines(
+  paths: &RuntimePaths,
+  deadlines: IpcClientDeadlines,
+) -> IpcClientResult<bool> {
+  match CadderSession::connect_with_deadlines(paths, deadlines).await {
+    Ok(_) => Ok(true),
+    Err(error) if error.is_stale_instance() || error.is_daemon_unavailable() => Ok(false),
+    Err(error) => Err(error),
   }
 }
 
@@ -2072,6 +2492,265 @@ mod tests {
     daemon.stop().await;
   }
 
+  #[tokio::test]
+  async fn discovery_handshake_matching_instance_negotiates_and_dispatches() {
+    let daemon = RunningTestDaemon::start().await;
+    let mut session = CadderSession::connect(&daemon.paths).await.unwrap();
+
+    assert_eq!(
+      session.negotiated_version(),
+      SUPPORTED_PROTOCOL_VERSIONS.maximum()
+    );
+    assert_eq!(
+      session.negotiated_capabilities(),
+      OPERATION_REGISTRY
+        .advertised_capabilities(SUPPORTED_PROTOCOL_VERSIONS.maximum())
+        .unwrap()
+        .as_ref()
+    );
+    let response = session
+      .request::<_>(
+        message_types::QUERY_STATE_REQUEST,
+        message_types::QUERY_STATE_RESPONSE,
+        &QueryStateRequest {
+          request_id: "discovery-handshake-query-1".to_string(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(response.accepted);
+
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn discovery_handshake_rejects_a_stale_published_instance() {
+    let daemon = RunningTestDaemon::start().await;
+    let stale = IpcEndpointMetadata::new(&daemon.paths).unwrap();
+    let _stale_publication = IpcEndpointPublication::publish(&daemon.paths, &stale).unwrap();
+
+    let error = CadderSession::connect(&daemon.paths).await.unwrap_err();
+
+    assert!(error.is_stale_instance());
+    assert_eq!(error.code(), "stale_instance");
+    assert!(error.retryable());
+    assert!(error.request_id().is_some());
+    daemon.stop().await;
+  }
+
+  #[tokio::test]
+  async fn discovery_handshake_rereads_replaced_generation_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let listener = scripted_listener(&paths);
+    let stale_metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let replacement_metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let expected_version = replacement_metadata.supported_versions.maximum();
+    let expected_capabilities = OPERATION_REGISTRY
+      .advertised_capabilities(expected_version)
+      .unwrap();
+    let replacement_identity = ServerHandshakeIdentity::from(&replacement_metadata);
+    let stale_instance_id = stale_metadata.daemon_instance_id.clone();
+    let _stale_publication = IpcEndpointPublication::publish(&paths, &stale_metadata).unwrap();
+    let replacement_paths = paths.clone();
+    let server = tokio::spawn(async move {
+      let mut first = listener.accept().await.unwrap();
+      receive_peer_authentication_preface(&mut first)
+        .await
+        .unwrap();
+      let (first_read, mut first_write) = tokio::io::split(first);
+      let mut first_reader = FramedRead::new(first_read, BoundedNdjsonCodec::new());
+      let hello: ClientHello =
+        serde_json::from_str(&first_reader.next().await.unwrap().unwrap()).unwrap();
+      assert_eq!(hello.daemon_instance_id.as_ref(), stale_instance_id);
+
+      let _replacement_publication =
+        IpcEndpointPublication::publish(&replacement_paths, &replacement_metadata).unwrap();
+      let rejection = ServerHandshakeFrame::rejected(
+        hello.request_id,
+        replacement_identity.runtime_id.clone(),
+        replacement_identity.daemon_instance_id.clone(),
+        ProtocolError::stale_instance(),
+      );
+      write_handshake_frame(&mut first_write, &rejection)
+        .await
+        .unwrap();
+      drop(first_reader);
+      drop(first_write);
+
+      let mut second = listener.accept().await.unwrap();
+      receive_peer_authentication_preface(&mut second)
+        .await
+        .unwrap();
+      let _second = accept_scripted_handshake(second, &replacement_identity).await;
+    });
+
+    let session = CadderSession::connect(&paths).await.unwrap();
+
+    assert_eq!(session.negotiated_version(), expected_version);
+    assert_eq!(
+      session.negotiated_capabilities(),
+      expected_capabilities.as_ref()
+    );
+    drop(session);
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn discovery_handshake_reports_an_unreachable_published_endpoint_as_stale() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let _publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
+
+    let error = CadderSession::connect(&paths).await.unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::Connect,
+      "stale_instance",
+      None,
+    );
+    assert!(error.is_stale_instance());
+  }
+
+  #[test]
+  fn discovery_handshake_validates_every_accepted_server_field() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let discovery = IpcEndpointMetadata::new(&paths).unwrap();
+    let request_id = RequestId::parse("hello-validation-1").unwrap();
+    let requested = OPERATION_REGISTRY
+      .advertised_capabilities(SUPPORTED_PROTOCOL_VERSIONS.maximum())
+      .unwrap();
+    let capabilities = requested
+      .iter()
+      .filter(|capability| discovery.capabilities.contains(capability))
+      .cloned()
+      .collect::<Box<[_]>>();
+    let hello = ServerHello {
+      request_id: request_id.clone(),
+      runtime_id: discovery.runtime_id.clone().into_boxed_str(),
+      daemon_instance_id: discovery.daemon_instance_id.clone().into_boxed_str(),
+      selected_version: SUPPORTED_PROTOCOL_VERSIONS.maximum(),
+      capabilities,
+    };
+    assert!(
+      validate_server_hello(hello.clone(), &discovery, request_id.clone(), &requested).is_ok()
+    );
+
+    let mut wrong_instance = hello.clone();
+    wrong_instance.daemon_instance_id = "00000000000000000000000000000000".into();
+    let error = validate_server_hello(wrong_instance, &discovery, request_id.clone(), &requested)
+      .unwrap_err();
+    assert!(error.is_stale_instance());
+    assert_eq!(
+      error.local_error().unwrap().kind(),
+      LocalIpcErrorKind::Discovery
+    );
+
+    let mut wrong_runtime = hello.clone();
+    wrong_runtime.runtime_id = "other-runtime".into();
+    let error =
+      validate_server_hello(wrong_runtime, &discovery, request_id.clone(), &requested).unwrap_err();
+    assert!(error.is_stale_instance());
+
+    let mut wrong_request = hello.clone();
+    wrong_request.request_id = RequestId::parse("hello-validation-other").unwrap();
+    assert_eq!(
+      validate_server_hello(wrong_request, &discovery, request_id.clone(), &requested)
+        .unwrap_err()
+        .code(),
+      "protocol_violation"
+    );
+
+    let mut wrong_version = hello.clone();
+    wrong_version.selected_version = ProtocolVersion::new(
+      hello.selected_version.major(),
+      hello.selected_version.minor().checked_add(1).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+      validate_server_hello(wrong_version, &discovery, request_id.clone(), &requested)
+        .unwrap_err()
+        .code(),
+      "protocol_violation"
+    );
+
+    let mut missing_capability = hello.clone();
+    missing_capability.capabilities = missing_capability
+      .capabilities
+      .iter()
+      .skip(1)
+      .cloned()
+      .collect();
+    assert_eq!(
+      validate_server_hello(
+        missing_capability,
+        &discovery,
+        request_id.clone(),
+        &requested,
+      )
+      .unwrap_err()
+      .code(),
+      "protocol_violation"
+    );
+
+    let mut extra_capability = hello.clone();
+    extra_capability.capabilities = extra_capability
+      .capabilities
+      .iter()
+      .cloned()
+      .chain([CapabilityId::parse("unexpected-capability").unwrap()])
+      .collect();
+    assert_eq!(
+      validate_server_hello(extra_capability, &discovery, request_id.clone(), &requested)
+        .unwrap_err()
+        .code(),
+      "protocol_violation"
+    );
+
+    let mut duplicate_capability = hello;
+    duplicate_capability.capabilities = duplicate_capability
+      .capabilities
+      .iter()
+      .cloned()
+      .chain(duplicate_capability.capabilities.first().cloned())
+      .collect();
+    assert_eq!(
+      validate_server_hello(duplicate_capability, &discovery, request_id, &requested,)
+        .unwrap_err()
+        .code(),
+      "protocol_violation"
+    );
+  }
+
+  #[tokio::test]
+  async fn discovery_handshake_readiness_requires_a_server_hello() {
+    let server = ScriptedIpcServer::start_without_handshake(|conn| async move {
+      let _conn = conn;
+      pending::<()>().await;
+    });
+    let deadlines = IpcClientDeadlines {
+      connect: Duration::from_millis(25),
+      ..IpcClientDeadlines::default()
+    };
+
+    let error = daemon_is_ready_with_deadlines(&server.paths, deadlines)
+      .await
+      .unwrap_err();
+
+    assert_local_error(
+      &error,
+      LocalIpcErrorKind::Timeout,
+      IpcClientPhase::Connect,
+      "timeout",
+      None,
+    );
+    server.abort().await;
+  }
+
   #[test]
   fn daemon_launch_lock_serializes_start_attempts() {
     let temp = tempfile::tempdir().unwrap();
@@ -2271,7 +2950,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn typed_error_session_connect_is_uncorrelated_transport_error() {
+  async fn typed_error_session_requires_authoritative_discovery() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
 
@@ -2279,9 +2958,9 @@ mod tests {
 
     assert_local_error(
       &error,
-      LocalIpcErrorKind::Transport,
-      IpcClientPhase::Connect,
-      "daemon_unavailable",
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryRead,
+      "discovery_unavailable",
       None,
     );
   }
@@ -2336,7 +3015,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn typed_error_client_connect_failure_keeps_request_id() {
+  async fn typed_error_client_discovery_failure_keeps_request_id() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let client = CadderClient::new(paths);
@@ -2354,15 +3033,15 @@ mod tests {
 
     assert_local_error(
       &error,
-      LocalIpcErrorKind::Transport,
-      IpcClientPhase::Connect,
-      "daemon_unavailable",
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryRead,
+      "discovery_unavailable",
       Some("typed-connect-1"),
     );
   }
 
   #[tokio::test]
-  async fn typed_error_client_subscription_connect_failure_keeps_request_id() {
+  async fn typed_error_client_subscription_discovery_failure_keeps_request_id() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let client = CadderClient::new(paths);
@@ -2374,9 +3053,9 @@ mod tests {
 
     assert_local_error(
       &error,
-      LocalIpcErrorKind::Transport,
-      IpcClientPhase::Connect,
-      "daemon_unavailable",
+      LocalIpcErrorKind::Discovery,
+      IpcClientPhase::DiscoveryRead,
+      "discovery_unavailable",
       Some("typed-connect-subscription-1"),
     );
   }
@@ -3364,7 +4043,7 @@ mod tests {
         ))
         .run_until(shutdown_rx),
     );
-    wait_for_ready(&paths).await;
+    wait_for_discovery(&paths).await;
 
     let endpoint = discover_ipc_endpoint(&paths).unwrap();
     assert_peer_denied_without_request(&paths).await;
@@ -3439,7 +4118,7 @@ mod tests {
         .with_peer_identity_failure(io::ErrorKind::PermissionDenied)
         .run_until(shutdown_rx),
     );
-    wait_for_ready(&paths).await;
+    wait_for_discovery(&paths).await;
 
     assert_peer_denied_without_request(&paths).await;
     assert_peer_denied_without_request(&paths).await;
@@ -3875,10 +4554,16 @@ mod tests {
   }
 
   async fn connect_authenticated(paths: &RuntimePaths) -> Stream {
-    let name = local_socket_name(paths).unwrap();
+    let discovery = discover_ipc_endpoint(paths).unwrap();
+    let name = discovered_socket_name(&discovery).unwrap();
     let mut conn = Stream::connect(name).await.unwrap();
     send_peer_authentication_preface(&mut conn).await.unwrap();
-    conn
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    perform_client_handshake(&mut reader, &mut writer, &discovery)
+      .await
+      .unwrap();
+    reader.into_inner().unsplit(writer)
   }
 
   async fn read_raw_envelope(conn: &mut Stream) -> IpcEnvelope {
@@ -3918,6 +4603,7 @@ mod tests {
   struct ScriptedIpcServer {
     paths: RuntimePaths,
     task: JoinHandle<()>,
+    _publication: Option<IpcEndpointPublication>,
     _temp: tempfile::TempDir,
   }
 
@@ -3930,6 +4616,35 @@ mod tests {
       let temp = tempfile::tempdir().unwrap();
       let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
       let listener = scripted_listener(&paths);
+      let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+      let publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
+      let handshake_identity = ServerHandshakeIdentity::from(&metadata);
+      let task = tokio::spawn(async move {
+        let mut conn = listener.accept().await.unwrap();
+        receive_peer_authentication_preface(&mut conn)
+          .await
+          .unwrap();
+        let conn = accept_scripted_handshake(conn, &handshake_identity).await;
+        handler(conn).await;
+      });
+      Self {
+        paths,
+        task,
+        _publication: Some(publication),
+        _temp: temp,
+      }
+    }
+
+    fn start_without_handshake<F, Fut>(handler: F) -> Self
+    where
+      F: FnOnce(Stream) -> Fut + Send + 'static,
+      Fut: Future<Output = ()> + Send + 'static,
+    {
+      let temp = tempfile::tempdir().unwrap();
+      let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+      let listener = scripted_listener(&paths);
+      let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+      let publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
       let task = tokio::spawn(async move {
         let mut conn = listener.accept().await.unwrap();
         receive_peer_authentication_preface(&mut conn)
@@ -3940,6 +4655,7 @@ mod tests {
       Self {
         paths,
         task,
+        _publication: Some(publication),
         _temp: temp,
       }
     }
@@ -3956,15 +4672,20 @@ mod tests {
           sleep(delay).await;
         }
         let listener = scripted_listener(&server_paths);
+        let metadata = IpcEndpointMetadata::new(&server_paths).unwrap();
+        let _publication = IpcEndpointPublication::publish(&server_paths, &metadata).unwrap();
+        let handshake_identity = ServerHandshakeIdentity::from(&metadata);
         let mut conn = listener.accept().await.unwrap();
         receive_peer_authentication_preface(&mut conn)
           .await
           .unwrap();
+        let conn = accept_scripted_handshake(conn, &handshake_identity).await;
         handler(conn).await;
       });
       Self {
         paths,
         task,
+        _publication: None,
         _temp: temp,
       }
     }
@@ -3977,6 +4698,19 @@ mod tests {
       self.task.abort();
       let _ = self.task.await;
     }
+  }
+
+  async fn accept_scripted_handshake(conn: Stream, identity: &ServerHandshakeIdentity) -> Stream {
+    let (read_half, mut writer) = tokio::io::split(conn);
+    let mut reader = FramedRead::new(read_half, BoundedNdjsonCodec::new());
+    assert!(
+      accept_client_handshake(&mut reader, &mut writer, identity)
+        .await
+        .unwrap()
+        .is_some(),
+      "scripted client handshake should be accepted"
+    );
+    reader.into_inner().unsplit(writer)
   }
 
   fn scripted_listener(paths: &RuntimePaths) -> interprocess::local_socket::tokio::Listener {
@@ -4070,6 +4804,17 @@ mod tests {
     }
 
     panic!("daemon server did not become ready");
+  }
+
+  async fn wait_for_discovery(paths: &RuntimePaths) {
+    for _ in 0..50 {
+      if discover_ipc_endpoint(paths).is_ok() {
+        return;
+      }
+      sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!("daemon server did not publish IPC discovery");
   }
 
   async fn assert_peer_denied_without_request(paths: &RuntimePaths) {

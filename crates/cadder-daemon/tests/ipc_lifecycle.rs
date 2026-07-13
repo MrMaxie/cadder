@@ -1,16 +1,18 @@
 use cadder_daemon::{
   CadderClient, CadderSession, CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer,
-  DaemonState, IpcClientError, IpcClientPhase, LocalIpcErrorKind, ProcessRuntime,
-  RealCaddyResolver, RuntimePaths, RuntimeTimeouts, ensure_daemon_running,
+  DaemonState, IpcClientError, IpcClientPhase, IpcEndpoint, IpcEndpointMetadata,
+  IpcEndpointPublication, LocalIpcErrorKind, ProcessRuntime, RealCaddyResolver, RuntimePaths,
+  RuntimeTimeouts, discover_ipc_endpoint, ensure_daemon_running,
 };
 use cadder_protocol::{
-  ActivationState, BasicResponse, ConfigApplyStatus, EntrypointInstanceIdentity,
+  ActivationState, BasicResponse, ClientHello, ConfigApplyStatus, EntrypointInstanceIdentity,
   EntrypointRegistration, HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity,
-  LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity, PROTOCOL_VERSION, ProtocolCapabilities,
-  ProtocolErrorKind, ProtocolErrorResponse, QueryAutostartRequest, QueryAutostartResponse,
-  QueryIisBindingsRequest, QueryIisBindingsResponse, QueryLogsRequest, QueryLogsResponse,
-  QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse,
-  RequestId, RuntimeStatus, SetAutostartRequest, SetDomainEnabledRequest,
+  LogStreamIdentity, LogStreamStatus, OPERATION_REGISTRY, OwnerProcessIdentity, PROTOCOL_VERSION,
+  ProtocolCapabilities, ProtocolErrorKind, ProtocolErrorResponse, QueryAutostartRequest,
+  QueryAutostartResponse, QueryIisBindingsRequest, QueryIisBindingsResponse, QueryLogsRequest,
+  QueryLogsResponse, QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest,
+  RegisterEntrypointResponse, RequestId, RuntimeStatus, SUPPORTED_PROTOCOL_VERSIONS,
+  ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
   SetEntrypointEnabledRequest, SetIisHandoffRequest, SetIisHandoffResponse, ShimRunMetadata,
   SourcePath, StateChangeKind, UnregisterEntrypointRequest, message_types, new_request_id,
 };
@@ -1888,11 +1890,51 @@ async fn raw_ipc_session(
   BufReader<tokio::io::ReadHalf<Stream>>,
   tokio::io::WriteHalf<Stream>,
 ) {
-  let name = test_socket_name(paths);
+  let discovery = discover_ipc_endpoint(paths).unwrap();
+  let name = discovered_test_socket_name(&discovery);
   let mut conn = Stream::connect(name).await.unwrap();
   send_test_authentication_preface(&mut conn).await;
-  let (read_half, writer) = tokio::io::split(conn);
-  (BufReader::new(read_half), writer)
+  let (read_half, mut writer) = tokio::io::split(conn);
+  let mut reader = BufReader::new(read_half);
+  let request_id = RequestId::parse(new_request_id("raw-hello")).unwrap();
+  let hello = ClientHello {
+    request_id: request_id.clone(),
+    runtime_id: discovery.runtime_id.clone().into_boxed_str(),
+    daemon_instance_id: discovery.daemon_instance_id.clone().into_boxed_str(),
+    supported_versions: SUPPORTED_PROTOCOL_VERSIONS,
+    capabilities: OPERATION_REGISTRY
+      .advertised_capabilities(SUPPORTED_PROTOCOL_VERSIONS.maximum())
+      .unwrap(),
+  };
+  write_json_line(&mut writer, &hello).await;
+  let mut line = String::new();
+  reader.read_line(&mut line).await.unwrap();
+  let frame: ServerHandshakeFrame = serde_json::from_str(&line).unwrap();
+  match frame {
+    ServerHandshakeFrame::Accepted(server) => {
+      assert_eq!(server.request_id, request_id);
+      assert_eq!(server.runtime_id.as_ref(), discovery.runtime_id);
+      assert_eq!(
+        server.daemon_instance_id.as_ref(),
+        discovery.daemon_instance_id
+      );
+    }
+    ServerHandshakeFrame::Rejected(rejection) => {
+      panic!("raw IPC handshake was rejected: {}", rejection.error())
+    }
+  }
+  (reader, writer)
+}
+
+async fn write_json_line<W, T>(writer: &mut W, value: &T)
+where
+  W: AsyncWrite + Unpin,
+  T: Serialize,
+{
+  let rendered = serde_json::to_vec(value).unwrap();
+  writer.write_all(&rendered).await.unwrap();
+  writer.write_all(b"\n").await.unwrap();
+  writer.flush().await.unwrap();
 }
 
 async fn write_raw_envelope<W, T>(writer: &mut W, message_type: &str, payload: &T)
@@ -1925,6 +1967,7 @@ async fn read_raw_envelope(reader: &mut BufReader<tokio::io::ReadHalf<Stream>>) 
 struct ScriptedIpcPeer {
   paths: RuntimePaths,
   task: JoinHandle<()>,
+  _publication: IpcEndpointPublication,
   _temp: tempfile::TempDir,
 }
 
@@ -1937,15 +1980,19 @@ impl ScriptedIpcPeer {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let listener = scripted_listener(&paths);
+    let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
     let task = tokio::spawn(async move {
       let mut conn = listener.accept().await.unwrap();
       receive_test_authentication_preface(&mut conn).await;
+      let conn = accept_scripted_handshake(conn, &metadata).await;
       handler(conn).await;
     });
 
     Self {
       paths,
       task,
+      _publication: publication,
       _temp: temp,
     }
   }
@@ -1953,6 +2000,41 @@ impl ScriptedIpcPeer {
   async fn finish(self) {
     self.task.await.unwrap();
   }
+}
+
+async fn accept_scripted_handshake(conn: Stream, metadata: &IpcEndpointMetadata) -> Stream {
+  let (read_half, mut writer) = tokio::io::split(conn);
+  let mut reader = BufReader::new(read_half);
+  let mut line = String::new();
+  reader.read_line(&mut line).await.unwrap();
+  let hello: ClientHello = serde_json::from_str(&line).unwrap();
+  assert_eq!(hello.runtime_id.as_ref(), metadata.runtime_id);
+  assert_eq!(
+    hello.daemon_instance_id.as_ref(),
+    metadata.daemon_instance_id
+  );
+  let selected_version = hello
+    .supported_versions
+    .negotiate(metadata.supported_versions)
+    .unwrap();
+  let capabilities = OPERATION_REGISTRY
+    .negotiate_capabilities(selected_version, &hello.capabilities)
+    .unwrap()
+    .into_iter()
+    .filter(|capability| metadata.capabilities.contains(capability))
+    .collect();
+  write_json_line(
+    &mut writer,
+    &ServerHandshakeFrame::accepted(ServerHello {
+      request_id: hello.request_id,
+      runtime_id: metadata.runtime_id.clone().into_boxed_str(),
+      daemon_instance_id: metadata.daemon_instance_id.clone().into_boxed_str(),
+      selected_version,
+      capabilities,
+    }),
+  )
+  .await;
+  reader.into_inner().unsplit(writer)
 }
 
 async fn send_test_authentication_preface(conn: &mut Stream) {
@@ -1992,6 +2074,30 @@ fn scripted_listener(paths: &RuntimePaths) -> interprocess::local_socket::tokio:
   #[cfg(unix)]
   fs::set_permissions(test_socket_path(paths), fs::Permissions::from_mode(0o600)).unwrap();
   listener
+}
+
+#[cfg(unix)]
+fn discovered_test_socket_name(metadata: &IpcEndpointMetadata) -> Name<'static> {
+  match &metadata.endpoint {
+    IpcEndpoint::UnixSocket { path } => path
+      .clone()
+      .to_fs_name::<GenericFilePath>()
+      .unwrap()
+      .into_owned(),
+    IpcEndpoint::WindowsNamedPipe { .. } => panic!("unexpected Windows IPC endpoint on Unix"),
+  }
+}
+
+#[cfg(windows)]
+fn discovered_test_socket_name(metadata: &IpcEndpointMetadata) -> Name<'static> {
+  match &metadata.endpoint {
+    IpcEndpoint::WindowsNamedPipe { name } => name
+      .clone()
+      .to_ns_name::<GenericNamespaced>()
+      .unwrap()
+      .into_owned(),
+    IpcEndpoint::UnixSocket { .. } => panic!("unexpected Unix IPC endpoint on Windows"),
+  }
 }
 
 #[cfg(unix)]

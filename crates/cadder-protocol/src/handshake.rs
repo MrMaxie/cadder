@@ -202,4 +202,33 @@ mod tests {
         .is_some_and(|guidance| guidance.contains("Cadder client"))
     );
   }
+
+  #[test]
+  fn protocol_handshake_stale_instance_rejection_roundtrips_with_correlation() {
+    let frame = ServerHandshakeFrame::rejected(
+      RequestId::parse("hello-stale-1").unwrap(),
+      "runtime-1",
+      "replacement-instance",
+      ProtocolError::stale_instance(),
+    );
+    let json = serde_json::to_string(&frame).unwrap();
+    let decoded: ServerHandshakeFrame = serde_json::from_str(&json).unwrap();
+
+    let ServerHandshakeFrame::Rejected(rejection) = decoded else {
+      panic!("a stale daemon instance must reject the handshake");
+    };
+    assert_eq!(rejection.runtime_id(), "runtime-1");
+    assert_eq!(rejection.daemon_instance_id(), "replacement-instance");
+    assert_eq!(
+      rejection.error().kind,
+      crate::ProtocolErrorKind::StaleInstance
+    );
+    assert_eq!(rejection.error().code.as_str(), "stale_instance");
+    assert_eq!(
+      rejection.error().request_id.as_ref().map(RequestId::as_str),
+      Some("hello-stale-1")
+    );
+    assert!(rejection.error().retryable);
+    assert!(!rejection.error().has_legacy_version_metadata());
+  }
 }

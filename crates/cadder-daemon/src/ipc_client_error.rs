@@ -155,6 +155,14 @@ impl IpcClientError {
       Self::Local(error) => error.code() == LocalIpcErrorCode::IncompatibleProtocol,
     }
   }
+
+  /// Reports that discovery and the connected daemon identified different live instances.
+  pub fn is_stale_instance(&self) -> bool {
+    match self {
+      Self::Daemon(error) => error.kind == ProtocolErrorKind::StaleInstance,
+      Self::Local(error) => error.code() == LocalIpcErrorCode::StaleInstance,
+    }
+  }
 }
 
 pub(crate) struct LocalIpcErrorContext {
@@ -189,6 +197,7 @@ pub enum LocalIpcErrorCode {
   InvalidRuntime,
   PermissionDenied,
   ProtocolViolation,
+  StaleInstance,
   Timeout,
   TransportConnect,
   TransportRead,
@@ -214,6 +223,7 @@ impl LocalIpcErrorCode {
       Self::InvalidRuntime => "invalid_runtime",
       Self::PermissionDenied => "permission_denied",
       Self::ProtocolViolation => "protocol_violation",
+      Self::StaleInstance => "stale_instance",
       Self::Timeout => "timeout",
       Self::TransportConnect => "transport_connect",
       Self::TransportRead => "transport_read",
@@ -339,6 +349,7 @@ mod tests {
       (LocalIpcErrorCode::InvalidRuntime, "invalid_runtime"),
       (LocalIpcErrorCode::PermissionDenied, "permission_denied"),
       (LocalIpcErrorCode::ProtocolViolation, "protocol_violation"),
+      (LocalIpcErrorCode::StaleInstance, "stale_instance"),
       (LocalIpcErrorCode::Timeout, "timeout"),
       (LocalIpcErrorCode::TransportConnect, "transport_connect"),
       (LocalIpcErrorCode::TransportRead, "transport_read"),
