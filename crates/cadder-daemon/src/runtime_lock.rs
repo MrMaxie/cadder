@@ -62,10 +62,13 @@ impl DaemonLock {
         stale_owner,
         recovered_by: Box::new(metadata.clone()),
       }),
-      LockMetadataRead::Invalid { error } => Some(DaemonLockRecovery::ReplacedUnreadableMetadata {
-        error,
-        recovered_by: Box::new(metadata.clone()),
-      }),
+      LockMetadataRead::Invalid { error } => {
+        return Err(anyhow!(
+          "daemon lock metadata {} is unreadable ({error}); Cadder cannot prove the previous runtime generation is stale. Inspect the runtime with `cadder daemon status --runtime-dir \"{}\"` and preserve its files for diagnosis",
+          metadata_path.display(),
+          paths.runtime_dir().display()
+        ));
+      }
     };
 
     write_lock_metadata(&metadata_path, &metadata)
@@ -221,10 +224,6 @@ pub(crate) enum DaemonLockRecovery {
     stale_owner: Box<DaemonLockMetadata>,
     recovered_by: Box<DaemonLockMetadata>,
   },
-  ReplacedUnreadableMetadata {
-    error: String,
-    recovered_by: Box<DaemonLockMetadata>,
-  },
 }
 
 impl DaemonLockRecovery {
@@ -236,13 +235,6 @@ impl DaemonLockRecovery {
       } => format!(
         "Recovered stale daemon lock metadata: previous {} no longer held the OS lock; new {}",
         stale_owner.owner_summary(),
-        recovered_by.owner_summary()
-      ),
-      Self::ReplacedUnreadableMetadata {
-        error,
-        recovered_by,
-      } => format!(
-        "Recovered unreadable daemon lock metadata ({error}); new {}",
         recovered_by.owner_summary()
       ),
     }
@@ -447,22 +439,19 @@ mod tests {
   }
 
   #[test]
-  fn runtime_lock_recovers_unreadable_metadata() {
+  fn runtime_lock_rejects_unreadable_previous_generation() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     paths.ensure_dirs().unwrap();
     fs::write(paths.lock_metadata_path(), "{not-json").unwrap();
 
-    let lock = DaemonLock::try_acquire_for_runtime(&paths)
-      .unwrap()
-      .unwrap();
+    let error = DaemonLock::try_acquire_for_runtime(&paths).unwrap_err();
 
-    assert!(
-      lock
-        .recovery()
-        .unwrap()
-        .log_message()
-        .contains("Recovered unreadable daemon lock metadata")
+    assert!(error.to_string().contains("cannot prove"));
+    assert!(error.to_string().contains("preserve its files"));
+    assert_eq!(
+      fs::read_to_string(paths.lock_metadata_path()).unwrap(),
+      "{not-json"
     );
   }
 

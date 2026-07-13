@@ -194,6 +194,14 @@ impl RuntimePaths {
     self.runtime_dir.join("cadder.lock.json")
   }
 
+  pub fn containment_lock_path(&self) -> PathBuf {
+    self.runtime_dir.join("cadder-containment.lock")
+  }
+
+  pub fn containment_record_path(&self) -> PathBuf {
+    self.runtime_dir.join("cadder-containment.json")
+  }
+
   pub fn ipc_endpoint_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-ipc.json")
   }
@@ -346,6 +354,14 @@ mod tests {
     assert_eq!(
       first.lock_metadata_path(),
       dir.path().join("cadder.lock.json")
+    );
+    assert_eq!(
+      first.containment_lock_path(),
+      dir.path().join("cadder-containment.lock")
+    );
+    assert_eq!(
+      first.containment_record_path(),
+      dir.path().join("cadder-containment.json")
     );
     assert_eq!(
       first.ipc_endpoint_path(),

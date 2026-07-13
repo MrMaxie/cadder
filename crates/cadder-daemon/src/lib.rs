@@ -21,6 +21,7 @@ mod privilege;
 mod process_tree;
 mod runtime;
 mod runtime_file;
+mod runtime_guard_record;
 mod runtime_lock;
 mod state;
 mod storage;
@@ -53,11 +54,18 @@ pub use privilege::{
   shim_privilege_diagnostic,
 };
 pub use runtime::{CaddyRuntime, MockCaddyRuntime, ProcessRuntime, RuntimeTimeouts};
+pub use runtime_guard_record::{
+  RuntimeGuardChildIdentity, RuntimeGuardGeneration, RuntimeGuardGenerationContext,
+  RuntimeGuardGenerationLock, RuntimeGuardIdentity, RuntimeGuardImageIdentity,
+  RuntimeGuardPinnedCaddyIdentity, RuntimeGuardProcessIdentity, RuntimeGuardRecord,
+  RuntimeGuardRecordState, RuntimeGuardReplacementBinding, RuntimeGuardReplacementProof,
+  RuntimeGuardTerminalOutcome, RuntimeGuardTerminalReason,
+};
 pub use runtime_lock::DaemonLock;
 pub use state::DaemonState;
 pub use storage::RuntimeStore;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use cadder_protocol::{LogAttributionKind, LogSeverity, LogStreamIdentity};
 use std::path::PathBuf;
 use tokio::sync::watch;
@@ -84,6 +92,8 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
     return Ok(());
   };
   let lock_recovery = lock.recovery().cloned();
+  let endpoint =
+    IpcEndpointMetadata::new(&paths).context("create the daemon generation identity")?;
 
   let caddy_backend = options
     .caddy_backend
@@ -113,7 +123,7 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
     );
   }
 
-  let server = DaemonServer::new(paths, state);
+  let server = DaemonServer::new(paths, state).with_endpoint(endpoint);
   let result = server.run_until(shutdown).await;
   drop(lock);
   result

@@ -256,6 +256,7 @@ impl ShutdownTimeline {
 pub struct DaemonServer {
   paths: RuntimePaths,
   state: DaemonState,
+  endpoint: Option<IpcEndpointMetadata>,
   security_policy: IpcSecurityPolicy,
   peer_identity_resolver: IpcPeerIdentityResolver,
   limits: IpcLimits,
@@ -266,10 +267,16 @@ impl DaemonServer {
     Self {
       paths,
       state,
+      endpoint: None,
       security_policy: IpcSecurityPolicy,
       peer_identity_resolver: IpcPeerIdentityResolver::System,
       limits: IpcLimits::default(),
     }
+  }
+
+  pub(crate) fn with_endpoint(mut self, endpoint: IpcEndpointMetadata) -> Self {
+    self.endpoint = Some(endpoint);
+    self
   }
 
   #[cfg(test)]
@@ -310,8 +317,11 @@ impl DaemonServer {
       .context("secure the local IPC runtime directory")?;
     let owner_principal = IpcPrincipal::current_process(crate::current_privilege_status())
       .context("authenticate the Cadder runtime-owner identity")?;
-    let endpoint =
-      IpcEndpointMetadata::new(&self.paths).context("create the daemon discovery identity")?;
+    let endpoint = self
+      .endpoint
+      .clone()
+      .map_or_else(|| IpcEndpointMetadata::new(&self.paths), Ok)
+      .context("create the daemon discovery identity")?;
     let handshake_identity = ServerHandshakeIdentity::from(&endpoint);
     let name = local_socket_name(&self.paths)?;
     let listener_options = ListenerOptions::new().name(name).try_overwrite(true);
