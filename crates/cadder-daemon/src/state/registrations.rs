@@ -346,10 +346,9 @@ impl DaemonState {
     request: HeartbeatEntrypointRequest,
     fence: &OperationFence,
   ) -> Result<BasicResponse, CommitRejection> {
-    let registration_id = request.registration_id.clone();
     let accepted = {
       let mut inner = self.inner.lock().await;
-      fence.commit(|| {
+      fence.commit_final(|| {
         inner
           .registrations
           .get_mut(&request.registration_id)
@@ -362,15 +361,6 @@ impl DaemonState {
           .is_some()
       })?
     };
-    if accepted {
-      self
-        .publish_change_fenced(
-          StateChangeKind::RegistrationsChanged,
-          Some(registration_id),
-          fence,
-        )
-        .await?;
-    }
 
     Ok(BasicResponse {
       request_id: request.request_id,

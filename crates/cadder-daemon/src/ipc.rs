@@ -844,8 +844,8 @@ where
   } else {
     None
   };
-  if definition.name() == message_types::REGISTER_ENTRYPOINT_REQUEST {
-    return supervise_register_request(
+  if owned_mutation_uses_worker(definition.name()) {
+    return supervise_owned_mutation_request(
       reader,
       writer,
       authorized,
@@ -946,7 +946,14 @@ where
   }
 }
 
-async fn supervise_register_request<W>(
+fn owned_mutation_uses_worker(message_type: &str) -> bool {
+  matches!(
+    message_type,
+    message_types::REGISTER_ENTRYPOINT_REQUEST | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
+  )
+}
+
+async fn supervise_owned_mutation_request<W>(
   reader: &mut IpcFrameReader,
   writer: &mut W,
   authorized: &AuthorizedLegacyEnvelope<'_>,
@@ -963,42 +970,47 @@ where
     mutation_tasks,
     limits,
   } = supervision;
-  let request: RegisterEntrypointRequest = match authorized.decode() {
-    Ok(request) => request,
-    Err(error) => {
-      let response = ProtocolErrorResponse::rejected(authorized.request_id(), error);
-      write_envelope_until(
-        writer,
-        message_types::PROTOCOL_ERROR_RESPONSE,
-        &response,
-        deadline,
-        limits.write_no_progress,
-      )
-      .await?;
-      return Ok(ConnectionAction::Continue);
+  macro_rules! decode_owned_request {
+    ($request:ty, $map:expr) => {
+      match authorized.decode::<$request>() {
+        Ok(request) => $map(request),
+        Err(error) => {
+          let response = ProtocolErrorResponse::rejected(authorized.request_id(), error);
+          write_envelope_until(
+            writer,
+            message_types::PROTOCOL_ERROR_RESPONSE,
+            &response,
+            deadline,
+            limits.write_no_progress,
+          )
+          .await?;
+          return Ok(ConnectionAction::Continue);
+        }
+      }
+    };
+  }
+  let request = match authorized.definition().name() {
+    message_types::REGISTER_ENTRYPOINT_REQUEST => {
+      decode_owned_request!(RegisterEntrypointRequest, |request| {
+        OwnedMutationRequest::Register(Box::new(request))
+      })
     }
+    message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
+      decode_owned_request!(HeartbeatEntrypointRequest, OwnedMutationRequest::Heartbeat)
+    }
+    _ => unreachable!("owned mutation supervisor called for an untracked operation"),
   };
   let request_id = authorized.request_id();
+  let response_type = request.response_type();
   let worker_state = state.clone();
   let worker_fence = fence.clone();
   let worker_ownership = owned.clone();
-  let nonce = request
-    .registration
-    .entrypoint_instance
-    .shim_session_nonce
-    .clone();
   let mut worker = mutation_tasks.spawn(async move {
-    let response = worker_state
-      .register_fenced(request.request_id, request.registration, &worker_fence)
-      .await?;
-    if let Some(registration_id) = response
-      .registration_id
-      .as_ref()
-      .filter(|_| response.accepted)
-    {
-      worker_ownership.insert(registration_id.clone(), nonce);
-    }
-    Ok::<_, CommitRejection>(response)
+    #[cfg(test)]
+    sleep(limits.dispatch_delay).await;
+    request
+      .execute(worker_state, worker_ownership, worker_fence)
+      .await
   });
   let mut next_frame = Box::pin(reader.next());
   let cancellation = fence.cancellation();
@@ -1024,7 +1036,7 @@ where
       let response = result.context("registration mutation worker failed")??;
       write_envelope_until(
         writer,
-        message_types::REGISTER_ENTRYPOINT_RESPONSE,
+        response_type,
         &response,
         deadline,
         limits.write_no_progress,
@@ -1052,7 +1064,7 @@ where
         let response = result.context("registration mutation worker failed")??;
         write_envelope_until(
           writer,
-          message_types::REGISTER_ENTRYPOINT_RESPONSE,
+          response_type,
           &response,
           deadline,
           limits.write_no_progress,
@@ -1070,7 +1082,7 @@ where
               .context("registration mutation worker failed")??;
             write_envelope_until(
               writer,
-              message_types::REGISTER_ENTRYPOINT_RESPONSE,
+              response_type,
               &response,
               Instant::now() + limits.write_no_progress,
               limits.write_no_progress,
@@ -1104,7 +1116,7 @@ where
             .context("registration mutation worker failed")??;
           write_envelope_until(
             writer,
-            message_types::REGISTER_ENTRYPOINT_RESPONSE,
+            response_type,
             &response,
             Instant::now() + limits.write_no_progress,
             limits.write_no_progress,
@@ -1116,6 +1128,58 @@ where
       Ok(ConnectionAction::Close)
     }
   }
+}
+
+enum OwnedMutationRequest {
+  Register(Box<RegisterEntrypointRequest>),
+  Heartbeat(HeartbeatEntrypointRequest),
+}
+
+impl OwnedMutationRequest {
+  fn response_type(&self) -> &'static str {
+    match self {
+      Self::Register(_) => message_types::REGISTER_ENTRYPOINT_RESPONSE,
+      Self::Heartbeat(_) => message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
+    }
+  }
+
+  async fn execute(
+    self,
+    state: DaemonState,
+    ownership: ConnectionOwnership,
+    fence: OperationFence,
+  ) -> Result<OwnedMutationResponse, CommitRejection> {
+    match self {
+      Self::Register(request) => {
+        let nonce = request
+          .registration
+          .entrypoint_instance
+          .shim_session_nonce
+          .clone();
+        let response = state
+          .register_fenced(request.request_id, request.registration, &fence)
+          .await?;
+        if let Some(registration_id) = response
+          .registration_id
+          .as_ref()
+          .filter(|_| response.accepted)
+        {
+          ownership.insert(registration_id.clone(), nonce);
+        }
+        Ok(OwnedMutationResponse::Register(response))
+      }
+      Self::Heartbeat(request) => Ok(OwnedMutationResponse::Basic(
+        state.heartbeat_fenced(request, &fence).await?,
+      )),
+    }
+  }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OwnedMutationResponse {
+  Register(cadder_protocol::RegisterEntrypointResponse),
+  Basic(cadder_protocol::BasicResponse),
 }
 
 fn operation_uses_fence(definition: &cadder_protocol::OperationDefinition) -> bool {

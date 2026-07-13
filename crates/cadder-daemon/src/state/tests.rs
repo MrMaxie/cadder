@@ -1852,6 +1852,8 @@ async fn heartbeat_accepts_owner_and_rejects_wrong_nonce() {
   state
     .register("register".to_string(), registration("shim-1", "nonce-1"))
     .await;
+  let sequence_before = state.inner.lock().await.sequence;
+  let mut events = state.subscribe();
 
   let accepted = state
     .heartbeat(HeartbeatEntrypointRequest {
@@ -1870,11 +1872,56 @@ async fn heartbeat_accepts_owner_and_rejects_wrong_nonce() {
 
   assert!(accepted.accepted);
   assert_eq!(accepted.message, "Heartbeat accepted.");
+  assert_eq!(state.inner.lock().await.sequence, sequence_before);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
   assert!(!rejected.accepted);
   assert_eq!(
     rejected.message,
     "Entrypoint was not found for the requested owner."
   );
+}
+
+#[tokio::test]
+async fn revoked_heartbeat_does_not_renew_the_registration_lease() {
+  let state = state();
+  state
+    .register("register".to_string(), registration("shim-1", "nonce-1"))
+    .await;
+  let before = state
+    .inner
+    .lock()
+    .await
+    .registrations
+    .get("shim-1")
+    .unwrap()
+    .last_heartbeat_utc;
+  let fence = state.issue_operation_fence().unwrap();
+  fence.revoke();
+
+  let result = state
+    .heartbeat_fenced(
+      HeartbeatEntrypointRequest {
+        request_id: "heartbeat-revoked".to_string(),
+        registration_id: "shim-1".to_string(),
+        shim_session_nonce: "nonce-1".to_string(),
+      },
+      &fence,
+    )
+    .await;
+  let after = state
+    .inner
+    .lock()
+    .await
+    .registrations
+    .get("shim-1")
+    .unwrap()
+    .last_heartbeat_utc;
+
+  assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
+  assert_eq!(after, before);
 }
 
 #[tokio::test]
