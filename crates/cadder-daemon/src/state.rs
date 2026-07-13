@@ -7,6 +7,7 @@ use crate::{
     binding_to_view, unsupported_binding_issue,
   },
   logs::{CaddyLogStore, LogQuery},
+  operation_fence::{CommitRejection, OperationFence, OperationFenceAuthority},
   paths::RuntimePaths,
   storage::RuntimeStore,
 };
@@ -58,6 +59,7 @@ pub struct DaemonState {
   iis_store: IisMetadataStore,
   iis_operation: Arc<Mutex<()>>,
   shutdown_signal: ShutdownSignal,
+  operation_fences: OperationFenceAuthority,
 }
 
 #[derive(Debug)]

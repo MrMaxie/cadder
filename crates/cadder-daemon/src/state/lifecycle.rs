@@ -20,6 +20,7 @@ impl DaemonState {
       iis_store: IisMetadataStore::memory(),
       iis_operation: Arc::new(Mutex::new(())),
       shutdown_signal: ShutdownSignal::default(),
+      operation_fences: OperationFenceAuthority::default(),
     }
   }
 
@@ -45,7 +46,8 @@ impl DaemonState {
     state.iis_store = iis_store;
     if !handoffs.is_empty() {
       let _operation = state.config_operation.lock().await;
-      state.apply_registrations(Vec::new()).await;
+      let fence = state.issue_operation_fence()?;
+      state.apply_registrations_fenced(Vec::new(), &fence).await?;
     }
     Ok(state)
   }
@@ -66,6 +68,10 @@ impl DaemonState {
 
   pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
     self.shutdown_signal.clone()
+  }
+
+  pub(crate) fn issue_operation_fence(&self) -> Result<OperationFence, CommitRejection> {
+    self.operation_fences.issue()
   }
 
   pub fn logs(&self) -> CaddyLogStore {

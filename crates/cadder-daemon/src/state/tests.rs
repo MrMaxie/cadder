@@ -1996,6 +1996,51 @@ async fn register_revalidates_existing_owner_after_slow_adapt() {
 }
 
 #[tokio::test]
+async fn operation_fence_timeout_before_delayed_commit_preserves_state() {
+  let temp = tempfile::tempdir().unwrap();
+  let fake_caddy = fake_caddy_path(temp.path());
+  let marker = temp.path().join("adapt-started");
+  write_slow_adapt_fake_caddy(&fake_caddy, &marker);
+  let state = state_with_fake_caddy(IisProvider::fake(Vec::new()), &fake_caddy);
+  let registering_state = state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+  let mut events = state.subscribe();
+
+  let pending = tokio::spawn(async move {
+    registering_state
+      .register_fenced(
+        "operation-fence-timeout".to_string(),
+        registration("shim-1", "nonce-1"),
+        &pending_fence,
+      )
+      .await
+  });
+  wait_for_marker(&marker).await;
+  fence.revoke();
+
+  let result = pending.await.unwrap();
+  let snapshot = state.snapshot().await;
+  let history = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "operation-fence-history".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await;
+  let sequence = state.inner.lock().await.sequence;
+
+  assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
+  assert!(snapshot.registrations.is_empty());
+  assert!(history.records.is_empty());
+  assert_eq!(sequence, 0);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
 async fn runtime_control_logs_are_active_and_limit_is_clamped() {
   let state = state();
   let stream = LogStreamIdentity::runtime_control();

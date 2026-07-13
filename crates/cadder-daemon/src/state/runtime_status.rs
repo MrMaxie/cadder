@@ -52,23 +52,52 @@ impl DaemonState {
     kind: StateChangeKind,
     registration_id: Option<String>,
   ) {
+    self
+      .publish_change_inner(kind, registration_id, None)
+      .await
+      .expect("unfenced state publication cannot be rejected");
+  }
+
+  pub(super) async fn publish_change_fenced(
+    &self,
+    kind: StateChangeKind,
+    registration_id: Option<String>,
+    fence: &OperationFence,
+  ) -> Result<(), CommitRejection> {
+    self
+      .publish_change_inner(kind, registration_id, Some(fence))
+      .await
+  }
+
+  async fn publish_change_inner(
+    &self,
+    kind: StateChangeKind,
+    registration_id: Option<String>,
+    fence: Option<&OperationFence>,
+  ) -> Result<(), CommitRejection> {
     let _publish = self.publish_operation.lock().await;
-    let (sequence, registrations) = {
-      let mut inner = self.inner.lock().await;
+    let registrations = {
+      let inner = self.inner.lock().await;
+      inner.registrations.values().cloned().collect::<Vec<_>>()
+    };
+    let snapshot = self.snapshot_from_parts(registrations).await;
+    let mut inner = self.inner.lock().await;
+    let publish = || {
       inner.sequence += 1;
-      (
-        inner.sequence,
-        inner.registrations.values().cloned().collect::<Vec<_>>(),
-      )
+      let event = StateChangedEvent {
+        request_id: "state-change".to_string(),
+        sequence_number: inner.sequence,
+        change_kind: kind,
+        snapshot,
+        registration_id,
+      };
+      let _ = self.events.send(event);
     };
-    let event = StateChangedEvent {
-      request_id: "state-change".to_string(),
-      sequence_number: sequence,
-      change_kind: kind,
-      snapshot: self.snapshot_from_parts(registrations).await,
-      registration_id,
-    };
-    let _ = self.events.send(event);
+    match fence {
+      Some(fence) => fence.commit(publish)?,
+      None => publish(),
+    }
+    Ok(())
   }
 
   #[cfg(test)]

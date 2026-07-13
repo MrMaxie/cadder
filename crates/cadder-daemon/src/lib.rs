@@ -12,6 +12,7 @@ mod ipc_unix_security;
 #[cfg(windows)]
 mod ipc_windows_security;
 mod logs;
+mod operation_fence;
 mod operation_registry;
 mod paths;
 mod privilege;

@@ -8,6 +8,7 @@ use crate::{
     IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_bound_socket,
     secure_listener_options, send_peer_authentication_preface,
   },
+  operation_fence::{CommitRejection, OperationFence},
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
 use anyhow::{Context, Result};
@@ -56,6 +57,13 @@ use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
 
 type IpcFrameReader = FramedRead<tokio::io::ReadHalf<Stream>, BoundedNdjsonCodec>;
+
+#[derive(Debug, Clone, Copy)]
+struct RequestDispatchContext<'a> {
+  operation_fence: Option<&'a OperationFence>,
+  deadline: Instant,
+  limits: IpcLimits,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NegotiatedSession {
@@ -265,7 +273,6 @@ impl DaemonServer {
     }
 
     stream_cancellation.cancel();
-
     endpoint_publication
       .cleanup()
       .context("remove the current IPC discovery generation")?;
@@ -725,26 +732,52 @@ where
   let definition = authorized.definition();
   let deadline = limits.operation_deadline(definition.deadline());
   let request_id = authorized.request_id();
+  let operation_fence = if operation_uses_fence(definition) {
+    match state.issue_operation_fence() {
+      Ok(fence) => Some(fence),
+      Err(CommitRejection::Draining) => {
+        send_shutting_down(writer, request_id, limits).await?;
+        return Ok(ConnectionAction::Close);
+      }
+      Err(error) => return Err(error.into()),
+    }
+  } else {
+    None
+  };
   let mut handler = Box::pin(dispatch_authorized_request(
-    writer, state, owned, authorized, envelope, deadline, limits,
+    writer,
+    state,
+    owned,
+    authorized,
+    envelope,
+    RequestDispatchContext {
+      operation_fence: operation_fence.as_ref(),
+      deadline,
+      limits,
+    },
   ));
   let mut next_frame = Box::pin(reader.next());
 
   enum First<T> {
     Handler(T),
     Reader(ConcurrentRead),
+    Cancelled,
     Timeout,
   }
 
   let first = tokio::select! {
     biased;
     frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
+    _ = wait_for_operation_cancellation(operation_fence.as_ref()) => First::Cancelled,
     _ = sleep_until(deadline) => First::Timeout,
     result = &mut handler => First::Handler(result),
   };
 
   match first {
     First::Handler(result) => {
+      if let Some(fence) = &operation_fence {
+        fence.complete();
+      }
       let action = result?;
       drop(handler);
       drop(next_frame);
@@ -759,14 +792,22 @@ where
       drop(next_frame);
       let handler_result = tokio::select! {
         biased;
+        _ = wait_for_operation_cancellation(operation_fence.as_ref()) => None,
         _ = sleep_until(deadline) => None,
         result = &mut handler => Some(result),
       };
-      drop(handler);
 
       if let Some(result) = handler_result {
+        if let Some(fence) = &operation_fence {
+          fence.complete();
+        }
+        drop(handler);
         result?;
       } else {
+        if let Some(fence) = &operation_fence {
+          fence.revoke();
+        }
+        drop(handler);
         send_operation_timeout(writer, request_id, definition, limits).await?;
       }
       if let ConcurrentRead::Pipelined(pipelined_request_id) = concurrent {
@@ -774,12 +815,38 @@ where
       }
       Ok(ConnectionAction::Close)
     }
+    First::Cancelled => {
+      if let Some(fence) = &operation_fence {
+        fence.revoke();
+      }
+      drop(handler);
+      drop(next_frame);
+      Ok(ConnectionAction::Close)
+    }
     First::Timeout => {
+      if let Some(fence) = &operation_fence {
+        fence.revoke();
+      }
       drop(handler);
       drop(next_frame);
       send_operation_timeout(writer, request_id, definition, limits).await?;
       Ok(ConnectionAction::Close)
     }
+  }
+}
+
+fn operation_uses_fence(definition: &cadder_protocol::OperationDefinition) -> bool {
+  definition.access() == OperationAccess::Mutation
+    && definition.name() != message_types::SHUTDOWN_DAEMON_REQUEST
+}
+
+async fn wait_for_operation_cancellation(fence: Option<&OperationFence>) {
+  match fence {
+    Some(fence) => {
+      let cancellation = fence.cancellation();
+      cancellation.cancelled().await;
+    }
+    None => std::future::pending().await,
   }
 }
 
@@ -1102,6 +1169,24 @@ where
   send_late_protocol_error(writer, request_id, error, limits).await
 }
 
+async fn send_shutting_down<W>(
+  writer: &mut W,
+  request_id: Option<RequestId>,
+  limits: IpcLimits,
+) -> Result<()>
+where
+  W: AsyncWrite + Unpin,
+{
+  let error = ProtocolError::new(
+    ProtocolErrorKind::ShuttingDown,
+    ProtocolErrorCode::parse("shutting_down").expect("built-in error code is valid"),
+    "The daemon is shutting down and does not accept new mutations.",
+    Some("Wait for the daemon to stop, then start it before retrying the operation.".into()),
+    true,
+  );
+  send_late_protocol_error(writer, request_id, error, limits).await
+}
+
 async fn send_pipelined_error<W>(
   writer: &mut W,
   request_id: Option<RequestId>,
@@ -1146,12 +1231,16 @@ async fn dispatch_authorized_request<W>(
   owned: &mut ConnectionRegistrations,
   authorized: &AuthorizedLegacyEnvelope<'_>,
   envelope: &IpcEnvelope,
-  deadline: Instant,
-  limits: IpcLimits,
+  dispatch: RequestDispatchContext<'_>,
 ) -> Result<ConnectionAction>
 where
   W: AsyncWrite + Unpin,
 {
+  let RequestDispatchContext {
+    operation_fence,
+    deadline,
+    limits,
+  } = dispatch;
   macro_rules! send_response {
     ($message_type:expr, $response:expr) => {
       write_envelope_until(
@@ -1179,14 +1268,15 @@ where
   match authorized.definition().name() {
     message_types::REGISTER_ENTRYPOINT_REQUEST => {
       let request = decode_request!(RegisterEntrypointRequest);
+      let fence = mutation_fence(operation_fence)?;
       let nonce = request
         .registration
         .entrypoint_instance
         .shim_session_nonce
         .clone();
       let response = state
-        .register(request.request_id, request.registration)
-        .await;
+        .register_fenced(request.request_id, request.registration, fence)
+        .await?;
       if let Some(id) = response
         .registration_id
         .as_ref()
@@ -1198,13 +1288,15 @@ where
     }
     message_types::UNREGISTER_ENTRYPOINT_REQUEST => {
       let request = decode_request!(UnregisterEntrypointRequest);
+      let fence = mutation_fence(operation_fence)?;
       let response = state
-        .unregister(
+        .unregister_fenced(
           request.request_id,
           &request.registration_id,
           &request.shim_session_nonce,
+          fence,
         )
-        .await;
+        .await?;
       if response.accepted {
         owned.remove(&request.registration_id);
       }
@@ -1212,7 +1304,9 @@ where
     }
     message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
       let request = decode_request!(HeartbeatEntrypointRequest);
-      let response = state.heartbeat(request).await;
+      let response = state
+        .heartbeat_fenced(request, mutation_fence(operation_fence)?)
+        .await?;
       send_response!(message_types::HEARTBEAT_ENTRYPOINT_RESPONSE, response);
     }
     message_types::QUERY_STATE_REQUEST => {
@@ -1222,12 +1316,16 @@ where
     }
     message_types::SET_ENTRYPOINT_ENABLED_REQUEST => {
       let request = decode_request!(SetEntrypointEnabledRequest);
-      let response = state.set_entrypoint_enabled(request).await;
+      let response = state
+        .set_entrypoint_enabled_fenced(request, mutation_fence(operation_fence)?)
+        .await?;
       send_response!(message_types::SET_ENTRYPOINT_ENABLED_RESPONSE, response);
     }
     message_types::SET_DOMAIN_ENABLED_REQUEST => {
       let request = decode_request!(SetDomainEnabledRequest);
-      let response = state.set_domain_enabled(request).await;
+      let response = state
+        .set_domain_enabled_fenced(request, mutation_fence(operation_fence)?)
+        .await?;
       send_response!(message_types::SET_DOMAIN_ENABLED_RESPONSE, response);
     }
     message_types::QUERY_IIS_BINDINGS_REQUEST => {
@@ -1285,6 +1383,10 @@ where
   }
 
   Ok(ConnectionAction::Continue)
+}
+
+fn mutation_fence(fence: Option<&OperationFence>) -> Result<&OperationFence> {
+  fence.context("mutation dispatcher requires an operation fence")
 }
 
 async fn accept_client_handshake<W>(
@@ -3314,9 +3416,9 @@ mod tests {
     discover_ipc_endpoint, logs::LogQuery,
   };
   use cadder_protocol::{
-    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, ProtocolErrorCode,
-    ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest, QueryIisBindingsResponse,
-    QueryStateRequest, QueryStateResponse, message_types, new_request_id,
+    AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY,
+    ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest,
+    QueryIisBindingsResponse, QueryStateRequest, QueryStateResponse, message_types, new_request_id,
   };
   use std::{env, ffi::OsString, fs, future::Future, future::pending};
   use tokio::{
@@ -3325,6 +3427,32 @@ mod tests {
     task::JoinHandle,
     time::{Duration, sleep, timeout},
   };
+
+  #[test]
+  fn operation_fence_classifies_every_registered_mutation_and_shutdown_exception() {
+    let fenced = OPERATION_REGISTRY
+      .iter()
+      .filter(|definition| operation_uses_fence(definition))
+      .map(|definition| definition.name())
+      .collect::<Vec<_>>();
+    assert_eq!(
+      fenced,
+      vec![
+        message_types::REGISTER_ENTRYPOINT_REQUEST,
+        message_types::UNREGISTER_ENTRYPOINT_REQUEST,
+        message_types::HEARTBEAT_ENTRYPOINT_REQUEST,
+        message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
+        message_types::SET_DOMAIN_ENABLED_REQUEST,
+        message_types::SET_IIS_HANDOFF_REQUEST,
+        message_types::SET_AUTOSTART_REQUEST,
+      ]
+    );
+    assert!(!operation_uses_fence(
+      OPERATION_REGISTRY
+        .lookup(message_types::SHUTDOWN_DAEMON_REQUEST)
+        .unwrap()
+    ));
+  }
 
   #[tokio::test]
   async fn write_envelope_serializes_newline_delimited_json() {
