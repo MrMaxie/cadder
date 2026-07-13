@@ -3,14 +3,11 @@ use cadder_protocol::{MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, Protoco
 use chrono::{DateTime, Utc};
 use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::tokio::Stream;
-#[cfg(unix)]
-use interprocess::local_socket::tokio::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
-  env,
-  fs::{self, OpenOptions},
+  env, fs,
   io::{self, Write},
-  path::{Path, PathBuf},
+  path::PathBuf,
 };
 
 use crate::{
@@ -172,11 +169,30 @@ pub(crate) fn secure_listener_options<'a>(
 }
 
 #[cfg(not(windows))]
+#[cfg(not(unix))]
 pub(crate) fn secure_listener_options<'a>(
   options: ListenerOptions<'a>,
   _owner: &IpcPrincipal,
 ) -> io::Result<ListenerOptions<'a>> {
   Ok(options)
+}
+
+#[cfg(unix)]
+pub(crate) fn secure_listener_options<'a>(
+  options: ListenerOptions<'a>,
+  _owner: &IpcPrincipal,
+) -> io::Result<ListenerOptions<'a>> {
+  crate::ipc_unix_security::secure_listener_options(options)
+}
+
+#[cfg(unix)]
+pub(crate) fn secure_bound_socket(paths: &RuntimePaths) -> io::Result<()> {
+  crate::ipc_unix_security::secure_bound_socket(paths)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn secure_bound_socket(_paths: &RuntimePaths) -> io::Result<()> {
+  Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -388,7 +404,7 @@ impl IpcEndpointPublication {
 
   pub fn publish(paths: &RuntimePaths, metadata: &IpcEndpointMetadata) -> Result<Self> {
     let path = paths.ipc_endpoint_path();
-    write_ipc_endpoint_metadata(&path, metadata)
+    write_ipc_endpoint_metadata(paths, metadata)
       .with_context(|| format!("write IPC endpoint metadata {}", path.display()))?;
     Ok(Self { path })
   }
@@ -461,21 +477,36 @@ fn discovery_read_error(error: std::io::Error) -> IpcClientError {
   })
 }
 
-fn write_ipc_endpoint_metadata(path: &Path, metadata: &IpcEndpointMetadata) -> Result<()> {
-  if let Some(parent) = path.parent() {
-    fs::create_dir_all(parent).with_context(|| {
+fn write_ipc_endpoint_metadata(paths: &RuntimePaths, metadata: &IpcEndpointMetadata) -> Result<()> {
+  let path = paths.ipc_endpoint_path();
+  #[cfg(unix)]
+  let mut file = {
+    crate::ipc_unix_security::secure_runtime_paths(paths).with_context(|| {
       format!(
-        "create IPC endpoint metadata directory {}",
-        parent.display()
+        "secure IPC runtime directory {}",
+        paths.runtime_dir().display()
       )
     })?;
-  }
-  let mut file = OpenOptions::new()
-    .write(true)
-    .create(true)
-    .truncate(true)
-    .open(path)
-    .with_context(|| format!("open IPC endpoint metadata {}", path.display()))?;
+    crate::ipc_unix_security::open_discovery_file_for_write(paths)
+      .with_context(|| format!("open IPC endpoint metadata {}", path.display()))?
+  };
+  #[cfg(not(unix))]
+  let mut file = {
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent).with_context(|| {
+        format!(
+          "create IPC endpoint metadata directory {}",
+          parent.display()
+        )
+      })?;
+    }
+    std::fs::OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(&path)
+      .with_context(|| format!("open IPC endpoint metadata {}", path.display()))?
+  };
   serde_json::to_writer_pretty(&mut file, metadata)?;
   file.write_all(b"\n")?;
   file.sync_data()?;
@@ -484,8 +515,9 @@ fn write_ipc_endpoint_metadata(path: &Path, metadata: &IpcEndpointMetadata) -> R
 
 #[cfg(unix)]
 fn current_process_identity() -> io::Result<IpcOsIdentity> {
-  // SAFETY: `geteuid` has no preconditions and only reads process identity.
-  Ok(IpcOsIdentity::UnixUid(unsafe { libc::geteuid() }))
+  Ok(IpcOsIdentity::UnixUid(
+    crate::ipc_unix_security::current_euid(),
+  ))
 }
 
 #[cfg(windows)]
@@ -495,14 +527,7 @@ fn current_process_identity() -> io::Result<IpcOsIdentity> {
 
 #[cfg(unix)]
 fn peer_process_identity(stream: &Stream) -> io::Result<IpcOsIdentity> {
-  let credentials = stream.peer_creds()?;
-  let uid = credentials.euid().ok_or_else(|| {
-    io::Error::new(
-      io::ErrorKind::PermissionDenied,
-      "the local socket did not expose the peer effective user ID",
-    )
-  })?;
-  Ok(IpcOsIdentity::UnixUid(uid))
+  crate::ipc_unix_security::peer_euid(stream).map(IpcOsIdentity::UnixUid)
 }
 
 #[cfg(windows)]

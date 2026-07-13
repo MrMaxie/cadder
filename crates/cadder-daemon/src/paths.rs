@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
+#[cfg(not(unix))]
+use std::fs;
 use std::{
-  env, fmt, fs,
+  env, fmt,
   path::{Path, PathBuf},
   str::FromStr,
 };
@@ -105,8 +107,17 @@ impl RuntimePaths {
   }
 
   pub fn ensure_dirs(&self) -> Result<()> {
-    fs::create_dir_all(&self.runtime_dir)
-      .with_context(|| format!("create runtime directory {}", self.runtime_dir.display()))
+    #[cfg(unix)]
+    {
+      crate::ipc_unix_security::secure_runtime_paths(self)
+        .with_context(|| format!("secure runtime directory {}", self.runtime_dir.display()))
+    }
+
+    #[cfg(not(unix))]
+    {
+      fs::create_dir_all(&self.runtime_dir)
+        .with_context(|| format!("create runtime directory {}", self.runtime_dir.display()))
+    }
   }
 
   pub fn runtime_dir(&self) -> &Path {
@@ -210,7 +221,7 @@ fn validate_dev_profile_id(value: String) -> Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::ffi::OsString;
+  use std::{ffi::OsString, fs};
 
   struct EnvSnapshot {
     key: &'static str,

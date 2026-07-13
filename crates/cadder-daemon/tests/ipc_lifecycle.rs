@@ -15,19 +15,34 @@ use cadder_protocol::{
   SourcePath, StateChangeKind, UnregisterEntrypointRequest, message_types, new_request_id,
 };
 use chrono::Utc;
+#[cfg(unix)]
+use interprocess::local_socket::{GenericFilePath, ToFsName};
+#[cfg(windows)]
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{
-  GenericNamespaced, ListenerOptions, ToNsName,
+  ListenerOptions, Name,
   tokio::{Stream, prelude::*},
 };
+#[cfg(any(
+  target_os = "android",
+  target_os = "freebsd",
+  target_os = "linux",
+  target_os = "openbsd"
+))]
+use interprocess::os::unix::local_socket::ListenerOptionsExt;
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
   fs,
   future::Future,
   path::{Path, PathBuf},
   time::Duration,
 };
+#[cfg(windows)]
+use tokio::io::AsyncReadExt;
 use tokio::{
-  io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+  io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
   sync::watch,
   task::JoinHandle,
   time::sleep,
@@ -1873,16 +1888,9 @@ async fn raw_ipc_session(
   BufReader<tokio::io::ReadHalf<Stream>>,
   tokio::io::WriteHalf<Stream>,
 ) {
-  let name = paths
-    .socket_name()
-    .to_ns_name::<GenericNamespaced>()
-    .unwrap();
+  let name = test_socket_name(paths);
   let mut conn = Stream::connect(name).await.unwrap();
-  #[cfg(windows)]
-  {
-    conn.write_all(b" ").await.unwrap();
-    conn.flush().await.unwrap();
-  }
+  send_test_authentication_preface(&mut conn).await;
   let (read_half, writer) = tokio::io::split(conn);
   (BufReader::new(read_half), writer)
 }
@@ -1928,23 +1936,10 @@ impl ScriptedIpcPeer {
   {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    let name = paths
-      .socket_name()
-      .to_ns_name::<GenericNamespaced>()
-      .unwrap();
-    let listener = ListenerOptions::new()
-      .name(name)
-      .try_overwrite(true)
-      .create_tokio()
-      .unwrap();
+    let listener = scripted_listener(&paths);
     let task = tokio::spawn(async move {
       let mut conn = listener.accept().await.unwrap();
-      #[cfg(windows)]
-      {
-        let mut preface = [0_u8; 1];
-        conn.read_exact(&mut preface).await.unwrap();
-        assert_eq!(preface, [b' ']);
-      }
+      receive_test_authentication_preface(&mut conn).await;
       handler(conn).await;
     });
 
@@ -1958,6 +1953,71 @@ impl ScriptedIpcPeer {
   async fn finish(self) {
     self.task.await.unwrap();
   }
+}
+
+async fn send_test_authentication_preface(conn: &mut Stream) {
+  #[cfg(windows)]
+  {
+    conn.write_all(b" ").await.unwrap();
+    conn.flush().await.unwrap();
+  }
+  #[cfg(not(windows))]
+  let _ = conn;
+}
+
+async fn receive_test_authentication_preface(conn: &mut Stream) {
+  #[cfg(windows)]
+  {
+    let mut preface = [0_u8; 1];
+    conn.read_exact(&mut preface).await.unwrap();
+    assert_eq!(preface, [b' ']);
+  }
+  #[cfg(not(windows))]
+  let _ = conn;
+}
+
+fn scripted_listener(paths: &RuntimePaths) -> interprocess::local_socket::tokio::Listener {
+  paths.ensure_dirs().unwrap();
+  let options = ListenerOptions::new()
+    .name(test_socket_name(paths))
+    .try_overwrite(true);
+  #[cfg(any(
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "linux",
+    target_os = "openbsd"
+  ))]
+  let options = options.mode(0o600);
+  let listener = options.create_tokio().unwrap();
+  #[cfg(unix)]
+  fs::set_permissions(test_socket_path(paths), fs::Permissions::from_mode(0o600)).unwrap();
+  listener
+}
+
+#[cfg(unix)]
+fn test_socket_name(paths: &RuntimePaths) -> Name<'static> {
+  test_socket_path(paths)
+    .to_fs_name::<GenericFilePath>()
+    .unwrap()
+    .into_owned()
+}
+
+#[cfg(unix)]
+fn test_socket_path(paths: &RuntimePaths) -> PathBuf {
+  // SAFETY: `geteuid` has no preconditions and only reads the process identity.
+  let effective_uid = unsafe { libc::geteuid() };
+  Path::new("/tmp")
+    .join(format!("cadder-{effective_uid}"))
+    .join(paths.socket_name())
+}
+
+#[cfg(windows)]
+fn test_socket_name(paths: &RuntimePaths) -> Name<'static> {
+  paths
+    .socket_name()
+    .to_ns_name::<GenericNamespaced>()
+    .unwrap()
+    .into_owned()
 }
 
 async fn read_peer_request(conn: Stream) -> (String, tokio::io::WriteHalf<Stream>) {

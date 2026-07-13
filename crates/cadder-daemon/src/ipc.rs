@@ -4,8 +4,8 @@ use crate::{
   LocalIpcErrorCode, LocalIpcErrorKind, RuntimePaths, RuntimeProfile,
   ipc_client_error::LocalIpcErrorContext,
   ipc_security::{
-    IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_listener_options,
-    send_peer_authentication_preface,
+    IpcPeerIdentityResolver, receive_peer_authentication_preface, secure_bound_socket,
+    secure_listener_options, send_peer_authentication_preface,
   },
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
@@ -20,8 +20,10 @@ use cadder_protocol::{
   ensure_compatible_protocol_version, message_types,
 };
 use fs4::{FileExt, TryLockError};
+#[cfg(windows)]
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
 use interprocess::local_socket::{
-  GenericNamespaced, ListenerOptions, ToNsName,
+  ListenerOptions, Name,
   tokio::{Stream, prelude::*},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -85,15 +87,20 @@ impl DaemonServer {
   }
 
   pub async fn run_until(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
+    self
+      .paths
+      .ensure_dirs()
+      .context("secure the local IPC runtime directory")?;
     let owner_principal = IpcPrincipal::current_process(crate::current_privilege_status())
       .context("authenticate the Cadder runtime-owner identity")?;
     let endpoint = IpcEndpointMetadata::new(&self.paths, owner_principal.privilege_status());
-    let name = self.paths.socket_name().to_ns_name::<GenericNamespaced>()?;
+    let name = local_socket_name(&self.paths)?;
     let listener_options = ListenerOptions::new().name(name).try_overwrite(true);
     let listener = secure_listener_options(listener_options, &owner_principal)
       .context("restrict the local IPC listener to the runtime owner")?
       .create_tokio()
       .context("create local IPC listener")?;
+    secure_bound_socket(&self.paths).context("verify the local IPC socket permissions")?;
     let _endpoint_publication = IpcEndpointPublication::publish(&self.paths, &endpoint)?;
     let shutdown_signal = self.state.shutdown_signal();
 
@@ -135,6 +142,19 @@ impl DaemonServer {
 
     Ok(())
   }
+}
+
+#[cfg(unix)]
+fn local_socket_name(paths: &RuntimePaths) -> io::Result<Name<'static>> {
+  crate::ipc_unix_security::unix_listener_name(paths)
+}
+
+#[cfg(windows)]
+fn local_socket_name(paths: &RuntimePaths) -> io::Result<Name<'static>> {
+  paths
+    .socket_name()
+    .to_ns_name::<GenericNamespaced>()
+    .map(Name::into_owned)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -584,10 +604,7 @@ impl CadderClient {
     let prepared = PreparedClientRequest::new(message_type, response_type, request)?;
     let request_id = prepared.context.request_id.clone();
     let operation = prepared.context.operation.clone();
-    let name = self
-      .paths
-      .socket_name()
-      .to_ns_name::<GenericNamespaced>()
+    let name = local_socket_name(&self.paths)
       .map_err(endpoint_resolution_error)
       .map_err(|error| error.with_request_context(request_id.clone(), operation.clone()))?;
     let mut session = CadderSession::connect_name(name, self.deadlines)
@@ -606,10 +623,7 @@ impl CadderClient {
     )?;
     let correlation = prepared.context.request_id.clone();
     let operation = prepared.context.operation.clone();
-    let name = self
-      .paths
-      .socket_name()
-      .to_ns_name::<GenericNamespaced>()
+    let name = local_socket_name(&self.paths)
       .map_err(endpoint_resolution_error)
       .map_err(|error| error.with_request_context(correlation.clone(), operation.clone()))?;
     let session = CadderSession::connect_name(name, self.deadlines)
@@ -629,10 +643,7 @@ pub struct CadderSession {
 
 impl CadderSession {
   pub async fn connect(paths: &RuntimePaths) -> IpcClientResult<Self> {
-    let name = paths
-      .socket_name()
-      .to_ns_name::<GenericNamespaced>()
-      .map_err(endpoint_resolution_error)?;
+    let name = local_socket_name(paths).map_err(endpoint_resolution_error)?;
     Self::connect_name(name, IpcClientDeadlines::default()).await
   }
 
@@ -1771,10 +1782,7 @@ impl DaemonLaunchLock {
 }
 
 async fn daemon_is_ready(paths: &RuntimePaths) -> IpcClientResult<bool> {
-  let name = paths
-    .socket_name()
-    .to_ns_name::<GenericNamespaced>()
-    .map_err(endpoint_resolution_error)?;
+  let name = local_socket_name(paths).map_err(endpoint_resolution_error)?;
   match timeout(IpcClientDeadlines::default().connect, Stream::connect(name)).await {
     Ok(Ok(mut conn)) => match send_peer_authentication_preface(&mut conn).await {
       Ok(()) => Ok(true),
@@ -3648,15 +3656,7 @@ mod tests {
     {
       let temp = tempfile::tempdir().unwrap();
       let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-      let name = paths
-        .socket_name()
-        .to_ns_name::<GenericNamespaced>()
-        .unwrap();
-      let listener = ListenerOptions::new()
-        .name(name)
-        .try_overwrite(true)
-        .create_tokio()
-        .unwrap();
+      let listener = scripted_listener(&paths);
       let task = tokio::spawn(async move {
         let mut conn = listener.accept().await.unwrap();
         receive_peer_authentication_preface(&mut conn)
@@ -3682,15 +3682,7 @@ mod tests {
         if !delay.is_zero() {
           sleep(delay).await;
         }
-        let name = server_paths
-          .socket_name()
-          .to_ns_name::<GenericNamespaced>()
-          .unwrap();
-        let listener = ListenerOptions::new()
-          .name(name)
-          .try_overwrite(true)
-          .create_tokio()
-          .unwrap();
+        let listener = scripted_listener(&server_paths);
         let mut conn = listener.accept().await.unwrap();
         receive_peer_authentication_preface(&mut conn)
           .await
@@ -3712,6 +3704,21 @@ mod tests {
       self.task.abort();
       let _ = self.task.await;
     }
+  }
+
+  fn scripted_listener(paths: &RuntimePaths) -> interprocess::local_socket::tokio::Listener {
+    paths.ensure_dirs().unwrap();
+    let owner = IpcPrincipal::current_process(crate::current_privilege_status()).unwrap();
+    let name = local_socket_name(paths).unwrap();
+    let listener = secure_listener_options(
+      ListenerOptions::new().name(name).try_overwrite(true),
+      &owner,
+    )
+    .unwrap()
+    .create_tokio()
+    .unwrap();
+    secure_bound_socket(paths).unwrap();
+    listener
   }
 
   fn short_client_deadlines() -> IpcClientDeadlines {
@@ -3793,10 +3800,7 @@ mod tests {
   }
 
   async fn assert_peer_denied_without_request(paths: &RuntimePaths) {
-    let name = paths
-      .socket_name()
-      .to_ns_name::<GenericNamespaced>()
-      .unwrap();
+    let name = local_socket_name(paths).unwrap();
     let mut conn = Stream::connect(name).await.unwrap();
     send_peer_authentication_preface(&mut conn).await.unwrap();
     let mut byte = [0_u8; 1];

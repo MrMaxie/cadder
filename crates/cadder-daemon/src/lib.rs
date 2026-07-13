@@ -5,6 +5,8 @@ mod iis;
 mod ipc;
 mod ipc_client_error;
 mod ipc_security;
+#[cfg(unix)]
+mod ipc_unix_security;
 #[cfg(windows)]
 mod ipc_windows_security;
 mod logs;

@@ -385,10 +385,6 @@ impl LinuxEnablementState {
   fn exists(self) -> bool {
     !matches!(self, Self::Missing)
   }
-
-  fn is_valid(self) -> bool {
-    matches!(self, Self::Valid)
-  }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
