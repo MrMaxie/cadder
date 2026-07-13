@@ -20,7 +20,7 @@
 - [x] 3.3 `[IPC-005]` Bound stream records and bytes, emit heartbeats and gap outcomes, and close stalled writers (verification: `cargo test -p cadder-daemon stream_limits`)
 - [x] 3.4 `[RUN-005]` `[IPC-005]` Add cancellation/task ownership, lifecycle epochs, and per-operation commit permits that reject late mutation without invalidating unrelated work (verification: `cargo test -p cadder-daemon operation_fence`)
 - [x] 3.5 `[RUN-005]` `[IPC-009]` Implement the shared accept, request/stream, and owned-runtime shutdown phases and their fixed budgets (verification: `cargo test -p cadder-daemon shutdown_coordinator`)
-- [ ] 3.6 `[RUN-005]` `[IPC-009]` Add interruptible storage flush/join and generation-matched discovery and lock cleanup (verification: `cargo test -p cadder-daemon shutdown_storage`)
+- [x] 3.6 `[RUN-005]` `[IPC-009]` Bound interruptible storage flush and join, retain ownership while an in-progress non-interruptible durability or rollback operation finishes under fail-stop containment, and perform generation-matched discovery and lock cleanup (verification: `cargo test -p cadder-daemon shutdown_storage`)
 
 ## 4. Trusted Caddy and ownership containment
 
