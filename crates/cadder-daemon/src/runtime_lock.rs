@@ -11,15 +11,24 @@ use std::{
 };
 
 use crate::paths::RuntimePaths;
+use crate::runtime_guard_record::{RuntimeGuardReplacementBinding, RuntimeGuardReplacementProof};
 
-const LOCK_METADATA_VERSION: u16 = 2;
+const LOCK_METADATA_VERSION: u16 = 3;
 
 #[derive(Debug)]
 pub struct DaemonLock {
   _file: File,
   metadata_path: Option<PathBuf>,
   metadata_generation: Option<String>,
+  retain_metadata: bool,
   recovery: Option<DaemonLockRecovery>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DaemonLockCandidate {
+  file: File,
+  metadata_path: PathBuf,
+  previous: Option<Box<DaemonLockMetadata>>,
 }
 
 impl DaemonLock {
@@ -42,11 +51,12 @@ impl DaemonLock {
       _file: file,
       metadata_path: None,
       metadata_generation: None,
+      retain_metadata: false,
       recovery: None,
     }))
   }
 
-  pub(crate) fn try_acquire_for_runtime(paths: &RuntimePaths) -> Result<Option<Self>> {
+  pub(crate) fn try_acquire_candidate(paths: &RuntimePaths) -> Result<Option<DaemonLockCandidate>> {
     let path = paths.lock_path();
     let metadata_path = paths.lock_metadata_path();
     let file = match try_lock_file(&path)? {
@@ -54,14 +64,9 @@ impl DaemonLock {
       None => return Ok(None),
     };
 
-    let previous = read_lock_metadata(&metadata_path)?;
-    let metadata = DaemonLockMetadata::new(paths)?;
-    let recovery = match previous {
+    let previous = match read_lock_metadata(&metadata_path)? {
       LockMetadataRead::Empty => None,
-      LockMetadataRead::Valid(stale_owner) => Some(DaemonLockRecovery::ReplacedStaleOwner {
-        stale_owner,
-        recovered_by: Box::new(metadata.clone()),
-      }),
+      LockMetadataRead::Valid(stale_owner) => Some(stale_owner),
       LockMetadataRead::Invalid { error } => {
         return Err(anyhow!(
           "daemon lock metadata {} is unreadable ({error}); Cadder cannot prove the previous runtime generation is stale. Inspect the runtime with `cadder daemon status --runtime-dir \"{}\"` and preserve its files for diagnosis",
@@ -71,15 +76,53 @@ impl DaemonLock {
       }
     };
 
-    write_lock_metadata(&metadata_path, &metadata)
-      .with_context(|| format!("write daemon lock metadata {}", metadata_path.display()))?;
-
-    Ok(Some(Self {
-      _file: file,
-      metadata_path: Some(metadata_path),
-      metadata_generation: Some(metadata.owner_generation.clone()),
-      recovery,
+    Ok(Some(DaemonLockCandidate {
+      file,
+      metadata_path,
+      previous,
     }))
+  }
+
+  pub(crate) fn owner_generation(&self) -> Option<&str> {
+    self.metadata_generation.as_deref()
+  }
+
+  pub(crate) fn attach_containment(
+    &mut self,
+    binding: RuntimeGuardReplacementBinding,
+  ) -> Result<()> {
+    let path = self
+      .metadata_path
+      .as_ref()
+      .context("raw daemon locks cannot publish containment metadata")?;
+    let generation = self
+      .metadata_generation
+      .as_deref()
+      .context("daemon lock does not have an owner generation")?;
+    let LockMetadataRead::Valid(mut metadata) = read_lock_metadata(path)? else {
+      return Err(anyhow!(
+        "daemon lock metadata changed before containment binding could be published"
+      ));
+    };
+    if metadata.owner_generation != generation {
+      return Err(anyhow!(
+        "daemon lock generation changed before containment binding could be published"
+      ));
+    }
+    if binding.context.owner_generation != generation
+      || binding.context.profile != metadata.runtime_profile
+      || binding.context.runtime_id != metadata.instance_key
+    {
+      return Err(anyhow!(
+        "runtime guard binding does not identify the active daemon lock generation"
+      ));
+    }
+    metadata.containment = Some(binding);
+    metadata.predecessor_containment = None;
+    write_lock_metadata(path, &metadata)
+      .with_context(|| format!("attach containment binding to {}", path.display()))?;
+    self.retain_metadata = true;
+    Ok(())
   }
 
   pub(crate) fn recovery(&self) -> Option<&DaemonLockRecovery> {
@@ -106,8 +149,68 @@ impl DaemonLock {
   }
 }
 
+impl DaemonLockCandidate {
+  pub(crate) fn expected_containment(&self) -> Option<&RuntimeGuardReplacementBinding> {
+    self
+      .previous
+      .as_deref()
+      .and_then(DaemonLockMetadata::expected_containment)
+  }
+
+  pub(crate) fn publish_after_proof(
+    self,
+    paths: &RuntimePaths,
+    proof: RuntimeGuardReplacementProof,
+  ) -> Result<DaemonLock> {
+    let replacement_is_proven = match (&self.previous, &proof) {
+      (None, RuntimeGuardReplacementProof::FirstStart) => true,
+      (
+        Some(previous),
+        RuntimeGuardReplacementProof::PreviousGenerationTerminated { binding, .. },
+      ) => previous.expected_containment() == Some(binding.as_ref()),
+      _ => false,
+    };
+    if !replacement_is_proven {
+      return Err(anyhow!(
+        "daemon lock metadata and runtime containment proof do not identify the same previous generation; preserve the runtime files for diagnosis"
+      ));
+    }
+
+    let predecessor_containment = self
+      .previous
+      .as_deref()
+      .and_then(DaemonLockMetadata::expected_containment)
+      .cloned();
+    let mut metadata = DaemonLockMetadata::new(paths)?;
+    metadata.predecessor_containment = predecessor_containment.clone();
+    let recovery = self
+      .previous
+      .map(|stale_owner| DaemonLockRecovery::ReplacedStaleOwner {
+        stale_owner,
+        recovered_by: Box::new(metadata.clone()),
+      });
+    write_lock_metadata(&self.metadata_path, &metadata).with_context(|| {
+      format!(
+        "write daemon lock metadata {} after containment proof",
+        self.metadata_path.display()
+      )
+    })?;
+
+    Ok(DaemonLock {
+      _file: self.file,
+      metadata_path: Some(self.metadata_path),
+      metadata_generation: Some(metadata.owner_generation.clone()),
+      retain_metadata: predecessor_containment.is_some(),
+      recovery,
+    })
+  }
+}
+
 impl Drop for DaemonLock {
   fn drop(&mut self) {
+    if self.retain_metadata {
+      return;
+    }
     let (Some(path), Some(generation)) = (&self.metadata_path, &self.metadata_generation) else {
       return;
     };
@@ -136,6 +239,10 @@ pub(crate) struct DaemonLockMetadata {
   pub owner_generation: String,
   pub acquired_at_utc: DateTime<Utc>,
   pub executable_path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub containment: Option<RuntimeGuardReplacementBinding>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub predecessor_containment: Option<RuntimeGuardReplacementBinding>,
 }
 
 impl DaemonLockMetadata {
@@ -156,6 +263,8 @@ impl DaemonLockMetadata {
       executable_path: env::current_exe()
         .ok()
         .map(|path| path.display().to_string()),
+      containment: None,
+      predecessor_containment: None,
     })
   }
 
@@ -176,6 +285,13 @@ impl DaemonLockMetadata {
       self.socket_name,
       executable
     )
+  }
+
+  fn expected_containment(&self) -> Option<&RuntimeGuardReplacementBinding> {
+    self
+      .containment
+      .as_ref()
+      .or(self.predecessor_containment.as_ref())
   }
 
   fn compatibility(&self) -> LockCompatibility {
@@ -382,6 +498,7 @@ fn recovery_options(paths: &RuntimePaths) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::runtime_guard_record::RuntimeGuardGenerationLock;
 
   #[test]
   fn raw_lock_rejects_second_owner() {
@@ -397,9 +514,7 @@ mod tests {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
 
-    let _lock = DaemonLock::try_acquire_for_runtime(&paths)
-      .unwrap()
-      .unwrap();
+    let _lock = acquire_first_runtime_lock(&paths);
     let metadata = read_metadata_file(&paths);
 
     assert_eq!(
@@ -412,7 +527,7 @@ mod tests {
   }
 
   #[test]
-  fn runtime_lock_recovers_stale_owner_metadata() {
+  fn runtime_lock_candidate_preserves_stale_owner_metadata_until_proof() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     paths.ensure_dirs().unwrap();
@@ -423,19 +538,14 @@ mod tests {
     )
     .unwrap();
 
-    let lock = DaemonLock::try_acquire_for_runtime(&paths)
-      .unwrap()
-      .unwrap();
-    let recovery = lock.recovery().unwrap();
+    let candidate = DaemonLock::try_acquire_candidate(&paths).unwrap().unwrap();
+    assert!(candidate.expected_containment().is_none());
+    let error = candidate
+      .publish_after_proof(&paths, RuntimeGuardReplacementProof::FirstStart)
+      .unwrap_err();
 
-    assert!(
-      recovery
-        .log_message()
-        .contains("Recovered stale daemon lock")
-    );
-    assert!(recovery.log_message().contains("owner pid 1"));
-    let metadata = read_metadata_file(&paths);
-    assert_eq!(metadata.process_id, std::process::id());
+    assert!(error.to_string().contains("do not identify the same"));
+    assert_eq!(read_metadata_file(&paths), stale);
   }
 
   #[test]
@@ -445,7 +555,7 @@ mod tests {
     paths.ensure_dirs().unwrap();
     fs::write(paths.lock_metadata_path(), "{not-json").unwrap();
 
-    let error = DaemonLock::try_acquire_for_runtime(&paths).unwrap_err();
+    let error = DaemonLock::try_acquire_candidate(&paths).unwrap_err();
 
     assert!(error.to_string().contains("cannot prove"));
     assert!(error.to_string().contains("preserve its files"));
@@ -510,6 +620,8 @@ mod tests {
       owner_generation: "00112233445566778899aabbccddeeff".to_string(),
       acquired_at_utc: Utc::now(),
       executable_path: Some("old-cadderd".to_string()),
+      containment: None,
+      predecessor_containment: None,
     }
   }
 
@@ -518,9 +630,7 @@ mod tests {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     paths.ensure_dirs().unwrap();
-    let lock = DaemonLock::try_acquire_for_runtime(&paths)
-      .unwrap()
-      .unwrap();
+    let lock = acquire_first_runtime_lock(&paths);
     let mut replacement = read_metadata_file(&paths);
     replacement.owner_generation = "ffeeddccbbaa99887766554433221100".to_string();
     write_lock_metadata(&paths.lock_metadata_path(), &replacement).unwrap();
@@ -536,5 +646,14 @@ mod tests {
 
   fn read_metadata_file(paths: &RuntimePaths) -> DaemonLockMetadata {
     serde_json::from_str(&fs::read_to_string(paths.lock_metadata_path()).unwrap()).unwrap()
+  }
+
+  fn acquire_first_runtime_lock(paths: &RuntimePaths) -> DaemonLock {
+    let candidate = DaemonLock::try_acquire_candidate(paths).unwrap().unwrap();
+    let containment = RuntimeGuardGenerationLock::try_acquire(paths)
+      .unwrap()
+      .unwrap();
+    let proof = containment.prove_replacement(None).unwrap();
+    candidate.publish_after_proof(paths, proof).unwrap()
   }
 }

@@ -21,6 +21,9 @@ mod privilege;
 mod process_tree;
 mod runtime;
 mod runtime_file;
+mod runtime_guard;
+mod runtime_guard_identity;
+mod runtime_guard_protocol;
 mod runtime_guard_record;
 mod runtime_lock;
 mod state;
@@ -54,12 +57,18 @@ pub use privilege::{
   shim_privilege_diagnostic,
 };
 pub use runtime::{CaddyRuntime, MockCaddyRuntime, ProcessRuntime, RuntimeTimeouts};
+pub use runtime_guard::{RuntimeGuardHiddenOptions, run_runtime_guard};
+pub use runtime_guard_protocol::{
+  RUNTIME_GUARD_PROTOCOL_REVISION, RuntimeGuardBootstrapAuthenticatedResponse,
+  RuntimeGuardBootstrapRequest, RuntimeGuardCommandRequest, RuntimeGuardFinalizedResponse,
+  RuntimeGuardProtocol, RuntimeGuardProtocolError, RuntimeGuardReadyResponse, RuntimeGuardRequest,
+  RuntimeGuardResponse, RuntimeGuardStartRequest, RuntimeGuardStartedResponse,
+  RuntimeGuardStatusResponse, RuntimeGuardTerminatedResponse,
+};
 pub use runtime_guard_record::{
-  RuntimeGuardChildIdentity, RuntimeGuardGeneration, RuntimeGuardGenerationContext,
-  RuntimeGuardGenerationLock, RuntimeGuardIdentity, RuntimeGuardImageIdentity,
-  RuntimeGuardPinnedCaddyIdentity, RuntimeGuardProcessIdentity, RuntimeGuardRecord,
-  RuntimeGuardRecordState, RuntimeGuardReplacementBinding, RuntimeGuardReplacementProof,
-  RuntimeGuardTerminalOutcome, RuntimeGuardTerminalReason,
+  RuntimeGuardChildIdentity, RuntimeGuardGenerationContext, RuntimeGuardIdentity,
+  RuntimeGuardImageIdentity, RuntimeGuardPinnedCaddyIdentity, RuntimeGuardProcessIdentity,
+  RuntimeGuardRecordState, RuntimeGuardTerminalOutcome, RuntimeGuardTerminalReason,
 };
 pub use runtime_lock::DaemonLock;
 pub use state::DaemonState;
@@ -67,6 +76,8 @@ pub use storage::RuntimeStore;
 
 use anyhow::{Context, Result, bail};
 use cadder_protocol::{LogAttributionKind, LogSeverity, LogStreamIdentity};
+use runtime_guard_record::RuntimeGuardGenerationLock;
+use runtime_lock::DaemonLockCandidate;
 use std::path::PathBuf;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
@@ -80,6 +91,7 @@ pub struct DaemonOptions {
   pub runtime_profile: Option<RuntimeProfile>,
   pub real_caddy_override: Option<PathBuf>,
   pub caddy_backend: Option<CaddyBackendMode>,
+  pub runtime_guard_executable: Option<PathBuf>,
 }
 
 const DAEMON_RUNTIME_RELEASE_ATTEMPTS: usize = 50;
@@ -88,12 +100,45 @@ const DAEMON_RUNTIME_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(100
 pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>) -> Result<()> {
   let paths = RuntimePaths::resolve_with_profile(options.runtime_dir, options.runtime_profile)?;
   paths.ensure_dirs()?;
-  let Some(lock) = acquire_daemon_lock_or_wait_for_ready(&paths).await? else {
+  let Some(candidate) = acquire_daemon_lock_or_wait_for_ready(&paths).await? else {
     return Ok(());
   };
+  let containment_lock = acquire_containment_lock(&paths).await?;
+  let replacement_proof = containment_lock.prove_replacement(candidate.expected_containment())?;
+  let mut lock = candidate.publish_after_proof(&paths, replacement_proof)?;
   let lock_recovery = lock.recovery().cloned();
   let endpoint =
     IpcEndpointMetadata::new(&paths).context("create the daemon generation identity")?;
+  let guard = if let Some(executable) = options.runtime_guard_executable.as_deref() {
+    let owner_generation = lock
+      .owner_generation()
+      .context("daemon lock did not retain its owner generation")?;
+    let generation = runtime_guard_record::RuntimeGuardGeneration::random()?;
+    let context = runtime_guard_record::RuntimeGuardGenerationContext {
+      profile: paths.runtime_profile().to_string(),
+      runtime_id: paths.instance_key().to_string(),
+      daemon_instance_id: endpoint.daemon_instance_id.clone(),
+      owner_generation: owner_generation.to_string(),
+      nonce_commitment: generation.commitment().to_string(),
+    };
+    let mut guard = runtime_guard::RuntimeGuardClient::spawn_authenticated(
+      executable,
+      &paths,
+      context.clone(),
+      &generation,
+    )
+    .await?;
+    containment_lock.publish(&runtime_guard_record::RuntimeGuardRecord::preparing(
+      context,
+    ))?;
+    drop(containment_lock);
+    let binding = guard.wait_until_ready().await?;
+    lock.attach_containment(binding)?;
+    Some(guard)
+  } else {
+    drop(containment_lock);
+    None
+  };
 
   let caddy_backend = options
     .caddy_backend
@@ -125,8 +170,12 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
 
   let server = DaemonServer::new(paths, state).with_endpoint(endpoint);
   let result = server.run_until(shutdown).await;
+  let guard_result = match guard {
+    Some(guard) => guard.finalize().await,
+    None => Ok(()),
+  };
   drop(lock);
-  result
+  result.and(guard_result)
 }
 
 pub async fn wait_for_daemon_runtime_released(paths: &RuntimePaths) -> Result<()> {
@@ -160,7 +209,9 @@ async fn wait_for_daemon_runtime_released_with_limits(
   )
 }
 
-async fn acquire_daemon_lock_or_wait_for_ready(paths: &RuntimePaths) -> Result<Option<DaemonLock>> {
+async fn acquire_daemon_lock_or_wait_for_ready(
+  paths: &RuntimePaths,
+) -> Result<Option<DaemonLockCandidate>> {
   acquire_daemon_lock_or_wait_for_ready_with_limits(
     paths,
     DAEMON_RUNTIME_RELEASE_ATTEMPTS,
@@ -173,13 +224,13 @@ async fn acquire_daemon_lock_or_wait_for_ready_with_limits(
   paths: &RuntimePaths,
   attempts: usize,
   poll_interval: Duration,
-) -> Result<Option<DaemonLock>> {
+) -> Result<Option<DaemonLockCandidate>> {
   for _ in 0..attempts {
     if ipc::is_daemon_ready(paths).await? {
       return Ok(None);
     }
-    if let Some(lock) = DaemonLock::try_acquire_for_runtime(paths)? {
-      return Ok(Some(lock));
+    if let Some(candidate) = DaemonLock::try_acquire_candidate(paths)? {
+      return Ok(Some(candidate));
     }
     sleep(poll_interval).await;
   }
@@ -195,13 +246,24 @@ async fn acquire_daemon_lock_or_wait_for_ready_with_limits(
   )
 }
 
+async fn acquire_containment_lock(paths: &RuntimePaths) -> Result<RuntimeGuardGenerationLock> {
+  for _ in 0..DAEMON_RUNTIME_RELEASE_ATTEMPTS {
+    if let Some(lock) = RuntimeGuardGenerationLock::try_acquire(paths)? {
+      return Ok(lock);
+    }
+    sleep(DAEMON_RUNTIME_RELEASE_POLL_INTERVAL).await;
+  }
+
+  bail!(
+    "previous runtime guard did not release containment lock before timeout for runtime {}; leave recorded processes untouched and inspect the runtime profile before retrying",
+    paths.runtime_dir().display()
+  )
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use cadder_protocol::{
-    LogSeverity, LogStreamIdentity, QueryLogsRequest, QueryLogsResponse, QueryStateRequest,
-    QueryStateResponse, message_types, new_request_id,
-  };
+  use cadder_protocol::{QueryStateRequest, QueryStateResponse, message_types, new_request_id};
   use std::fs;
   use tokio::time::{Duration, sleep, timeout};
 
@@ -218,6 +280,7 @@ mod tests {
         real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
+        runtime_guard_executable: None,
       },
       shutdown_rx,
     ));
@@ -247,6 +310,7 @@ mod tests {
         real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
+        runtime_guard_executable: None,
       },
       shutdown_rx,
     ));
@@ -283,9 +347,13 @@ mod tests {
     let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
     state.set_runtime_store_for_test(store);
     let server = DaemonServer::new(paths.clone(), state);
-    let lock = DaemonLock::try_acquire_for_runtime(&paths)
+    let candidate = DaemonLock::try_acquire_candidate(&paths).unwrap().unwrap();
+    let containment = RuntimeGuardGenerationLock::try_acquire(&paths)
       .unwrap()
       .unwrap();
+    let proof = containment.prove_replacement(None).unwrap();
+    let lock = candidate.publish_after_proof(&paths, proof).unwrap();
+    drop(containment);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let daemon = tokio::spawn(async move {
       let _lock = lock;
@@ -331,6 +399,7 @@ mod tests {
         real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
+        runtime_guard_executable: None,
       },
       shutdown_rx,
     ));
@@ -345,6 +414,7 @@ mod tests {
           real_caddy_override: None,
           runtime_profile: None,
           caddy_backend: Some(CaddyBackendMode::Mock),
+          runtime_guard_executable: None,
         },
         second_shutdown_rx,
       ),
@@ -363,7 +433,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn run_daemon_logs_stale_lock_recovery() {
+  async fn run_daemon_rejects_stale_lock_without_containment_proof() {
     let temp = tempfile::tempdir().unwrap();
     let runtime_dir = temp.path().join("runtime");
     let paths = RuntimePaths::resolve(Some(runtime_dir.clone())).unwrap();
@@ -392,33 +462,27 @@ mod tests {
       }"#,
     )
     .unwrap();
-    let client = CadderClient::new(paths);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let daemon = tokio::spawn(run_daemon(
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let error = run_daemon(
       DaemonOptions {
         runtime_dir: Some(runtime_dir),
         real_caddy_override: None,
         runtime_profile: None,
         caddy_backend: Some(CaddyBackendMode::Mock),
+        runtime_guard_executable: None,
       },
       shutdown_rx,
-    ));
+    )
+    .await
+    .unwrap_err();
 
-    let response = wait_for_recovery_log(&client).await;
-    shutdown_tx.send(true).unwrap();
-    timeout(Duration::from_secs(2), daemon)
-      .await
-      .unwrap()
-      .unwrap()
-      .unwrap();
-
-    assert!(response.entries.iter().any(|entry| {
-      entry.operation.as_deref() == Some("runtime-lock-recovery")
-        && entry.severity == LogSeverity::Warn
-        && entry
-          .raw_message
-          .contains("Recovered stale daemon lock metadata")
-    }));
+    assert!(error.to_string().contains("do not identify the same"));
+    assert!(!paths.ipc_endpoint_path().exists());
+    assert!(
+      fs::read_to_string(paths.lock_metadata_path())
+        .unwrap()
+        .contains("00112233445566778899aabbccddeeff")
+    );
   }
 
   #[tokio::test]
@@ -518,34 +582,5 @@ mod tests {
     }
 
     panic!("daemon server did not become ready");
-  }
-
-  async fn wait_for_recovery_log(client: &CadderClient) -> QueryLogsResponse {
-    for _ in 0..50 {
-      let result = client
-        .request::<_>(
-          message_types::QUERY_LOGS_REQUEST,
-          message_types::QUERY_LOGS_RESPONSE,
-          &QueryLogsRequest {
-            request_id: new_request_id("wait-lock-recovery"),
-            stream: LogStreamIdentity::runtime_control(),
-            limit: Some(20),
-            cursor: None,
-            minimum_severity: None,
-          },
-        )
-        .await;
-      if let Ok(response) = result
-        && response
-          .entries
-          .iter()
-          .any(|entry| entry.operation.as_deref() == Some("runtime-lock-recovery"))
-      {
-        return response;
-      }
-      sleep(Duration::from_millis(20)).await;
-    }
-
-    panic!("daemon recovery log did not become available");
   }
 }

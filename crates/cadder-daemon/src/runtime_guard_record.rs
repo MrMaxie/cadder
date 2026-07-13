@@ -24,14 +24,14 @@ const TEMPORARY_SUFFIX: &str = ".tmp";
 const NONCE_COMMITMENT_DOMAIN: &[u8] = b"cadder-runtime-guard-generation-v1\0";
 
 /// A freshly generated secret and its durable one-way commitment.
-pub struct RuntimeGuardGeneration {
+pub(crate) struct RuntimeGuardGeneration {
   nonce: [u8; GENERATION_NONCE_BYTES],
   commitment: String,
 }
 
 impl RuntimeGuardGeneration {
   /// Creates an unpredictable generation secret using the operating-system RNG.
-  pub fn random() -> Result<Self> {
+  pub(crate) fn random() -> Result<Self> {
     let mut nonce = [0_u8; GENERATION_NONCE_BYTES];
     getrandom::fill(&mut nonce).map_err(|error| io::Error::other(error.to_string()))?;
     let commitment = nonce_commitment(&nonce);
@@ -39,17 +39,17 @@ impl RuntimeGuardGeneration {
   }
 
   /// Returns the lowercase hexadecimal secret for the authenticated bootstrap channel.
-  pub fn nonce(&self) -> String {
+  pub(crate) fn nonce(&self) -> String {
     hex::encode(self.nonce)
   }
 
   /// Returns the commitment stored in owner-only runtime metadata.
-  pub fn commitment(&self) -> &str {
+  pub(crate) fn commitment(&self) -> &str {
     &self.commitment
   }
 
   /// Checks a bootstrap nonce against a stored commitment without short-circuiting on bytes.
-  pub fn nonce_matches(nonce: &str, expected_commitment: &str) -> bool {
+  pub(crate) fn nonce_matches(nonce: &str, expected_commitment: &str) -> bool {
     let Ok(decoded) = hex::decode(nonce) else {
       return false;
     };
@@ -155,25 +155,25 @@ pub struct RuntimeGuardGenerationContext {
 /// Owner-only durable evidence for one runtime-guard generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeGuardRecord {
-  pub schema_version: u16,
-  pub protocol_revision: u16,
+pub(crate) struct RuntimeGuardRecord {
+  pub(crate) schema_version: u16,
+  pub(crate) protocol_revision: u16,
   #[serde(flatten)]
-  pub context: RuntimeGuardGenerationContext,
+  pub(crate) context: RuntimeGuardGenerationContext,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub guard: Option<RuntimeGuardIdentity>,
+  pub(crate) guard: Option<RuntimeGuardIdentity>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub child: Option<RuntimeGuardChildIdentity>,
-  pub state: RuntimeGuardRecordState,
+  pub(crate) child: Option<RuntimeGuardChildIdentity>,
+  pub(crate) state: RuntimeGuardRecordState,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub tree_empty: Option<bool>,
+  pub(crate) tree_empty: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub terminal: Option<RuntimeGuardTerminalOutcome>,
+  pub(crate) terminal: Option<RuntimeGuardTerminalOutcome>,
 }
 
 impl RuntimeGuardRecord {
   /// Creates the candidate-owned record written before guard bootstrap.
-  pub fn preparing(context: RuntimeGuardGenerationContext) -> Self {
+  pub(crate) fn preparing(context: RuntimeGuardGenerationContext) -> Self {
     Self {
       schema_version: RECORD_SCHEMA_VERSION,
       protocol_revision: GUARD_PROTOCOL_REVISION,
@@ -187,7 +187,7 @@ impl RuntimeGuardRecord {
   }
 
   /// Creates the guard-owned record that permits daemon readiness.
-  pub fn ready(
+  pub(crate) fn ready(
     context: RuntimeGuardGenerationContext,
     guard: RuntimeGuardIdentity,
     child: Option<RuntimeGuardChildIdentity>,
@@ -205,7 +205,7 @@ impl RuntimeGuardRecord {
   }
 
   /// Creates the terminal proof written only after joining the owned process tree.
-  pub fn terminal(
+  pub(crate) fn terminal(
     context: RuntimeGuardGenerationContext,
     guard: RuntimeGuardIdentity,
     child: Option<RuntimeGuardChildIdentity>,
@@ -224,7 +224,7 @@ impl RuntimeGuardRecord {
   }
 
   /// Returns the immutable identities that stale daemon metadata must retain.
-  pub fn replacement_binding(&self) -> Result<RuntimeGuardReplacementBinding> {
+  pub(crate) fn replacement_binding(&self) -> Result<RuntimeGuardReplacementBinding> {
     let guard = self
       .guard
       .clone()
@@ -303,15 +303,15 @@ impl RuntimeGuardRecord {
 /// Exact stale-generation identities required for replacement proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RuntimeGuardReplacementBinding {
-  pub context: RuntimeGuardGenerationContext,
-  pub guard: RuntimeGuardIdentity,
-  pub child: Option<RuntimeGuardChildIdentity>,
+pub(crate) struct RuntimeGuardReplacementBinding {
+  pub(crate) context: RuntimeGuardGenerationContext,
+  pub(crate) guard: RuntimeGuardIdentity,
+  pub(crate) child: Option<RuntimeGuardChildIdentity>,
 }
 
 /// Result of validating prior containment while holding the generation lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeGuardReplacementProof {
+pub(crate) enum RuntimeGuardReplacementProof {
   FirstStart,
   PreviousGenerationTerminated {
     binding: Box<RuntimeGuardReplacementBinding>,
@@ -321,14 +321,14 @@ pub enum RuntimeGuardReplacementProof {
 
 /// Exclusive generation lock used by both candidate daemon and live guard.
 #[derive(Debug)]
-pub struct RuntimeGuardGenerationLock {
+pub(crate) struct RuntimeGuardGenerationLock {
   paths: RuntimePaths,
   _file: File,
 }
 
 impl RuntimeGuardGenerationLock {
   /// Attempts to acquire the owner-only containment lock without waiting.
-  pub fn try_acquire(paths: &RuntimePaths) -> Result<Option<Self>> {
+  pub(crate) fn try_acquire(paths: &RuntimePaths) -> Result<Option<Self>> {
     paths.ensure_dirs()?;
     let file = open_owner_only_lock_file(paths)?;
     match FileExt::try_lock(&file) {
@@ -347,13 +347,13 @@ impl RuntimeGuardGenerationLock {
   }
 
   /// Atomically publishes a validated record while this generation owns the lock.
-  pub fn publish(&self, record: &RuntimeGuardRecord) -> Result<()> {
+  pub(crate) fn publish(&self, record: &RuntimeGuardRecord) -> Result<()> {
     record.validate_for(&self.paths)?;
     publish_record(&self.paths, record)
   }
 
   /// Proves first start or exact previous-generation termination without signalling any process.
-  pub fn prove_replacement(
+  pub(crate) fn prove_replacement(
     &self,
     expected: Option<&RuntimeGuardReplacementBinding>,
   ) -> Result<RuntimeGuardReplacementProof> {

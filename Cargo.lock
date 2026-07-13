@@ -489,6 +489,7 @@ dependencies = [
  "cadder-daemon",
  "cadder-protocol",
  "clap",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]
