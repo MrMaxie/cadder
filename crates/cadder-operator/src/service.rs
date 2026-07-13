@@ -492,7 +492,7 @@ mod tests {
     let local = ipc_error
       .local_error()
       .expect("missing daemon should remain a local IPC error");
-    assert_eq!(local.phase(), cadder_daemon::IpcClientPhase::Connect);
+    assert_eq!(local.phase(), cadder_daemon::IpcClientPhase::DiscoveryRead);
     assert!(std::error::Error::source(local).is_some());
 
     let json = serde_json::to_value(&error).unwrap();
@@ -502,7 +502,7 @@ mod tests {
       json["local_error"]["guidance"],
       local
         .guidance()
-        .expect("connect error should include guidance")
+        .expect("discovery error should include guidance")
     );
     assert_eq!(json["local_error"]["retryable"], local.retryable());
   }
