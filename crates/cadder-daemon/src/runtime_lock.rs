@@ -12,12 +12,13 @@ use std::{
 
 use crate::paths::RuntimePaths;
 
-const LOCK_METADATA_VERSION: u16 = 1;
+const LOCK_METADATA_VERSION: u16 = 2;
 
 #[derive(Debug)]
 pub struct DaemonLock {
   _file: File,
   metadata_path: Option<PathBuf>,
+  metadata_generation: Option<String>,
   recovery: Option<DaemonLockRecovery>,
 }
 
@@ -40,6 +41,7 @@ impl DaemonLock {
     Ok(Some(Self {
       _file: file,
       metadata_path: None,
+      metadata_generation: None,
       recovery: None,
     }))
   }
@@ -53,16 +55,16 @@ impl DaemonLock {
     };
 
     let previous = read_lock_metadata(&metadata_path)?;
-    let metadata = DaemonLockMetadata::new(paths);
+    let metadata = DaemonLockMetadata::new(paths)?;
     let recovery = match previous {
       LockMetadataRead::Empty => None,
       LockMetadataRead::Valid(stale_owner) => Some(DaemonLockRecovery::ReplacedStaleOwner {
         stale_owner,
-        recovered_by: metadata.clone(),
+        recovered_by: Box::new(metadata.clone()),
       }),
       LockMetadataRead::Invalid { error } => Some(DaemonLockRecovery::ReplacedUnreadableMetadata {
         error,
-        recovered_by: metadata.clone(),
+        recovered_by: Box::new(metadata.clone()),
       }),
     };
 
@@ -72,6 +74,7 @@ impl DaemonLock {
     Ok(Some(Self {
       _file: file,
       metadata_path: Some(metadata_path),
+      metadata_generation: Some(metadata.owner_generation.clone()),
       recovery,
     }))
   }
@@ -102,7 +105,13 @@ impl DaemonLock {
 
 impl Drop for DaemonLock {
   fn drop(&mut self) {
-    if let Some(path) = &self.metadata_path {
+    let (Some(path), Some(generation)) = (&self.metadata_path, &self.metadata_generation) else {
+      return;
+    };
+    let Ok(LockMetadataRead::Valid(current)) = read_lock_metadata(path) else {
+      return;
+    };
+    if current.owner_generation == *generation {
       let _ = fs::remove_file(path);
     }
   }
@@ -121,13 +130,14 @@ pub(crate) struct DaemonLockMetadata {
   pub instance_key: String,
   pub socket_name: String,
   pub process_id: u32,
+  pub owner_generation: String,
   pub acquired_at_utc: DateTime<Utc>,
   pub executable_path: Option<String>,
 }
 
 impl DaemonLockMetadata {
-  fn new(paths: &RuntimePaths) -> Self {
-    Self {
+  fn new(paths: &RuntimePaths) -> Result<Self> {
+    Ok(Self {
       metadata_version: LOCK_METADATA_VERSION,
       cadder_version: env!("CARGO_PKG_VERSION").to_string(),
       protocol_version: PROTOCOL_VERSION,
@@ -138,11 +148,12 @@ impl DaemonLockMetadata {
       instance_key: paths.instance_key().to_string(),
       socket_name: paths.socket_name().to_string(),
       process_id: std::process::id(),
+      owner_generation: new_owner_generation()?,
       acquired_at_utc: Utc::now(),
       executable_path: env::current_exe()
         .ok()
         .map(|path| path.display().to_string()),
-    }
+    })
   }
 
   fn owner_summary(&self) -> String {
@@ -207,12 +218,12 @@ impl DaemonLockMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DaemonLockRecovery {
   ReplacedStaleOwner {
-    stale_owner: DaemonLockMetadata,
-    recovered_by: DaemonLockMetadata,
+    stale_owner: Box<DaemonLockMetadata>,
+    recovered_by: Box<DaemonLockMetadata>,
   },
   ReplacedUnreadableMetadata {
     error: String,
-    recovered_by: DaemonLockMetadata,
+    recovered_by: Box<DaemonLockMetadata>,
   },
 }
 
@@ -238,6 +249,12 @@ impl DaemonLockRecovery {
   }
 }
 
+fn new_owner_generation() -> Result<String> {
+  let mut bytes = [0_u8; 16];
+  getrandom::fill(&mut bytes).map_err(|error| anyhow!(error.to_string()))?;
+  Ok(hex::encode(bytes))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LockCompatibility {
   Compatible(Option<String>),
@@ -247,7 +264,7 @@ enum LockCompatibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LockMetadataRead {
   Empty,
-  Valid(DaemonLockMetadata),
+  Valid(Box<DaemonLockMetadata>),
   Invalid { error: String },
 }
 
@@ -277,7 +294,7 @@ fn read_lock_metadata(path: &Path) -> Result<LockMetadataRead> {
   match fs::read_to_string(path) {
     Ok(content) if content.trim().is_empty() => Ok(LockMetadataRead::Empty),
     Ok(content) => match serde_json::from_str(content.trim()) {
-      Ok(metadata) => Ok(LockMetadataRead::Valid(metadata)),
+      Ok(metadata) => Ok(LockMetadataRead::Valid(Box::new(metadata))),
       Err(error) => Ok(LockMetadataRead::Invalid {
         error: error.to_string(),
       }),
@@ -501,9 +518,31 @@ mod tests {
       instance_key: paths.instance_key().to_string(),
       socket_name: paths.socket_name().to_string(),
       process_id,
+      owner_generation: "00112233445566778899aabbccddeeff".to_string(),
       acquired_at_utc: Utc::now(),
       executable_path: Some("old-cadderd".to_string()),
     }
+  }
+
+  #[test]
+  fn shutdown_storage_stale_lock_guard_does_not_remove_replacement_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let lock = DaemonLock::try_acquire_for_runtime(&paths)
+      .unwrap()
+      .unwrap();
+    let mut replacement = read_metadata_file(&paths);
+    replacement.owner_generation = "ffeeddccbbaa99887766554433221100".to_string();
+    write_lock_metadata(&paths.lock_metadata_path(), &replacement).unwrap();
+
+    drop(lock);
+
+    assert!(paths.lock_metadata_path().exists());
+    assert_eq!(
+      read_metadata_file(&paths).owner_generation,
+      replacement.owner_generation
+    );
   }
 
   fn read_metadata_file(paths: &RuntimePaths) -> DaemonLockMetadata {

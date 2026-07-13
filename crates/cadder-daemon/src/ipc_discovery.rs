@@ -17,6 +17,7 @@ use std::{
   io::{self, Write},
   path::{Path, PathBuf},
 };
+use tokio::time::{Instant, timeout_at};
 
 const IPC_DISCOVERY_SCHEMA_VERSION: u16 = 2;
 const DISCOVERY_TEMP_PREFIX: &str = ".cadder-ipc.";
@@ -138,6 +139,40 @@ impl IpcEndpointPublication {
     self.cleanup_with(cleanup_matching_publication)
   }
 
+  /// Removes the current generation within the normal budget or retains process ownership
+  /// until the non-interruptible filesystem cleanup finishes.
+  pub(crate) async fn cleanup_until(&mut self, deadline: Instant) -> Result<()> {
+    if !self.active {
+      return Ok(());
+    }
+    let paths = self.paths.clone();
+    let runtime_id = self.runtime_id.clone();
+    let daemon_instance_id = self.daemon_instance_id.clone();
+    let publication_generation = self.publication_generation.clone();
+    let mut cleanup = tokio::task::spawn_blocking(move || {
+      cleanup_publication_owned(
+        &paths,
+        &runtime_id,
+        &daemon_instance_id,
+        &publication_generation,
+      )
+    });
+
+    if let Ok(joined) = timeout_at(deadline, &mut cleanup).await {
+      joined.context("join IPC discovery cleanup task")??;
+      self.active = false;
+      return Ok(());
+    }
+
+    cleanup
+      .await
+      .context("join contained IPC discovery cleanup task")??;
+    self.active = false;
+    bail!(
+      "IPC discovery cleanup exceeded its normal shutdown budget and completed under fail-stop containment"
+    )
+  }
+
   fn cleanup_with(
     &mut self,
     cleanup: impl FnOnce(&RuntimePaths, &str, &str, &str) -> Result<()>,
@@ -159,6 +194,26 @@ impl IpcEndpointPublication {
     self.active = false;
     Ok(())
   }
+}
+
+fn cleanup_publication_owned(
+  paths: &RuntimePaths,
+  runtime_id: &str,
+  daemon_instance_id: &str,
+  publication_generation: &str,
+) -> Result<()> {
+  let lock = open_publication_lock(paths)?;
+  FileExt::lock(&lock)?;
+  let result = cleanup_matching_publication(
+    paths,
+    runtime_id,
+    daemon_instance_id,
+    publication_generation,
+  );
+  let unlocked = FileExt::unlock(&lock);
+  result?;
+  unlocked?;
+  Ok(())
 }
 
 impl Drop for IpcEndpointPublication {
@@ -613,6 +668,46 @@ mod tests {
     assert!(paths.ipc_discovery_lock_path().exists());
   }
 
+  #[tokio::test]
+  async fn shutdown_storage_cleanup_until_removes_the_owned_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let mut publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
+
+    publication
+      .cleanup_until(Instant::now() + tokio::time::Duration::from_secs(1))
+      .await
+      .unwrap();
+
+    assert!(!paths.ipc_endpoint_path().exists());
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn shutdown_storage_cleanup_retains_ownership_after_the_normal_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let metadata = IpcEndpointMetadata::new(&paths).unwrap();
+    let publication = IpcEndpointPublication::publish(&paths, &metadata).unwrap();
+    let lock = open_publication_lock(&paths).unwrap();
+    FileExt::lock(&lock).unwrap();
+    let cleanup = tokio::spawn(async move {
+      let mut publication = publication;
+      publication
+        .cleanup_until(Instant::now() + tokio::time::Duration::from_millis(25))
+        .await
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(75)).await;
+    assert!(!cleanup.is_finished());
+    assert!(paths.ipc_endpoint_path().exists());
+
+    FileExt::unlock(&lock).unwrap();
+    let error = cleanup.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("fail-stop containment"));
+    assert!(!paths.ipc_endpoint_path().exists());
+  }
+
   #[test]
   fn discovery_publication_failure_before_replace_preserves_previous_generation() {
     let temp = tempfile::tempdir().unwrap();
@@ -654,7 +749,7 @@ mod tests {
   }
 
   #[test]
-  fn discovery_publication_old_guard_never_removes_a_new_generation() {
+  fn shutdown_storage_old_discovery_guard_never_removes_a_new_generation() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let first = IpcEndpointMetadata::new(&paths).unwrap();

@@ -113,7 +113,7 @@ fn wire_compatibility_public_response_dtos_accept_recursive_additions() {
       }]
     },
     "storage": {
-      "backend": "sqlite",
+      "backend": "files",
       "path": null,
       "schemaVersion": 1,
       "diagnostics": []
@@ -186,7 +186,7 @@ fn wire_compatibility_public_response_dtos_accept_recursive_additions() {
       "payload": "retained-payload"
     }],
     "storage": {
-      "backend": "sqlite",
+      "backend": "files",
       "path": null,
       "schemaVersion": 1,
       "diagnostics": []

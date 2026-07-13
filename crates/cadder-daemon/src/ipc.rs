@@ -148,6 +148,8 @@ struct IpcLimits {
   shutdown_handler_grace: Duration,
   shutdown_connection_abort_join: Duration,
   shutdown_runtime: Duration,
+  shutdown_storage: Duration,
+  shutdown_cleanup: Duration,
   #[cfg(test)]
   dispatch_delay: Duration,
 }
@@ -170,6 +172,8 @@ impl Default for IpcLimits {
       shutdown_handler_grace: Duration::from_secs(8),
       shutdown_connection_abort_join: Duration::from_secs(1),
       shutdown_runtime: Duration::from_secs(10),
+      shutdown_storage: Duration::from_secs(5),
+      shutdown_cleanup: Duration::from_secs(5),
       #[cfg(test)]
       dispatch_delay: Duration::ZERO,
     }
@@ -400,14 +404,23 @@ impl DaemonServer {
     if !runtime_shutdown.runtime_quiescent {
       self.state.contain_runtime_fail_stop().await;
     }
+    let storage_deadline = Instant::now() + self.limits.shutdown_storage;
+    let storage_shutdown = match self.state.shutdown_storage_until(storage_deadline).await {
+      Ok(true) => Ok(()),
+      Ok(false) => self.state.contain_storage_shutdown().await,
+      Err(error) => Err(error),
+    };
+    let cleanup_deadline = Instant::now() + self.limits.shutdown_cleanup;
     let cleanup = endpoint_publication
-      .cleanup()
+      .cleanup_until(cleanup_deadline)
+      .await
       .context("remove the current IPC discovery generation");
     if !runtime_shutdown.response.accepted {
       cleanup?;
       anyhow::bail!(runtime_shutdown.response.message);
     }
     cleanup?;
+    storage_shutdown.context("flush and join runtime storage")?;
     if let Some(error) = handler_failure {
       return Err(error).context("drain local IPC connection tasks");
     }

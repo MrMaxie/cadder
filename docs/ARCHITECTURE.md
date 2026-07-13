@@ -6,7 +6,7 @@ Cadder v1.0 is scoped around a small, testable runtime topology:
 - `caddy`: PATH-facing Caddy-compatible shim.
 - `cadder`: operator executable with CLI and TUI workflows.
 
-The target product contract is limited to the daemon, shim, operator CLI, and TUI. Future Web and Tauri GUI surfaces require a new OpenSpec change and must reuse the daemon protocol and shared operator view-model contracts. The active OpenSpec change `reset-cadder-architecture` is authoritative when this document and OpenSpec disagree.
+The product contract is limited to the daemon, shim, operator CLI, and TUI. Future Web and Tauri GUI surfaces require a new OpenSpec change and reuse the daemon protocol and shared operator view-model contracts. The specifications in `openspec/specs/` are authoritative when this document and OpenSpec disagree.
 
 ## Process Roles
 
@@ -26,7 +26,9 @@ The daemon owns:
 - a lockfile guarded by `fs4`, preventing multiple daemons for the same runtime directory;
 - a local IPC socket name derived from the runtime directory;
 - an effective generated Caddy JSON config file;
-- daemon metadata, durable SQLite runtime storage, and bounded in-memory state.
+- ephemeral daemon metadata and bounded in-memory state.
+
+Durable profile data uses the platform's per-user local-data directory. Runtime overrides keep test and custom-deployment data isolated without mixing durable files with sockets or process ownership files.
 
 Direct `cadderd` execution is the foreground diagnostic path. Explicit client-triggered starts use the detached background launch contract, redirect stdio away from the caller, and wait for the runtime socket before reporting success. Restart flows first request shutdown, then wait for the previous owner to release both the socket and runtime lock before launching the next daemon.
 
@@ -93,9 +95,11 @@ Runtime operations start the owned real Caddy process with the generated config 
 
 ## Durable Runtime Storage
 
-Cadder persists runtime history in `runtime.sqlite3` under the runtime directory. The daemon owns schema creation and migration for this database. The initial schema stores history records for registration lifecycle events, activation toggles, daemon shutdown, autostart changes, IIS handoff activity, and other runtime events. History retention keeps the most recent 10,000 records and prunes older rows after successful writes.
+Cadder stores durable profile data in owner-protected files. Versioned JSON documents hold the manifest, snapshots, indexes, and stream metadata. Append-only JSON Lines segments hold state transactions with history and operational logs. Each transaction record has a sequence number, checksum, previous-record hash, and terminating LF. The daemon flushes a complete record before publishing the corresponding state change in memory.
 
-The durable store complements, but does not replace, in-memory daemon state. Current registrations, active log buffers, process handles, subscriptions, and live Caddy runtime ownership remain in memory. If the database contains a schema version newer than the running daemon supports, Cadder reports storage as unavailable with a diagnostic instead of rewriting the file.
+One file-store worker owns `storage.lock` and serializes commits, queries, maintenance, and shutdown. Shutdown closes admission, drains accepted records, flushes active segments, and joins the worker before the daemon removes IPC discovery or releases process ownership. If a durability call exceeds its normal budget, Cadder keeps ownership until the worker finishes.
+
+The store rejects unsupported schemas and invalid complete records. After a crash, it may remove only an incomplete final line. Corrupt authoritative files remain available as owner-protected recovery evidence. Live process handles, subscriptions, connection leases, and daemon-instance ownership stay in memory and are never restored as durable leases.
 
 ## Windows IIS Handoff
 

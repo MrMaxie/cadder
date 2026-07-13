@@ -686,8 +686,8 @@ mod tests {
       runtime: runtime_state.clone(),
       config: config_state.clone(),
       storage: Some(StorageState {
-        backend: "sqlite".to_string(),
-        path: Some("runtime.sqlite3".to_string()),
+        backend: "files".to_string(),
+        path: None,
         schema_version: 1,
         diagnostics: Vec::new(),
       }),
@@ -942,8 +942,8 @@ mod tests {
         }],
       },
       storage: Some(StorageState {
-        backend: "sqlite".to_string(),
-        path: Some("runtime.sqlite3".to_string()),
+        backend: "files".to_string(),
+        path: None,
         schema_version: 1,
         diagnostics: vec![RuntimeDiagnostic {
           code: "storage-ok".to_string(),
@@ -1080,8 +1080,8 @@ mod tests {
         payload: serde_json::json!({ "status": "running" }),
       }],
       storage: Some(StorageState {
-        backend: "sqlite".to_string(),
-        path: Some("runtime.sqlite3".to_string()),
+        backend: "files".to_string(),
+        path: None,
         schema_version: 1,
         diagnostics: Vec::new(),
       }),

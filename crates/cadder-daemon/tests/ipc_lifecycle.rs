@@ -179,7 +179,7 @@ async fn raw_ipc_registration_records_history_in_memory_storage() {
   assert!(response.accepted, "{}", response.message);
   assert_eq!(snapshot.registrations.len(), 1);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
-  assert_eq!(storage.backend, "sqlite");
+  assert_eq!(storage.backend, "memory");
   assert!(storage.path.is_none());
   assert!(history.records.iter().any(|record| {
     record.registration_id.as_deref() == Some("shim-raw")

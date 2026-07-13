@@ -33,7 +33,7 @@ impl DaemonState {
   ) -> Result<Self> {
     crate::runtime_file::cleanup_stale_config_candidates(&paths)?;
     let iis_store = IisMetadataStore::load(paths.metadata_path()).await?;
-    let store = RuntimeStore::open(paths.storage_path());
+    let store = RuntimeStore::try_open(paths.storage_paths())?;
     let handoffs = iis_store.snapshot().await;
     for (binding_id, restore) in &handoffs {
       let backend_binding = legacy_backend_binding(restore);
@@ -89,6 +89,11 @@ impl DaemonState {
   #[cfg(test)]
   pub(crate) fn set_registration_publish_hook(&mut self, hook: RegistrationPublishTestHook) {
     self.registration_publish_hook = Some(hook);
+  }
+
+  #[cfg(test)]
+  pub(crate) fn set_runtime_store_for_test(&mut self, store: RuntimeStore) {
+    self.store = store;
   }
 
   pub fn logs(&self) -> CaddyLogStore {

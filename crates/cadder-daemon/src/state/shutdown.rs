@@ -96,23 +96,36 @@ impl DaemonState {
     }
   }
 
+  pub(crate) async fn shutdown_storage_until(&self, deadline: Instant) -> anyhow::Result<bool> {
+    self.store.shutdown_until(deadline).await
+  }
+
+  pub(crate) async fn contain_storage_shutdown(&self) -> anyhow::Result<()> {
+    self.store.contain_shutdown().await
+  }
+
   fn finish_shutdown(&self, result: anyhow::Result<()>) -> BasicResponse {
-    if result.is_ok() {
-      self.begin_operation_drain();
-      self.store.record_history(
-        HistoryKind::Runtime,
-        "Daemon shutdown requested.",
-        None,
-        None,
-        &serde_json::json!({ "accepted": true }),
-      );
+    if let Err(error) = result {
+      return BasicResponse {
+        request_id: "shutdown".to_string(),
+        accepted: false,
+        message: error.to_string(),
+      };
     }
+    if let Err(error) = self.store.enqueue_history_for_shutdown(
+      HistoryKind::Runtime,
+      "Daemon shutdown requested.",
+      &serde_json::json!({ "accepted": true }),
+    ) {
+      return shutdown_failure(&format!(
+        "Daemon shutdown could not queue its final history record: {error:#}"
+      ));
+    }
+    self.begin_operation_drain();
     BasicResponse {
       request_id: "shutdown".to_string(),
-      accepted: result.is_ok(),
-      message: result
-        .map(|_| "Daemon shutdown requested.".to_string())
-        .unwrap_or_else(|error| error.to_string()),
+      accepted: true,
+      message: "Daemon shutdown requested.".to_string(),
     }
   }
 

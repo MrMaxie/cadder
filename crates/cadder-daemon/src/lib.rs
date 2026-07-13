@@ -44,7 +44,7 @@ pub use ipc_security::{
   IpcAccessDecision, IpcOperation, IpcOperationKind, IpcPrincipal, IpcSecurityPolicy,
 };
 pub use logs::{CaddyLogStore, Redactor};
-pub use paths::{RuntimePaths, RuntimeProfile};
+pub use paths::{RuntimePaths, RuntimeProfile, StoragePaths};
 pub use privilege::{
   PrivilegeDiagnostic, PrivilegeStatus, current_privilege_status,
   elevated_management_surface_diagnostic, management_surface_privilege_diagnostic,
@@ -221,6 +221,90 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn run_daemon_shutdown_storage_flushes_before_runtime_release() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_dir = temp.path().join("runtime");
+    let paths = RuntimePaths::resolve(Some(runtime_dir.clone())).unwrap();
+    let client = CadderClient::new(paths.clone());
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let daemon = tokio::spawn(run_daemon(
+      DaemonOptions {
+        runtime_dir: Some(runtime_dir),
+        real_caddy_command: None,
+        runtime_profile: None,
+        caddy_backend: Some(CaddyBackendMode::Mock),
+      },
+      shutdown_rx,
+    ));
+
+    wait_for_query_state(&client).await;
+    shutdown_tx.send(true).unwrap();
+    timeout(Duration::from_secs(2), daemon)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+
+    assert!(!paths.ipc_endpoint_path().exists());
+    let store = RuntimeStore::open(paths.storage_paths());
+    assert_eq!(store.state().backend, "files");
+    let history = store
+      .query_history(Some(cadder_protocol::HistoryKind::Runtime), 10)
+      .await;
+    assert!(
+      history
+        .iter()
+        .any(|record| record.summary == "Daemon shutdown requested.")
+    );
+    store.contain_shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn run_daemon_shutdown_storage_retains_discovery_and_lock_until_flush_finishes() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let client = CadderClient::new(paths.clone());
+    let (store, release_storage) = RuntimeStore::memory_stalled_for_test(1);
+    let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+    state.set_runtime_store_for_test(store);
+    let server = DaemonServer::new(paths.clone(), state);
+    let lock = DaemonLock::try_acquire_for_runtime(&paths)
+      .unwrap()
+      .unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let daemon = tokio::spawn(async move {
+      let _lock = lock;
+      server.run_until(shutdown_rx).await
+    });
+
+    wait_for_query_state(&client).await;
+    shutdown_tx.send(true).unwrap();
+    sleep(Duration::from_millis(75)).await;
+
+    assert!(paths.ipc_endpoint_path().exists());
+    assert!(
+      DaemonLock::try_acquire(paths.lock_path())
+        .unwrap()
+        .is_none()
+    );
+
+    release_storage.send(()).unwrap();
+    timeout(Duration::from_secs(2), daemon)
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+
+    assert!(!paths.ipc_endpoint_path().exists());
+    assert!(
+      DaemonLock::try_acquire(paths.lock_path())
+        .unwrap()
+        .is_some()
+    );
+  }
+
+  #[tokio::test]
   async fn run_daemon_returns_ok_when_runtime_already_has_healthy_socket() {
     let temp = tempfile::tempdir().unwrap();
     let runtime_dir = temp.path().join("runtime");
@@ -273,7 +357,7 @@ mod tests {
     fs::write(
       paths.lock_metadata_path(),
       r#"{
-        "metadataVersion": 1,
+        "metadataVersion": 2,
         "cadderVersion": "0.7.0",
         "protocolVersion": 2,
         "minimumCompatibleProtocolVersion": 1,
@@ -288,6 +372,7 @@ mod tests {
         "instanceKey": "stale-instance",
         "socketName": "stale.sock",
         "processId": 1,
+        "ownerGeneration": "00112233445566778899aabbccddeeff",
         "acquiredAtUtc": "2026-01-01T00:00:00Z",
         "executablePath": "old-cadderd"
       }"#,

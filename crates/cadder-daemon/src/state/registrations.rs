@@ -101,6 +101,9 @@ impl DaemonState {
       Err(RegistrationTransactionFailure::Runtime(error)) => {
         return Ok(registration_runtime_rejected(request_id, error));
       }
+      Err(RegistrationTransactionFailure::Storage(error)) => {
+        return Ok(registration_storage_rejected(request_id, error));
+      }
     }
 
     Ok(RegisterEntrypointResponse {
@@ -129,7 +132,7 @@ impl DaemonState {
       hook.pause().await;
     }
     let storage_state = self.store.state();
-    let publish_result = {
+    let publish_result: Result<(), RegistrationTransactionFailure> = async {
       let _publish = self.publish_operation.lock().await;
       let mut coordinator = self.coordinator.lock().await;
       let mut inner = self.inner.lock().await;
@@ -141,19 +144,28 @@ impl DaemonState {
         config: transaction.coordinator.current_state(),
         storage: Some(storage_state),
       };
-      fence.commit_final(|| -> Result<()> {
-        if let Some(receipt) = runtime_receipt.as_mut() {
-          receipt.accept(&self.logs)?;
-        }
-        *coordinator = transaction.coordinator;
-        inner.registrations = transaction.registrations;
-        self.store.record_history(
+      let final_commit = fence
+        .begin_final_commit()
+        .map_err(RegistrationTransactionFailure::Fenced)?;
+      if let Some(receipt) = runtime_receipt.as_mut()
+        && let Err(error) = receipt.accept(&self.logs)
+      {
+        return Err(RegistrationTransactionFailure::Runtime(error));
+      }
+      self
+        .store
+        .commit_history(
           HistoryKind::Registration,
-          transaction.history.summary,
+          transaction.history.summary.clone(),
           transaction.history.registration_id.as_deref(),
           transaction.history.domain_key.as_deref(),
           &transaction.history.details,
-        );
+        )
+        .await
+        .map_err(RegistrationTransactionFailure::Storage)?;
+      final_commit.commit(|| {
+        *coordinator = transaction.coordinator;
+        inner.registrations = transaction.registrations;
         inner.sequence += 1;
         let _ = self.events.send(StateChangedEvent {
           request_id: "state-change".to_string(),
@@ -162,19 +174,24 @@ impl DaemonState {
           snapshot,
           registration_id: transaction.event_registration_id,
         });
-        Ok(())
-      })
-    };
+      });
+      Ok(())
+    }
+    .await;
 
     match publish_result {
-      Ok(Ok(())) => Ok(()),
-      Err(rejection) => {
+      Ok(()) => Ok(()),
+      Err(RegistrationTransactionFailure::Fenced(rejection)) => {
         rollback_runtime_transition(self, runtime_receipt).await;
         Err(RegistrationTransactionFailure::Fenced(rejection))
       }
-      Ok(Err(error)) => {
+      Err(RegistrationTransactionFailure::Runtime(error)) => {
         rollback_runtime_transition(self, runtime_receipt).await;
         Err(RegistrationTransactionFailure::Runtime(error))
+      }
+      Err(RegistrationTransactionFailure::Storage(error)) => {
+        rollback_runtime_transition(self, runtime_receipt).await;
+        Err(RegistrationTransactionFailure::Storage(error))
       }
     }
   }
@@ -307,6 +324,13 @@ impl DaemonState {
       Err(RegistrationTransactionFailure::Fenced(rejection)) => return Err(rejection),
       Err(RegistrationTransactionFailure::Runtime(error)) => {
         return Ok(registration_mutation_runtime_rejected(
+          request_id,
+          "unregister entrypoint",
+          error,
+        ));
+      }
+      Err(RegistrationTransactionFailure::Storage(error)) => {
+        return Ok(registration_mutation_storage_rejected(
           request_id,
           "unregister entrypoint",
           error,
@@ -481,6 +505,13 @@ impl DaemonState {
           error,
         ));
       }
+      Err(RegistrationTransactionFailure::Storage(error)) => {
+        return Ok(registration_mutation_storage_rejected(
+          request.request_id,
+          "change entrypoint activation",
+          error,
+        ));
+      }
     }
 
     Ok(BasicResponse {
@@ -576,6 +607,13 @@ impl DaemonState {
           error,
         ));
       }
+      Err(RegistrationTransactionFailure::Storage(error)) => {
+        return Ok(registration_mutation_storage_rejected(
+          request.request_id,
+          "change domain activation",
+          error,
+        ));
+      }
     }
 
     Ok(BasicResponse {
@@ -623,6 +661,7 @@ struct RegistrationHistoryDraft {
 enum RegistrationTransactionFailure {
   Fenced(CommitRejection),
   Runtime(anyhow::Error),
+  Storage(anyhow::Error),
 }
 
 enum RuntimeTransitionReceipt {
@@ -696,6 +735,20 @@ fn registration_runtime_rejected(
   }
 }
 
+fn registration_storage_rejected(
+  request_id: String,
+  error: impl std::fmt::Display,
+) -> RegisterEntrypointResponse {
+  RegisterEntrypointResponse {
+    request_id,
+    accepted: false,
+    message: format!(
+      "Entrypoint registration was not committed because durable storage failed: {error}. Cadder kept the previous state. Resolve the reported storage error, then retry."
+    ),
+    registration_id: None,
+  }
+}
+
 fn registration_mutation_runtime_rejected(
   request_id: String,
   operation: &str,
@@ -705,6 +758,20 @@ fn registration_mutation_runtime_rejected(
     request_id,
     accepted: false,
     message: format!("Could not {operation} because Caddy rejected the runtime update: {error}."),
+  }
+}
+
+fn registration_mutation_storage_rejected(
+  request_id: String,
+  operation: &str,
+  error: impl std::fmt::Display,
+) -> BasicResponse {
+  BasicResponse {
+    request_id,
+    accepted: false,
+    message: format!(
+      "Cadder could not {operation} because durable storage failed: {error}. Cadder restored the previous runtime state. Resolve the reported storage error, then retry."
+    ),
   }
 }
 

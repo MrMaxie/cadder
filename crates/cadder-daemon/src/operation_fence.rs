@@ -21,6 +21,7 @@ enum LifecyclePhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommitPermitState {
   Active,
+  Committing,
   Finalized,
   Revoked,
 }
@@ -112,7 +113,7 @@ impl OperationFence {
         RevokeOutcome::Revoked
       }
       CommitPermitState::Revoked => RevokeOutcome::AlreadyRevoked,
-      CommitPermitState::Finalized => RevokeOutcome::Finalized,
+      CommitPermitState::Committing | CommitPermitState::Finalized => RevokeOutcome::Finalized,
     }
   }
 
@@ -141,6 +142,10 @@ impl OperationFence {
   }
 
   pub(crate) fn commit_final<T>(&self, commit: impl FnOnce() -> T) -> Result<T, CommitRejection> {
+    self.begin_final_commit().map(|guard| guard.commit(commit))
+  }
+
+  pub(crate) fn begin_final_commit(&self) -> Result<FinalCommitGuard, CommitRejection> {
     let lifecycle = self.lifecycle.lock().expect("lifecycle lock poisoned");
     if lifecycle.number != self.epoch {
       return Err(CommitRejection::StaleEpoch);
@@ -153,9 +158,40 @@ impl OperationFence {
     if *permit != CommitPermitState::Active {
       return Err(CommitRejection::Revoked);
     }
+    *permit = CommitPermitState::Committing;
+    Ok(FinalCommitGuard {
+      permit: self.permit.clone(),
+      cancellation: self.cancellation.clone(),
+      committed: false,
+    })
+  }
+}
+
+pub(crate) struct FinalCommitGuard {
+  permit: Arc<Mutex<CommitPermitState>>,
+  cancellation: CancellationToken,
+  committed: bool,
+}
+
+impl FinalCommitGuard {
+  pub(crate) fn commit<T>(mut self, commit: impl FnOnce() -> T) -> T {
     let result = commit();
-    *permit = CommitPermitState::Finalized;
-    Ok(result)
+    *self.permit.lock().expect("operation permit lock poisoned") = CommitPermitState::Finalized;
+    self.committed = true;
+    result
+  }
+}
+
+impl Drop for FinalCommitGuard {
+  fn drop(&mut self) {
+    if self.committed {
+      return;
+    }
+    let mut permit = self.permit.lock().expect("operation permit lock poisoned");
+    if *permit == CommitPermitState::Committing {
+      *permit = CommitPermitState::Revoked;
+      self.cancellation.cancel();
+    }
   }
 }
 

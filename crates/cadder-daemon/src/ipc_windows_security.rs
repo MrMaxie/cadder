@@ -244,7 +244,7 @@ pub(crate) fn secure_owner_only_path(path: &Path) -> io::Result<()> {
   open_owner_only_runtime_file(path).map(drop)
 }
 
-fn open_owner_only_runtime_file(path: &Path) -> io::Result<File> {
+pub(crate) fn open_owner_only_runtime_file(path: &Path) -> io::Result<File> {
   let path = wide_path(path)?;
   // SAFETY: `path` is NUL-terminated. `OPEN_REPARSE_POINT` ensures the final component itself is
   // inspected, and the returned handle is adopted exactly once.

@@ -62,9 +62,49 @@ impl FromStr for RuntimeProfile {
 #[derive(Debug, Clone)]
 pub struct RuntimePaths {
   runtime_dir: PathBuf,
+  storage_paths: StoragePaths,
   instance_key: String,
   socket_name: String,
   runtime_profile: RuntimeProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoragePaths {
+  profile_dir: PathBuf,
+}
+
+impl StoragePaths {
+  fn new(profile_dir: PathBuf) -> Self {
+    Self { profile_dir }
+  }
+
+  pub fn profile_dir(&self) -> &Path {
+    &self.profile_dir
+  }
+
+  pub fn lock_path(&self) -> PathBuf {
+    self.profile_dir.join("storage.lock")
+  }
+
+  pub fn manifest_path(&self) -> PathBuf {
+    self.profile_dir.join("manifest.json")
+  }
+
+  pub fn generations_dir(&self) -> PathBuf {
+    self.profile_dir.join("generations")
+  }
+
+  pub fn plans_dir(&self) -> PathBuf {
+    self.profile_dir.join("plans")
+  }
+
+  pub fn secrets_dir(&self) -> PathBuf {
+    self.profile_dir.join("secrets")
+  }
+
+  pub fn recovery_dir(&self) -> PathBuf {
+    self.profile_dir.join("recovery")
+  }
 }
 
 impl RuntimePaths {
@@ -82,15 +122,12 @@ impl RuntimePaths {
       None if override_dir.is_none() && env_runtime_dir.is_none() => RuntimeProfile::from_env()?,
       None => RuntimeProfile::Default,
     };
-    let runtime_dir = if let Some(path) = override_dir {
-      path
-    } else if let Some(path) = env_runtime_dir {
-      PathBuf::from(path)
+    let runtime_override = override_dir.or_else(|| env_runtime_dir.map(PathBuf::from));
+    let (runtime_dir, storage_paths) = if let Some(path) = runtime_override {
+      let storage_paths = StoragePaths::new(path.join("data"));
+      (path, storage_paths)
     } else {
-      match runtime_profile {
-        RuntimeProfile::Default => default_runtime_dir()?,
-        RuntimeProfile::Dev => dev_runtime_dir()?,
-      }
+      profile_paths(runtime_profile)?
     };
 
     let mut hasher = Sha256::new();
@@ -100,6 +137,7 @@ impl RuntimePaths {
 
     Ok(Self {
       runtime_dir,
+      storage_paths,
       instance_key,
       socket_name,
       runtime_profile,
@@ -144,6 +182,10 @@ impl RuntimePaths {
     self.runtime_profile
   }
 
+  pub fn storage_paths(&self) -> &StoragePaths {
+    &self.storage_paths
+  }
+
   pub fn lock_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder.lock")
   }
@@ -164,33 +206,30 @@ impl RuntimePaths {
     self.runtime_dir.join("daemon.json")
   }
 
-  pub fn storage_path(&self) -> PathBuf {
-    self.runtime_dir.join("runtime.sqlite3")
-  }
-
   pub fn effective_config_path(&self) -> PathBuf {
     self.runtime_dir.join("effective-caddy.json")
   }
 }
 
-fn default_runtime_dir() -> Result<PathBuf> {
+fn profile_paths(runtime_profile: RuntimeProfile) -> Result<(PathBuf, StoragePaths)> {
   let dirs = ProjectDirs::from("dev", "Cadder", "Cadder")
     .ok_or_else(|| anyhow!("could not resolve per-user project directories"))?;
-  Ok(
-    dirs
-      .runtime_dir()
-      .map(Path::to_path_buf)
-      .unwrap_or_else(|| dirs.data_local_dir().join("run")),
-  )
-}
-
-fn dev_runtime_dir() -> Result<PathBuf> {
-  Ok(
-    default_runtime_dir()?
-      .join("profiles")
-      .join("dev")
-      .join(dev_profile_id()?),
-  )
+  let runtime_dir = dirs
+    .runtime_dir()
+    .map(Path::to_path_buf)
+    .unwrap_or_else(|| dirs.data_local_dir().join("run"));
+  let storage_dir = dirs.data_local_dir().to_path_buf();
+  match runtime_profile {
+    RuntimeProfile::Default => Ok((runtime_dir, StoragePaths::new(storage_dir))),
+    RuntimeProfile::Dev => {
+      let profile_id = dev_profile_id()?;
+      let profile_suffix = Path::new("profiles").join("dev").join(profile_id);
+      Ok((
+        runtime_dir.join(&profile_suffix),
+        StoragePaths::new(storage_dir.join(profile_suffix)),
+      ))
+    }
+  }
 }
 
 fn dev_profile_id() -> Result<String> {
@@ -274,6 +313,31 @@ mod tests {
     let second = RuntimePaths::resolve(Some(dir.path().to_path_buf())).unwrap();
 
     assert_eq!(first.runtime_dir(), dir.path());
+    assert_eq!(first.storage_paths().profile_dir(), dir.path().join("data"));
+    assert_eq!(
+      first.storage_paths().lock_path(),
+      dir.path().join("data").join("storage.lock")
+    );
+    assert_eq!(
+      first.storage_paths().manifest_path(),
+      dir.path().join("data").join("manifest.json")
+    );
+    assert_eq!(
+      first.storage_paths().generations_dir(),
+      dir.path().join("data").join("generations")
+    );
+    assert_eq!(
+      first.storage_paths().plans_dir(),
+      dir.path().join("data").join("plans")
+    );
+    assert_eq!(
+      first.storage_paths().secrets_dir(),
+      dir.path().join("data").join("secrets")
+    );
+    assert_eq!(
+      first.storage_paths().recovery_dir(),
+      dir.path().join("data").join("recovery")
+    );
     assert_eq!(first.instance_key(), second.instance_key());
     assert_eq!(first.socket_name(), second.socket_name());
     assert!(first.socket_name().starts_with("cadder-"));
@@ -288,7 +352,6 @@ mod tests {
       dir.path().join("cadder-ipc.json")
     );
     assert_eq!(first.metadata_path(), dir.path().join("daemon.json"));
-    assert_eq!(first.storage_path(), dir.path().join("runtime.sqlite3"));
     assert_eq!(
       first.effective_config_path(),
       dir.path().join("effective-caddy.json")
@@ -310,6 +373,10 @@ mod tests {
     let paths = RuntimePaths::resolve(None).unwrap();
 
     assert_eq!(paths.runtime_dir(), runtime_dir);
+    assert_eq!(
+      paths.storage_paths().profile_dir(),
+      runtime_dir.join("data")
+    );
     assert!(paths.socket_name().starts_with("cadder-"));
   }
 
@@ -324,8 +391,10 @@ mod tests {
     }
 
     let paths = RuntimePaths::resolve(None).unwrap();
+    let dirs = ProjectDirs::from("dev", "Cadder", "Cadder").unwrap();
 
     assert!(!paths.runtime_dir().as_os_str().is_empty());
+    assert_eq!(paths.storage_paths().profile_dir(), dirs.data_local_dir());
     assert!(paths.socket_name().starts_with("cadder-"));
   }
 
@@ -352,9 +421,17 @@ mod tests {
 
     assert_eq!(first.runtime_dir(), second.runtime_dir());
     assert_ne!(first.runtime_dir(), default.runtime_dir());
+    assert_eq!(first.storage_paths(), second.storage_paths());
+    assert_ne!(first.storage_paths(), default.storage_paths());
     assert_eq!(first.runtime_profile(), RuntimeProfile::Dev);
     assert_eq!(default.runtime_profile(), RuntimeProfile::Default);
     assert!(first.runtime_dir().ends_with(first_profile_id(&workspace)));
+    assert!(
+      first
+        .storage_paths()
+        .profile_dir()
+        .ends_with(first_profile_id(&workspace))
+    );
     assert_eq!(first.socket_name(), second.socket_name());
     assert_eq!(first.instance_key(), second.instance_key());
   }

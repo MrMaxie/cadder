@@ -12,7 +12,6 @@ Set `CADDER_RUNTIME_DIR` or pass `--runtime-dir` to use a specific directory:
 ```sh
 cadderd --runtime-dir <runtime-dir>
 cadder --runtime-dir <runtime-dir> daemon status
-cadder --runtime-dir <runtime-dir> web
 caddy --cadder-runtime-dir <runtime-dir> run
 ```
 
@@ -43,24 +42,32 @@ Read-only inspection, diagnostics, log queries, domain and entrypoint toggles, n
 
 ## Runtime Files
 
-The daemon runtime directory contains:
+The daemon runtime directory contains ephemeral ownership and process files:
 
 - `cadder.lock`, the daemon ownership lock;
 - `daemon.json`, daemon metadata used by clients;
-- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process;
-- `runtime.sqlite3`, the durable SQLite store for selected runtime history and storage metadata.
+- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process.
 
 The IPC socket name is derived from the runtime directory, so separate runtime directories do not collide.
 
 ## Durable Storage
 
-SQLite is the default durable runtime store. Cadder records selected local history such as registration lifecycle events, activation toggles, daemon shutdown, autostart changes, IIS handoff activity, and other runtime events after daemon-side redaction.
+Cadder keeps durable profile data in the platform's per-user local-data directory. The file store contains:
+
+- `manifest.json`, which selects the active storage generation;
+- `generations/`, with versioned snapshots and JSON Lines transaction and log segments;
+- `plans/`, for typed operation plans;
+- `secrets/`, for Cadder-owned private key material;
+- `recovery/`, for preserved migration and corruption evidence;
+- `storage.lock`, which gives one daemon exclusive write ownership.
+
+JSON Lines records are bounded, checksummed, hash-chained, and terminated by LF. Cadder flushes accepted records before storage shutdown completes. General state, history, logs, manifests, and diagnostics contain redacted data rather than secrets.
 
 ```sh
 cadder history show --limit 50
 ```
 
-If the store cannot be opened, or if the database was created by a newer unsupported schema version, Cadder keeps the daemon usable with an in-memory unavailable state and reports storage diagnostics.
+If the store cannot be opened or uses a newer unsupported schema, Cadder reports a storage diagnostic and refuses to modify the file set. It preserves invalid authoritative files for recovery instead of skipping or overwriting them.
 
 ## Autostart
 

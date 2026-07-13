@@ -2192,7 +2192,7 @@ async fn query_state_does_not_wait_for_stalled_history_worker() {
       .snapshot
       .and_then(|snapshot| snapshot.storage)
       .map(|storage| storage.backend),
-    Some("sqlite".to_string())
+    Some("memory".to_string())
   );
   release.send(()).unwrap();
 }
@@ -2224,7 +2224,7 @@ async fn query_history_returns_persisted_registration_events() {
       .storage
       .as_ref()
       .map(|state| state.backend.as_str()),
-    Some("sqlite")
+    Some("memory")
   );
 }
 
@@ -2262,6 +2262,32 @@ async fn query_history_reports_storage_diagnostics_when_worker_queue_is_full() {
     "{diagnostics:?}"
   );
   release.send(()).unwrap();
+}
+
+#[tokio::test]
+async fn registration_storage_failure_rolls_back_runtime_and_memory_state() {
+  let mut state = state();
+  let (store, release) = RuntimeStore::memory_stalled_for_test(0);
+  state.store = store;
+
+  let response = state
+    .register("register".to_string(), registration("shim-1", "nonce-1"))
+    .await;
+  let snapshot = state
+    .query_state("state".to_string())
+    .await
+    .snapshot
+    .unwrap();
+
+  assert!(!response.accepted);
+  assert!(response.message.contains("durable storage failed"));
+  assert!(snapshot.registrations.is_empty());
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Idle
+  );
+  release.send(()).unwrap();
+  state.store.contain_shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -2824,4 +2850,19 @@ async fn shutdown_returns_success_when_runtime_is_idle() {
 
   assert!(response.accepted);
   assert_eq!(response.message, "Daemon shutdown requested.");
+}
+
+#[tokio::test]
+async fn shutdown_queue_failure_keeps_the_daemon_lifecycle_active_for_retry() {
+  let mut state = state();
+  let (store, release) = RuntimeStore::memory_stalled_for_test(0);
+  state.store = store;
+
+  let response = state.shutdown().await;
+
+  assert!(!response.accepted);
+  assert!(response.message.contains("could not queue"));
+  assert!(state.issue_operation_fence().is_ok());
+  release.send(()).unwrap();
+  state.store.contain_shutdown().await.unwrap();
 }

@@ -84,6 +84,19 @@ pub(crate) fn secure_owner_only_runtime_file(path: &Path) -> io::Result<()> {
   secure_open_file(&file, path)
 }
 
+/// Opens an existing owner-controlled regular file without following symbolic links.
+pub(crate) fn open_owner_only_runtime_file(path: &Path) -> io::Result<File> {
+  validate_owned_path(path, ExpectedFileType::RegularFile)?;
+  let file = open_existing_lock_file_without_following_symlinks(path)?;
+  secure_open_file(&file, path)?;
+  Ok(file)
+}
+
+/// Restricts an existing owner-controlled directory to mode `0700`.
+pub(crate) fn secure_owner_only_directory(path: &Path) -> io::Result<()> {
+  secure_owned_path(path, ExpectedFileType::Directory, OWNER_DIRECTORY_MODE)
+}
+
 /// Persists a directory entry update on Unix filesystems.
 pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
   let parent = path.parent().ok_or_else(|| {
