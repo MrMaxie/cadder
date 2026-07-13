@@ -202,6 +202,7 @@ impl DaemonState {
           .map_err(RegistrationTransactionFailure::Runtime)?;
         let (receipt, outcome) = attempt.into_parts();
         if let Err(error) = outcome {
+          log_runtime_transition_failure(&self.logs, &error);
           rollback_runtime_transition(self, Some(RuntimeTransitionReceipt::Stop(receipt))).await;
           return Err(RegistrationTransactionFailure::Runtime(error));
         }
@@ -223,6 +224,7 @@ impl DaemonState {
           .map_err(RegistrationTransactionFailure::Runtime)?;
         let (receipt, outcome) = attempt.into_parts();
         if let Err(error) = outcome {
+          log_runtime_transition_failure(&self.logs, &error);
           rollback_runtime_transition(self, Some(RuntimeTransitionReceipt::Apply(receipt))).await;
           return Err(RegistrationTransactionFailure::Runtime(error));
         }
@@ -263,6 +265,7 @@ impl DaemonState {
       .acquire()
       .await
       .expect("config operation semaphore closed");
+    fence.commit(|| ())?;
     let (candidate_coordinator, mut candidate_registrations) = {
       let coordinator = self.coordinator.lock().await;
       let inner = self.inner.lock().await;
@@ -418,69 +421,72 @@ impl DaemonState {
       .acquire()
       .await
       .expect("config operation semaphore closed");
-    let (accepted, registrations) = {
-      let mut inner = self.inner.lock().await;
-      let accepted = fence.commit(|| {
-        inner
-          .registrations
-          .get_mut(&request.registration_id)
-          .filter(|registration| {
-            request
-              .shim_session_nonce
-              .as_ref()
-              .is_none_or(|nonce| registration.entrypoint_instance.shim_session_nonce == *nonce)
-          })
-          .map(|registration| {
-            registration.activation_state = ActivationState::from_enabled(request.enabled);
-          })
-          .is_some()
-      })?;
-      let registrations = inner.registrations.values().cloned().collect::<Vec<_>>();
-      (accepted, registrations)
+    fence.commit(|| ())?;
+    let (candidate_coordinator, mut candidate_registrations) = {
+      let coordinator = self.coordinator.lock().await;
+      let inner = self.inner.lock().await;
+      (coordinator.clone(), inner.registrations.clone())
     };
-
-    if accepted {
-      self
-        .apply_registrations_fenced(registrations, fence)
-        .await?;
-      fence.commit(|| {
-        self.store.record_history(
-          HistoryKind::Registration,
-          format!(
-            "{} entrypoint `{}`.",
-            if request.enabled {
-              "Enabled"
-            } else {
-              "Disabled"
-            },
-            request.registration_id
-          ),
-          Some(&request.registration_id),
-          None,
-          &serde_json::json!({
-            "registrationId": request.registration_id,
-            "enabled": request.enabled
-          }),
-        );
-      })?;
-      self
-        .publish_change_fenced(
-          StateChangeKind::RegistrationsChanged,
-          Some(request.registration_id),
-          fence,
-        )
-        .await?;
+    let accepted = candidate_registrations
+      .get_mut(&request.registration_id)
+      .filter(|registration| {
+        request
+          .shim_session_nonce
+          .as_ref()
+          .is_none_or(|nonce| registration.entrypoint_instance.shim_session_nonce == *nonce)
+      })
+      .map(|registration| {
+        registration.activation_state = ActivationState::from_enabled(request.enabled);
+      })
+      .is_some();
+    if !accepted {
+      return Ok(BasicResponse {
+        request_id: request.request_id,
+        accepted: false,
+        message: "Entrypoint was not found.".to_string(),
+      });
+    }
+    let transaction = RegistrationTransaction {
+      coordinator: candidate_coordinator,
+      registrations: candidate_registrations,
+      history: RegistrationHistoryDraft {
+        summary: format!(
+          "{} entrypoint `{}`.",
+          if request.enabled {
+            "Enabled"
+          } else {
+            "Disabled"
+          },
+          request.registration_id
+        ),
+        registration_id: Some(request.registration_id.clone()),
+        domain_key: None,
+        details: serde_json::json!({
+          "registrationId": request.registration_id,
+          "enabled": request.enabled
+        }),
+      },
+      event_registration_id: Some(request.registration_id.clone()),
+    };
+    match self
+      .execute_registration_transaction(transaction, fence)
+      .await
+    {
+      Ok(()) => {}
+      Err(RegistrationTransactionFailure::Fenced(rejection)) => return Err(rejection),
+      Err(RegistrationTransactionFailure::Runtime(error)) => {
+        return Ok(registration_mutation_runtime_rejected(
+          request.request_id,
+          "update entrypoint activation",
+          error,
+        ));
+      }
     }
 
     Ok(BasicResponse {
       request_id: request.request_id,
-      accepted,
-      message: if accepted {
-        "Entrypoint activation updated."
-      } else {
-        "Entrypoint was not found."
-      }
-      .to_string(),
+      accepted: true,
+      message: "Entrypoint activation updated.".to_string(),
     })
   }
 
@@ -506,73 +512,76 @@ impl DaemonState {
       .acquire()
       .await
       .expect("config operation semaphore closed");
-    let (accepted, registrations) = {
-      let mut inner = self.inner.lock().await;
-      let accepted = fence.commit(|| {
-        inner
-          .registrations
-          .get_mut(&request.registration_id)
-          .and_then(|registration| {
-            registration.registered_domains.iter_mut().find(|domain| {
-              domain
-                .name
-                .canonical
-                .eq_ignore_ascii_case(&request.domain_key)
-            })
-          })
-          .map(|domain| {
-            domain.activation_state = ActivationState::from_enabled(request.enabled);
-          })
-          .is_some()
-      })?;
-      let registrations = inner.registrations.values().cloned().collect::<Vec<_>>();
-      (accepted, registrations)
+    fence.commit(|| ())?;
+    let (candidate_coordinator, mut candidate_registrations) = {
+      let coordinator = self.coordinator.lock().await;
+      let inner = self.inner.lock().await;
+      (coordinator.clone(), inner.registrations.clone())
     };
-
-    if accepted {
-      self
-        .apply_registrations_fenced(registrations, fence)
-        .await?;
-      fence.commit(|| {
-        self.store.record_history(
-          HistoryKind::Registration,
-          format!(
-            "{} domain `{}` on entrypoint `{}`.",
-            if request.enabled {
-              "Enabled"
-            } else {
-              "Disabled"
-            },
-            request.domain_key,
-            request.registration_id
-          ),
-          Some(&request.registration_id),
-          Some(&request.domain_key),
-          &serde_json::json!({
-            "registrationId": request.registration_id,
-            "domainKey": request.domain_key,
-            "enabled": request.enabled
-          }),
-        );
-      })?;
-      self
-        .publish_change_fenced(
-          StateChangeKind::RegistrationsChanged,
-          Some(request.registration_id),
-          fence,
-        )
-        .await?;
+    let accepted = candidate_registrations
+      .get_mut(&request.registration_id)
+      .and_then(|registration| {
+        registration.registered_domains.iter_mut().find(|domain| {
+          domain
+            .name
+            .canonical
+            .eq_ignore_ascii_case(&request.domain_key)
+        })
+      })
+      .map(|domain| {
+        domain.activation_state = ActivationState::from_enabled(request.enabled);
+      })
+      .is_some();
+    if !accepted {
+      return Ok(BasicResponse {
+        request_id: request.request_id,
+        accepted: false,
+        message: "Domain was not found.".to_string(),
+      });
+    }
+    let transaction = RegistrationTransaction {
+      coordinator: candidate_coordinator,
+      registrations: candidate_registrations,
+      history: RegistrationHistoryDraft {
+        summary: format!(
+          "{} domain `{}` on entrypoint `{}`.",
+          if request.enabled {
+            "Enabled"
+          } else {
+            "Disabled"
+          },
+          request.domain_key,
+          request.registration_id
+        ),
+        registration_id: Some(request.registration_id.clone()),
+        domain_key: Some(request.domain_key.clone()),
+        details: serde_json::json!({
+          "registrationId": request.registration_id,
+          "domainKey": request.domain_key,
+          "enabled": request.enabled
+        }),
+      },
+      event_registration_id: Some(request.registration_id.clone()),
+    };
+    match self
+      .execute_registration_transaction(transaction, fence)
+      .await
+    {
+      Ok(()) => {}
+      Err(RegistrationTransactionFailure::Fenced(rejection)) => return Err(rejection),
+      Err(RegistrationTransactionFailure::Runtime(error)) => {
+        return Ok(registration_mutation_runtime_rejected(
+          request.request_id,
+          "update domain activation",
+          error,
+        ));
+      }
     }
 
     Ok(BasicResponse {
       request_id: request.request_id,
-      accepted,
-      message: if accepted {
-        "Domain activation updated."
-      } else {
-        "Domain was not found."
-      }
-      .to_string(),
+      accepted: true,
+      message: "Domain activation updated.".to_string(),
     })
   }
 }
@@ -663,6 +672,16 @@ async fn rollback_runtime_transition(
       Some("registration-rollback".to_string()),
     );
   }
+}
+
+fn log_runtime_transition_failure(logs: &CaddyLogStore, error: &anyhow::Error) {
+  logs.append(
+    LogStreamIdentity::runtime_control(),
+    LogSeverity::Error,
+    format!("Caddy runtime transition failed; Cadder is restoring the previous state: {error:#}"),
+    LogAttributionKind::RuntimeControl,
+    Some("registration-runtime-transition".to_string()),
+  );
 }
 
 fn registration_runtime_rejected(

@@ -72,6 +72,16 @@ struct UnarySupervisionContext<'a> {
   limits: IpcLimits,
 }
 
+#[derive(Clone, Copy)]
+struct OwnedMutationWriteContext<'a> {
+  fence: &'a OperationFence,
+  request_id: Option<&'a RequestId>,
+  definition: &'a cadder_protocol::OperationDefinition,
+  response_type: &'a str,
+  deadline: Instant,
+  limits: IpcLimits,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NegotiatedSession {
   version: ProtocolVersion,
@@ -952,6 +962,8 @@ fn owned_mutation_uses_worker(message_type: &str) -> bool {
     message_types::REGISTER_ENTRYPOINT_REQUEST
       | message_types::UNREGISTER_ENTRYPOINT_REQUEST
       | message_types::HEARTBEAT_ENTRYPOINT_REQUEST
+      | message_types::SET_ENTRYPOINT_ENABLED_REQUEST
+      | message_types::SET_DOMAIN_ENABLED_REQUEST
   )
 }
 
@@ -1004,6 +1016,14 @@ where
     message_types::HEARTBEAT_ENTRYPOINT_REQUEST => {
       decode_owned_request!(HeartbeatEntrypointRequest, OwnedMutationRequest::Heartbeat)
     }
+    message_types::SET_ENTRYPOINT_ENABLED_REQUEST => decode_owned_request!(
+      SetEntrypointEnabledRequest,
+      OwnedMutationRequest::SetEntrypointEnabled
+    ),
+    message_types::SET_DOMAIN_ENABLED_REQUEST => decode_owned_request!(
+      SetDomainEnabledRequest,
+      OwnedMutationRequest::SetDomainEnabled
+    ),
     _ => unreachable!("owned mutation supervisor called for an untracked operation"),
   };
   let request_id = authorized.request_id();
@@ -1031,24 +1051,31 @@ where
   let first = tokio::select! {
     biased;
     frame = &mut next_frame => First::Reader(classify_concurrent_read(frame)),
+    result = &mut worker => First::Worker(result),
     _ = cancellation.cancelled() => First::Cancelled,
     _ = sleep_until(deadline) => First::Timeout,
-    result = &mut worker => First::Worker(result),
   };
 
   match first {
     First::Worker(result) => {
-      fence.complete();
       let response = result.context("registration mutation worker failed")??;
-      write_envelope_until(
+      let wrote_response = write_owned_mutation_result(
         writer,
-        response_type,
         &response,
-        deadline,
-        limits.write_no_progress,
+        OwnedMutationWriteContext {
+          fence: &fence,
+          request_id: request_id.as_ref(),
+          definition: authorized.definition(),
+          response_type,
+          deadline,
+          limits,
+        },
       )
       .await?;
       drop(next_frame);
+      if !wrote_response {
+        return Ok(ConnectionAction::Close);
+      }
       if reader.read_buffer().is_empty() {
         Ok(ConnectionAction::Continue)
       } else {
@@ -1060,20 +1087,24 @@ where
       drop(next_frame);
       let worker_result = tokio::select! {
         biased;
+        result = &mut worker => Some(result),
         _ = cancellation.cancelled() => None,
         _ = sleep_until(deadline) => None,
-        result = &mut worker => Some(result),
       };
 
       if let Some(result) = worker_result {
-        fence.complete();
         let response = result.context("registration mutation worker failed")??;
-        write_envelope_until(
+        let _ = write_owned_mutation_result(
           writer,
-          response_type,
           &response,
-          deadline,
-          limits.write_no_progress,
+          OwnedMutationWriteContext {
+            fence: &fence,
+            request_id: request_id.as_ref(),
+            definition: authorized.definition(),
+            response_type,
+            deadline,
+            limits,
+          },
         )
         .await?;
       } else {
@@ -1104,8 +1135,22 @@ where
       Ok(ConnectionAction::Close)
     }
     First::Cancelled => {
-      let _ = fence.try_revoke();
-      drop(worker);
+      match fence.try_revoke() {
+        RevokeOutcome::Finalized => {
+          let response = worker
+            .await
+            .context("registration mutation worker failed")??;
+          write_envelope_until(
+            writer,
+            response_type,
+            &response,
+            Instant::now() + limits.write_no_progress,
+            limits.write_no_progress,
+          )
+          .await?;
+        }
+        RevokeOutcome::Revoked | RevokeOutcome::AlreadyRevoked => drop(worker),
+      }
       drop(next_frame);
       Ok(ConnectionAction::Close)
     }
@@ -1136,10 +1181,50 @@ where
   }
 }
 
+async fn write_owned_mutation_result<W>(
+  writer: &mut W,
+  response: &OwnedMutationResponse,
+  context: OwnedMutationWriteContext<'_>,
+) -> Result<bool>
+where
+  W: AsyncWrite + Unpin,
+{
+  let write_deadline = if Instant::now() < context.deadline {
+    context.fence.complete();
+    context.deadline
+  } else {
+    match context.fence.try_revoke() {
+      RevokeOutcome::Finalized => Instant::now() + context.limits.write_no_progress,
+      RevokeOutcome::Revoked => {
+        send_operation_timeout(
+          writer,
+          context.request_id.cloned(),
+          context.definition,
+          context.limits,
+        )
+        .await?;
+        return Ok(false);
+      }
+      RevokeOutcome::AlreadyRevoked => return Ok(false),
+    }
+  };
+  write_envelope_until(
+    writer,
+    context.response_type,
+    response,
+    write_deadline,
+    context.limits.write_no_progress,
+  )
+  .await?;
+  Ok(true)
+}
+
 enum OwnedMutationRequest {
   Register(Box<RegisterEntrypointRequest>),
   Unregister(UnregisterEntrypointRequest),
   Heartbeat(HeartbeatEntrypointRequest),
+  SetEntrypointEnabled(SetEntrypointEnabledRequest),
+  SetDomainEnabled(SetDomainEnabledRequest),
 }
 
 impl OwnedMutationRequest {
@@ -1148,6 +1233,8 @@ impl OwnedMutationRequest {
       Self::Register(_) => message_types::REGISTER_ENTRYPOINT_RESPONSE,
       Self::Unregister(_) => message_types::UNREGISTER_ENTRYPOINT_RESPONSE,
       Self::Heartbeat(_) => message_types::HEARTBEAT_ENTRYPOINT_RESPONSE,
+      Self::SetEntrypointEnabled(_) => message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
+      Self::SetDomainEnabled(_) => message_types::SET_DOMAIN_ENABLED_RESPONSE,
     }
   }
 
@@ -1193,6 +1280,12 @@ impl OwnedMutationRequest {
       }
       Self::Heartbeat(request) => Ok(OwnedMutationResponse::Basic(
         state.heartbeat_fenced(request, &fence).await?,
+      )),
+      Self::SetEntrypointEnabled(request) => Ok(OwnedMutationResponse::Basic(
+        state.set_entrypoint_enabled_fenced(request, &fence).await?,
+      )),
+      Self::SetDomainEnabled(request) => Ok(OwnedMutationResponse::Basic(
+        state.set_domain_enabled_fenced(request, &fence).await?,
       )),
     }
   }
@@ -3801,7 +3894,7 @@ mod tests {
   use super::*;
   use crate::{
     CaddyConfigCoordinator, IisBindingRecord, IisProvider, IpcEndpoint, PrivilegeStatus,
-    discover_ipc_endpoint, logs::LogQuery,
+    discover_ipc_endpoint, logs::LogQuery, operation_fence::OperationFenceAuthority,
   };
   use cadder_protocol::{
     AutostartMode, BasicResponse, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY,
@@ -3853,9 +3946,104 @@ mod tests {
     assert!(owned_mutation_uses_worker(
       message_types::HEARTBEAT_ENTRYPOINT_REQUEST
     ));
-    assert!(!owned_mutation_uses_worker(
+    assert!(owned_mutation_uses_worker(
       message_types::SET_ENTRYPOINT_ENABLED_REQUEST
     ));
+    assert!(owned_mutation_uses_worker(
+      message_types::SET_DOMAIN_ENABLED_REQUEST
+    ));
+    assert!(!owned_mutation_uses_worker(
+      message_types::QUERY_STATE_REQUEST
+    ));
+  }
+
+  #[tokio::test]
+  async fn finalized_owned_mutation_uses_a_fresh_response_deadline() {
+    let authority = OperationFenceAuthority::default();
+    let fence = authority.issue().unwrap();
+    fence.commit_final(|| ()).unwrap();
+    let request_id = RequestId::parse("finalized-mutation-1").unwrap();
+    let response = OwnedMutationResponse::Basic(BasicResponse {
+      request_id: request_id.to_string(),
+      accepted: true,
+      message: "The domain is enabled.".to_string(),
+    });
+    let definition = OPERATION_REGISTRY
+      .lookup(message_types::SET_DOMAIN_ENABLED_REQUEST)
+      .unwrap();
+    let (reader, mut writer) = tokio::io::duplex(4096);
+
+    let wrote_response = write_owned_mutation_result(
+      &mut writer,
+      &response,
+      OwnedMutationWriteContext {
+        fence: &fence,
+        request_id: Some(&request_id),
+        definition,
+        response_type: message_types::SET_DOMAIN_ENABLED_RESPONSE,
+        deadline: Instant::now() - Duration::from_millis(1),
+        limits: IpcLimits::default(),
+      },
+    )
+    .await
+    .unwrap();
+
+    assert!(wrote_response);
+    let mut line = String::new();
+    BufReader::new(reader).read_line(&mut line).await.unwrap();
+    let envelope: IpcEnvelope = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+      envelope.message_type,
+      message_types::SET_DOMAIN_ENABLED_RESPONSE
+    );
+    let decoded: BasicResponse = envelope.decode().unwrap();
+    assert_eq!(decoded.request_id, request_id.as_str());
+    assert!(decoded.accepted);
+  }
+
+  #[tokio::test]
+  async fn expired_owned_mutation_revokes_commit_and_reports_timeout() {
+    let authority = OperationFenceAuthority::default();
+    let fence = authority.issue().unwrap();
+    let request_id = RequestId::parse("expired-mutation-1").unwrap();
+    let response = OwnedMutationResponse::Basic(BasicResponse {
+      request_id: request_id.to_string(),
+      accepted: true,
+      message: "This response must not be published.".to_string(),
+    });
+    let definition = OPERATION_REGISTRY
+      .lookup(message_types::SET_DOMAIN_ENABLED_REQUEST)
+      .unwrap();
+    let (reader, mut writer) = tokio::io::duplex(4096);
+
+    let wrote_response = write_owned_mutation_result(
+      &mut writer,
+      &response,
+      OwnedMutationWriteContext {
+        fence: &fence,
+        request_id: Some(&request_id),
+        definition,
+        response_type: message_types::SET_DOMAIN_ENABLED_RESPONSE,
+        deadline: Instant::now() - Duration::from_millis(1),
+        limits: IpcLimits::default(),
+      },
+    )
+    .await
+    .unwrap();
+
+    assert!(!wrote_response);
+    assert_eq!(fence.commit(|| ()).unwrap_err(), CommitRejection::Revoked);
+    let mut line = String::new();
+    BufReader::new(reader).read_line(&mut line).await.unwrap();
+    let envelope: IpcEnvelope = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+      envelope.message_type,
+      message_types::PROTOCOL_ERROR_RESPONSE
+    );
+    let decoded: ProtocolErrorResponse = envelope.decode().unwrap();
+    assert_eq!(decoded.request_id, request_id.as_str());
+    assert_eq!(decoded.error.kind, ProtocolErrorKind::Timeout);
+    assert_eq!(decoded.error.code.as_str(), "timeout");
   }
 
   #[tokio::test]

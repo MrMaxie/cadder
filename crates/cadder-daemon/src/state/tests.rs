@@ -2450,6 +2450,215 @@ async fn operation_fence_revoke_after_unregister_reload_restores_all_registratio
 }
 
 #[tokio::test]
+async fn revoked_operation_fence_rejects_missing_activation_targets() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths));
+  let fence = state.issue_operation_fence().unwrap();
+  fence.revoke();
+
+  let entrypoint_result = state
+    .set_entrypoint_enabled_fenced(
+      SetEntrypointEnabledRequest {
+        request_id: "missing-entrypoint".to_string(),
+        registration_id: "missing".to_string(),
+        shim_session_nonce: None,
+        enabled: false,
+      },
+      &fence,
+    )
+    .await;
+  let domain_result = state
+    .set_domain_enabled_fenced(
+      SetDomainEnabledRequest {
+        request_id: "missing-domain".to_string(),
+        registration_id: "missing".to_string(),
+        domain_key: "missing.localhost".to_string(),
+        enabled: false,
+      },
+      &fence,
+    )
+    .await;
+
+  assert_eq!(entrypoint_result.unwrap_err(), CommitRejection::Revoked);
+  assert_eq!(domain_result.unwrap_err(), CommitRejection::Revoked);
+}
+
+#[tokio::test]
+async fn operation_fence_revoke_after_entrypoint_disable_restores_active_runtime() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+  assert!(
+    state
+      .register(
+        "register-active".to_string(),
+        registration("shim-1", "nonce-1")
+      )
+      .await
+      .accepted
+  );
+  let previous_config = fs::read(paths.effective_config_path()).unwrap();
+  let sequence_before = state.inner.lock().await.sequence;
+  let history_before = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "entrypoint-rollback-history-before".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+  let mut events = state.subscribe();
+  let hook = RegistrationPublishTestHook::new();
+  state.registration_publish_hook = Some(hook.clone());
+  let toggling_state = state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+
+  let pending = tokio::spawn(async move {
+    toggling_state
+      .set_entrypoint_enabled_fenced(
+        SetEntrypointEnabledRequest {
+          request_id: "disable-entrypoint".to_string(),
+          registration_id: "shim-1".to_string(),
+          shim_session_nonce: Some("nonce-1".to_string()),
+          enabled: false,
+        },
+        &pending_fence,
+      )
+      .await
+  });
+  hook.wait_until_reached().await;
+  fence.revoke();
+  hook.release();
+
+  assert_eq!(
+    pending.await.unwrap().unwrap_err(),
+    CommitRejection::Revoked
+  );
+  let snapshot = state.snapshot().await;
+  let history_after = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "entrypoint-rollback-history-after".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+
+  assert_eq!(
+    snapshot.registrations[0].activation_state,
+    ActivationState::Active
+  );
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Running
+  );
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(
+    fs::read(paths.effective_config_path()).unwrap(),
+    previous_config
+  );
+  assert_eq!(state.inner.lock().await.sequence, sequence_before);
+  assert_eq!(history_after, history_before);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
+async fn operation_fence_revoke_after_domain_disable_restores_active_domains() {
+  let temp = tempfile::tempdir().unwrap();
+  let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+  let mut state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
+  let mut registered = registration("shim-1", "nonce-1");
+  registered.registered_domains = vec![
+    RegisteredDomain::active("app.localhost"),
+    RegisteredDomain::active("other.localhost"),
+  ];
+  assert!(
+    state
+      .register("register-domains".to_string(), registered)
+      .await
+      .accepted
+  );
+  let previous_config = fs::read(paths.effective_config_path()).unwrap();
+  let sequence_before = state.inner.lock().await.sequence;
+  let history_before = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "domain-rollback-history-before".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+  let mut events = state.subscribe();
+  let hook = RegistrationPublishTestHook::new();
+  state.registration_publish_hook = Some(hook.clone());
+  let toggling_state = state.clone();
+  let fence = state.issue_operation_fence().unwrap();
+  let pending_fence = fence.clone();
+
+  let pending = tokio::spawn(async move {
+    toggling_state
+      .set_domain_enabled_fenced(
+        SetDomainEnabledRequest {
+          request_id: "disable-domain".to_string(),
+          registration_id: "shim-1".to_string(),
+          domain_key: "app.localhost".to_string(),
+          enabled: false,
+        },
+        &pending_fence,
+      )
+      .await
+  });
+  hook.wait_until_reached().await;
+  fence.revoke();
+  hook.release();
+
+  assert_eq!(
+    pending.await.unwrap().unwrap_err(),
+    CommitRejection::Revoked
+  );
+  let snapshot = state.snapshot().await;
+  let history_after = state
+    .query_history(cadder_protocol::QueryHistoryRequest {
+      request_id: "domain-rollback-history-after".to_string(),
+      kind: None,
+      limit: Some(10),
+    })
+    .await
+    .records
+    .len();
+
+  assert!(
+    snapshot.registrations[0]
+      .registered_domains
+      .iter()
+      .all(|domain| domain.activation_state == ActivationState::Active)
+  );
+  assert_eq!(
+    snapshot.runtime.status,
+    cadder_protocol::RuntimeStatus::Running
+  );
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(
+    fs::read(paths.effective_config_path()).unwrap(),
+    previous_config
+  );
+  assert_eq!(state.inner.lock().await.sequence, sequence_before);
+  assert_eq!(history_after, history_before);
+  assert!(matches!(
+    events.try_recv(),
+    Err(broadcast::error::TryRecvError::Empty)
+  ));
+}
+
+#[tokio::test]
 async fn runtime_control_logs_are_active_and_limit_is_clamped() {
   let state = state();
   let stream = LogStreamIdentity::runtime_control();

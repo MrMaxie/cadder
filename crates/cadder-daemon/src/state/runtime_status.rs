@@ -52,29 +52,10 @@ impl DaemonState {
     kind: StateChangeKind,
     registration_id: Option<String>,
   ) {
-    self
-      .publish_change_inner(kind, registration_id, None)
-      .await
-      .expect("unfenced state publication cannot be rejected");
+    self.publish_change_inner(kind, registration_id).await;
   }
 
-  pub(super) async fn publish_change_fenced(
-    &self,
-    kind: StateChangeKind,
-    registration_id: Option<String>,
-    fence: &OperationFence,
-  ) -> Result<(), CommitRejection> {
-    self
-      .publish_change_inner(kind, registration_id, Some(fence))
-      .await
-  }
-
-  async fn publish_change_inner(
-    &self,
-    kind: StateChangeKind,
-    registration_id: Option<String>,
-    fence: Option<&OperationFence>,
-  ) -> Result<(), CommitRejection> {
+  async fn publish_change_inner(&self, kind: StateChangeKind, registration_id: Option<String>) {
     let _publish = self.publish_operation.lock().await;
     let registrations = {
       let inner = self.inner.lock().await;
@@ -93,11 +74,7 @@ impl DaemonState {
       };
       let _ = self.events.send(event);
     };
-    match fence {
-      Some(fence) => fence.commit(publish)?,
-      None => publish(),
-    }
-    Ok(())
+    publish();
   }
 
   #[cfg(test)]

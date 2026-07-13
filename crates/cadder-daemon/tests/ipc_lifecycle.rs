@@ -787,7 +787,7 @@ async fn disabled_adapt_failure_does_not_block_effective_config() {
 }
 
 #[tokio::test]
-async fn runtime_reload_failure_reports_diagnostic_and_control_log() {
+async fn runtime_reload_failure_rejects_toggle_and_preserves_previous_state() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture).fail_reload()).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
@@ -804,11 +804,18 @@ async fn runtime_reload_failure_reports_diagnostic_and_control_log() {
   let response =
     set_domain_enabled(&harness.client, "shim-1", "api.smarketing.localhost", false).await;
 
-  assert!(response.accepted, "{}", response.message);
+  assert!(!response.accepted, "{}", response.message);
+  assert!(response.message.contains("reload failed"));
   wait_for_command_log(&harness.command_log_path, "reload").await;
   let snapshot = query_state(&harness.client).await;
-  assert_eq!(snapshot.config.status, ConfigApplyStatus::Failed);
-  assert_eq!(snapshot.config.diagnostics[0].code, "runtime-apply-failed");
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert!(snapshot.config.diagnostics.is_empty());
+  let api_domain = snapshot.registrations[0]
+    .registered_domains
+    .iter()
+    .find(|domain| domain.name.canonical == "api.smarketing.localhost")
+    .unwrap();
+  assert_eq!(api_domain.activation_state, ActivationState::Active);
   let logs = query_logs(
     &harness.client,
     LogStreamIdentity::runtime_control(),
@@ -860,7 +867,7 @@ async fn slow_adapt_does_not_block_state_queries() {
 }
 
 #[tokio::test]
-async fn slow_reload_does_not_block_state_queries_and_reports_timeout() {
+async fn slow_reload_does_not_block_queries_and_rejects_timed_out_toggle() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture).slow_reload(short_runtime_timeouts())).await;
   let mut session = CadderSession::connect(&harness.paths).await.unwrap();
@@ -887,22 +894,21 @@ async fn slow_reload_does_not_block_state_queries_and_reports_timeout() {
   let final_snapshot = query_state(&harness.client).await;
 
   assert_eq!(snapshot.registrations.len(), 1);
-  assert!(response.accepted, "{response:?}");
-  assert_eq!(final_snapshot.config.status, ConfigApplyStatus::Failed);
-  assert_eq!(
-    final_snapshot.config.diagnostics[0].code,
-    "runtime-apply-failed"
-  );
-  assert!(
-    final_snapshot.config.diagnostics[0]
-      .message
-      .contains("timed out")
-  );
+  assert!(!response.accepted, "{response:?}");
+  assert!(response.message.contains("timed out"));
+  assert_eq!(final_snapshot.config.status, ConfigApplyStatus::Applied);
+  assert!(final_snapshot.config.diagnostics.is_empty());
+  let api_domain = final_snapshot.registrations[0]
+    .registered_domains
+    .iter()
+    .find(|domain| domain.name.canonical == "api.smarketing.localhost")
+    .unwrap();
+  assert_eq!(api_domain.activation_state, ActivationState::Active);
   harness.shutdown().await;
 }
 
 #[tokio::test]
-async fn slow_reload_subscription_event_reports_coherent_failed_snapshot() {
+async fn slow_reload_rejection_does_not_publish_a_state_change_event() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture).slow_reload(short_runtime_timeouts())).await;
   let mut subscription = harness
@@ -937,29 +943,20 @@ async fn slow_reload_subscription_event_reports_coherent_failed_snapshot() {
 
   let response =
     set_domain_enabled(&harness.client, "shim-1", "api.smarketing.localhost", false).await;
-  let event = tokio::time::timeout(Duration::from_secs(2), subscription.next_event())
-    .await
-    .unwrap()
-    .unwrap();
-  let api_domain = event.snapshot.registrations[0]
+  let event = tokio::time::timeout(Duration::from_millis(250), subscription.next_event()).await;
+  let snapshot = query_state(&harness.client).await;
+  let api_domain = snapshot.registrations[0]
     .registered_domains
     .iter()
     .find(|domain| domain.name.canonical == "api.smarketing.localhost")
     .unwrap();
 
-  assert!(response.accepted, "{response:?}");
-  assert_eq!(event.change_kind, StateChangeKind::RegistrationsChanged);
-  assert_eq!(api_domain.activation_state, ActivationState::Inactive);
-  assert_eq!(event.snapshot.config.status, ConfigApplyStatus::Failed);
-  assert_eq!(
-    event.snapshot.config.diagnostics[0].code,
-    "runtime-apply-failed"
-  );
-  assert!(
-    event.snapshot.config.diagnostics[0]
-      .message
-      .contains("timed out")
-  );
+  assert!(!response.accepted, "{response:?}");
+  assert!(response.message.contains("timed out"));
+  assert!(event.is_err(), "rejected toggle published an event");
+  assert_eq!(api_domain.activation_state, ActivationState::Active);
+  assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
+  assert!(snapshot.config.diagnostics.is_empty());
   harness.shutdown().await;
 }
 
@@ -1000,6 +997,7 @@ async fn slow_stop_does_not_block_state_queries_and_logs_timeout() {
     .await
     .expect("query-state should not wait for slow stop");
   let response = toggle_task.await.unwrap();
+  let final_snapshot = query_state(&harness.client).await;
   let logs = query_logs(
     &harness.client,
     LogStreamIdentity::runtime_control(),
@@ -1009,7 +1007,14 @@ async fn slow_stop_does_not_block_state_queries_and_logs_timeout() {
   .await;
 
   assert_eq!(snapshot.registrations.len(), 1);
-  assert!(response.accepted, "{response:?}");
+  assert!(!response.accepted, "{response:?}");
+  assert!(response.message.contains("timed out"));
+  assert_eq!(
+    final_snapshot.registrations[0].activation_state,
+    ActivationState::Active
+  );
+  assert_eq!(final_snapshot.config.status, ConfigApplyStatus::Applied);
+  assert_eq!(final_snapshot.runtime.status, RuntimeStatus::Running);
   assert!(logs.entries.iter().any(|entry| {
     entry.severity == LogSeverity::Error && entry.raw_message.contains("timed out")
   }));
