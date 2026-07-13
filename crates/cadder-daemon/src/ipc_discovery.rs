@@ -749,7 +749,7 @@ mod tests {
   }
 
   #[test]
-  fn shutdown_storage_old_discovery_guard_never_removes_a_new_generation() {
+  fn shutdown_storage_discovery_publication_old_guard_never_removes_a_new_generation() {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let first = IpcEndpointMetadata::new(&paths).unwrap();

@@ -852,6 +852,30 @@ mod tests {
     assert_eq!(evidence.trustee_sid, owner_sid);
   }
 
+  #[tokio::test]
+  async fn windows_ipc_security_listener_rejects_remote_clients() {
+    let owner_sid = current_process_sid().unwrap();
+    let sequence = SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let socket = format!(
+      "cadder-ipc-local-only-check-{}-{sequence}",
+      std::process::id()
+    );
+    let listener_name = socket.to_ns_name::<GenericNamespaced>().unwrap();
+    let options = ListenerOptions::new()
+      .name(listener_name)
+      .try_overwrite(true);
+    let listener = secure_listener_options(options, &owner_sid)
+      .unwrap()
+      .create_tokio()
+      .unwrap();
+    let configuration = format!("{listener:?}");
+
+    assert!(
+      configuration.contains("accept_remote: false"),
+      "the named-pipe listener must set PIPE_REJECT_REMOTE_CLIENTS: {configuration}"
+    );
+  }
+
   #[test]
   fn discovery_publication_windows_files_use_a_protected_owner_only_dacl() {
     let temp = tempfile::tempdir().unwrap();
