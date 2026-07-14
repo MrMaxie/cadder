@@ -17,10 +17,10 @@ panic = "unwind"
 Use the profiling profile when inspecting optimized code with debug symbols:
 
 ```sh
-cargo build --profile profiling -p cadderd -p cadder -p cadder-shim
+cargo build --profile profiling -p cadder-daemon -p cadder-client -p cadder-shim
 ```
 
-The package `cadder` builds the release binary named `cadder`.
+The package `cadder-client` builds the release binary named `cadder`.
 
 ## Verification Commands
 

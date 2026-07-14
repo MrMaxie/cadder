@@ -1,4 +1,4 @@
-use cadder_operator::LogsView;
+use cadder_api::LogsView;
 use tui_term::vt100::{Parser, Screen};
 
 pub(crate) const MAX_LOG_LINES: usize = 1_000;

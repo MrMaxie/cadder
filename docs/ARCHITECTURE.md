@@ -138,17 +138,16 @@ checks the Cargo workspace against this contract.
 
 | Workspace member | Classification | Responsibility | Release-facing package |
 | --- | --- | --- | --- |
-| `crates/cadder-daemon` | Daemon | Runtime state, daemon lock, local IPC, Caddy integration, process runtime, durable storage, platform providers, and logs. | No |
-| `crates/cadderd` | Daemon | Binary entrypoint for the Cadder daemon. | Yes |
+| `crates/cadder-daemon` | Daemon | Runtime state, daemon lock, local IPC, Caddy integration, process runtime, durable storage, platform providers, logs, and the `cadderd` binary. | Yes |
 | `crates/cadder-shim` | Shim | Package containing the PATH-facing `caddy` binary. | Yes |
-| `crates/cadder` | Operator client | Package that builds the `cadder` operator executable for CLI and TUI workflows. | Yes |
-| `crates/cadder-operator` | Operator client | Internal operator service, daemon launch policy, state shaping, and reusable view-model boundary shared by CLI and TUI code. | No |
-| `crates/cadder-protocol` | Shared protocol/API | Shared DTOs, activation/runtime/log states, IPC envelopes, and request/response contracts. | No |
+| `crates/cadder-client` | Operator client | Package that builds the `cadder` operator executable for CLI and TUI workflows. | Yes |
+| `crates/cadder-api` | Client API | Internal client API, daemon launch policy, state shaping, and reusable view-model boundary shared by CLI and TUI code. | No |
+| `crates/cadder-ipc` | Shared IPC | Shared DTOs, activation/runtime/log states, IPC envelopes, and request/response contracts. | No |
 | `xtask` | Docs/tooling | Repository validation task runner for checks that are Cadder-specific. | No |
 
-`crates/cadder-operator` remains a separate internal library for now because it
+`crates/cadder-api` remains a separate internal library because it
 keeps daemon access and view-model construction mockable across CLI and TUI
-tests. It may be merged into `crates/cadder` only through a future OpenSpec
+tests. It may be merged into `crates/cadder-client` only through a future OpenSpec
 change if that boundary stops carrying a testable responsibility.
 
 Historical product crates such as `crates/cadderctl`, `crates/cadder-tui`, and
@@ -172,7 +171,7 @@ cargo xtask coverage
 The Docker/Testcontainers end-to-end suite is intentionally separate from the default Cargo test path because it requires a running Docker daemon and the Docker CLI:
 
 ```sh
-cargo build -p cadderd -p cadder-shim
+cargo build -p cadder-daemon -p cadder-shim
 cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
 ```
 

@@ -5,7 +5,7 @@ impl DaemonState {
     let view = self.autostart.query();
     QueryAutostartResponse {
       request_id,
-      accepted: !matches!(view.status, cadder_protocol::AutostartStatus::Unsupported),
+      accepted: !matches!(view.status, cadder_ipc::AutostartStatus::Unsupported),
       message: "Autostart status returned.".to_string(),
       mode: view.mode,
       status: view.status,
@@ -38,9 +38,9 @@ impl DaemonState {
       accepted: false,
       message: "Autostart changes are unavailable on this installation.".to_string(),
       mode: request.mode,
-      status: cadder_protocol::AutostartStatus::Unsupported,
+      status: cadder_ipc::AutostartStatus::Unsupported,
       target: None,
-      diagnostics: vec![cadder_protocol::AutostartDiagnostic {
+      diagnostics: vec![cadder_ipc::AutostartDiagnostic {
         code: "autostart-update-unavailable".to_string(),
         message: "Configure startup manually, or retry after upgrading Cadder.".to_string(),
       }],
@@ -50,7 +50,7 @@ impl DaemonState {
 
 fn autostart_mutation_rejected(
   request_id: String,
-  mode: cadder_protocol::AutostartMode,
+  mode: cadder_ipc::AutostartMode,
   error: CommitRejection,
 ) -> SetAutostartResponse {
   SetAutostartResponse {
@@ -58,9 +58,9 @@ fn autostart_mutation_rejected(
     accepted: false,
     message: format!("Daemon mutation rejected: {error}."),
     mode,
-    status: cadder_protocol::AutostartStatus::Unknown,
+    status: cadder_ipc::AutostartStatus::Unknown,
     target: None,
-    diagnostics: vec![cadder_protocol::AutostartDiagnostic {
+    diagnostics: vec![cadder_ipc::AutostartDiagnostic {
       code: "autostart-update-rejected".to_string(),
       message: "Cadder did not change the autostart configuration.".to_string(),
     }],

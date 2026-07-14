@@ -2,11 +2,10 @@
 
 Cadder is a Rust workspace for a per-user Caddy coordinator. The main parts are:
 
-- `crates/cadder-protocol`: shared request and response contracts.
-- `crates/cadder-daemon`: daemon state, IPC, Caddy process ownership, durable history, and runtime storage.
-- `crates/cadder-operator`: current shared operator layer used by operator clients; OpenSpec will decide whether it remains separate or is merged into `cadder`.
-- `crates/cadder`: package that builds the `cadder` operator executable.
-- `crates/cadderd`: daemon binary.
+- `crates/cadder-ipc`: shared request and response contracts.
+- `crates/cadder-daemon`: daemon state, IPC, Caddy process ownership, durable history, runtime storage, and the `cadderd` binary.
+- `crates/cadder-api`: shared client API used by operator clients.
+- `crates/cadder-client`: package that builds the `cadder` operator executable.
 - `crates/cadder-shim`: PATH-facing `caddy` shim.
 - `xtask`: current validation, coverage, distribution, and packaging tasks; OpenSpec-driven cleanup should shrink or replace custom orchestration with mature tools where practical.
 

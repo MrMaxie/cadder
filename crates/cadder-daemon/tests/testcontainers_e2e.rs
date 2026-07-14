@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use cadder_daemon::{CadderClient, RuntimePaths};
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, ConfigApplyStatus, GuiStateSnapshot, LogStreamIdentity,
   LogStreamStatus, QueryLogsRequest, QueryLogsResponse, QueryStateRequest, QueryStateResponse,
   RuntimeStatus, SetDomainEnabledRequest, ShutdownDaemonRequest, message_types, new_request_id,
@@ -708,7 +708,7 @@ fn cadder_binary(env_var: &str, name: &str) -> Result<PathBuf> {
   let candidate = target_dir.join(profile).join(exe_name(name));
   ensure!(
     candidate.is_file(),
-    "missing {}. Build e2e binaries first with `cargo build -p cadderd -p cadder-shim`, \
+    "missing {}. Build e2e binaries first with `cargo build -p cadder-daemon -p cadder-shim`, \
      or set {env_var}. Looked for {}",
     name,
     candidate.display()

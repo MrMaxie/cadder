@@ -16,11 +16,11 @@ Cadder is a cross-platform Rust Caddy coordinator. It provides a daemon (`cadder
 
 ## Repo Layout
 
-- `crates/cadder-protocol`: shared DTOs, IPC envelopes, and request/response contracts.
-- `crates/cadder-daemon`: daemon state, local IPC, lockfiles, Caddy integration, runtime process management, and log storage.
-- `crates/cadderd`: daemon binary.
+- `crates/cadder-ipc`: shared DTOs, IPC envelopes, and request/response contracts.
+- `crates/cadder-daemon`: daemon state, local IPC, lockfiles, Caddy integration, runtime process management, log storage, and the `cadderd` binary.
 - `crates/cadder-shim`: package that builds the PATH-facing `caddy` shim binary.
-- `crates/cadder`: package that builds the `cadder` operator executable for CLI and TUI workflows.
+- `crates/cadder-api`: internal client API, daemon launch policy, and reusable view models.
+- `crates/cadder-client`: package that builds the `cadder` operator executable for CLI and TUI workflows.
 - `openspec/`: canonical requirements, design, and task planning.
 - `xtask`: current validation task runner; prefer shrinking it or replacing custom logic with mature tools as OpenSpec changes require.
 - `docs/ARCHITECTURE.md`: architecture notes that must follow OpenSpec, not override it.

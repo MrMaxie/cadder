@@ -684,7 +684,7 @@ impl RuntimeTransitionReceipt {
     }
   }
 
-  async fn projected_state(&self) -> cadder_protocol::RuntimeState {
+  async fn projected_state(&self) -> cadder_ipc::RuntimeState {
     match self {
       Self::Apply(receipt) => receipt.projected_state().await,
       Self::Stop(receipt) => receipt.projected_state(),

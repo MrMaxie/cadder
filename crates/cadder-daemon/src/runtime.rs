@@ -11,9 +11,7 @@ use crate::{
   runtime_lock::RuntimeContainmentMetadata,
 };
 use anyhow::{Context, Result};
-use cadder_protocol::{
-  LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus,
-};
+use cadder_ipc::{LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
@@ -382,7 +380,7 @@ impl ProcessRuntime {
           version: None,
           process_id,
           admin_endpoint: Some("localhost:2019".to_string()),
-          diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
+          diagnostics: vec![cadder_ipc::RuntimeDiagnostic {
             code: "runtime-inspect-failed".to_string(),
             message: "could not inspect real Caddy runtime: injected failure".to_string(),
             operation: Some("inspect".to_string()),
@@ -412,7 +410,7 @@ impl ProcessRuntime {
             version: None,
             process_id,
             admin_endpoint: None,
-            diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
+            diagnostics: vec![cadder_ipc::RuntimeDiagnostic {
               code: "runtime-exited".to_string(),
               message: format!("real Caddy runtime exited with status {status}"),
               operation: Some("inspect".to_string()),
@@ -428,7 +426,7 @@ impl ProcessRuntime {
             version: None,
             process_id,
             admin_endpoint: Some("localhost:2019".to_string()),
-            diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
+            diagnostics: vec![cadder_ipc::RuntimeDiagnostic {
               code: "runtime-inspect-failed".to_string(),
               message: format!("could not inspect real Caddy runtime: {error}"),
               operation: Some("inspect".to_string()),
@@ -464,7 +462,7 @@ impl ProcessRuntime {
             version: Some(child.pinned_caddy.version),
             process_id: Some(child.process.process_id),
             admin_endpoint: Some("localhost:2019".to_string()),
-            diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
+            diagnostics: vec![cadder_ipc::RuntimeDiagnostic {
               code: "runtime-exited".to_string(),
               message: "real Caddy runtime exited".to_string(),
               operation: Some("inspect".to_string()),
@@ -478,7 +476,7 @@ impl ProcessRuntime {
       Err(error) => {
         let mut snapshot = self.snapshot();
         snapshot.status = RuntimeStatus::Unhealthy;
-        snapshot.diagnostics = vec![cadder_protocol::RuntimeDiagnostic {
+        snapshot.diagnostics = vec![cadder_ipc::RuntimeDiagnostic {
           code: "runtime-inspect-failed".to_string(),
           message: format!("could not inspect guarded Caddy runtime: {error}"),
           operation: Some("inspect".to_string()),

@@ -2,7 +2,7 @@ use cadder_daemon::{
   CadderClient, CadderSession, RUNTIME_GUARD_PROTOCOL_REVISION, RuntimeGuardBootstrapRequest,
   RuntimeGuardGenerationContext, RuntimeGuardRequest, RuntimePaths,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, EntrypointInstanceIdentity, EntrypointRegistration,
   LogStreamIdentity, OwnerProcessIdentity, QueryStateRequest, QueryStateResponse,
   RegisterEntrypointRequest, RegisterEntrypointResponse, RegisteredDomain, ShimRunMetadata,
@@ -168,7 +168,7 @@ async fn wait_for_state_or_exit(
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
-          request_id: cadder_protocol::new_request_id("runtime-guard-query"),
+          request_id: cadder_ipc::new_request_id("runtime-guard-query"),
         },
       )
       .await
@@ -229,8 +229,8 @@ async fn shutdown_daemon(client: &CadderClient, request_prefix: &str) -> BasicRe
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
-        request_id: cadder_protocol::new_request_id(request_prefix),
+      &cadder_ipc::ShutdownDaemonRequest {
+        request_id: cadder_ipc::new_request_id(request_prefix),
       },
     )
     .await
@@ -250,8 +250,8 @@ async fn cadderd_binary_serves_ipc_and_shuts_down_cleanly() {
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
-        request_id: cadder_protocol::new_request_id("test-shutdown"),
+      &cadder_ipc::ShutdownDaemonRequest {
+        request_id: cadder_ipc::new_request_id("test-shutdown"),
       },
     )
     .await
@@ -285,8 +285,8 @@ async fn cadderd_binary_repeated_start_succeeds_when_runtime_is_already_running(
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
-        request_id: cadder_protocol::new_request_id("test-shutdown"),
+      &cadder_ipc::ShutdownDaemonRequest {
+        request_id: cadder_ipc::new_request_id("test-shutdown"),
       },
     )
     .await
@@ -478,7 +478,7 @@ async fn runtime_guard_containment_owner_loss_terminates_the_guarded_caddy_tree_
       message_types::REGISTER_ENTRYPOINT_REQUEST,
       message_types::REGISTER_ENTRYPOINT_RESPONSE,
       &RegisterEntrypointRequest {
-        request_id: cadder_protocol::new_request_id("guarded-register"),
+        request_id: cadder_ipc::new_request_id("guarded-register"),
         registration: guarded_registration(&config_path),
       },
     )
@@ -543,7 +543,7 @@ async fn runtime_guard_exit_forces_the_ready_daemon_to_shut_down() {
         message_types::QUERY_STATE_REQUEST,
         message_types::QUERY_STATE_RESPONSE,
         &QueryStateRequest {
-          request_id: cadder_protocol::new_request_id("guard-exit-query"),
+          request_id: cadder_ipc::new_request_id("guard-exit-query"),
         },
       )
       .await

@@ -3,7 +3,7 @@ use super::*;
 impl DaemonState {
   pub async fn query_history(
     &self,
-    request: cadder_protocol::QueryHistoryRequest,
+    request: cadder_ipc::QueryHistoryRequest,
   ) -> QueryHistoryResponse {
     QueryHistoryResponse {
       request_id: request.request_id,

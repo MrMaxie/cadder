@@ -20,7 +20,7 @@ complements the fast fake-Caddy lifecycle tests and does not replace `cargo test
 Run from the repository root:
 
 ```sh
-cargo build -p cadderd -p cadder-shim
+cargo build -p cadder-daemon -p cadder-shim
 cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
 ```
 

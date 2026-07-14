@@ -75,7 +75,7 @@ pub use state::DaemonState;
 pub use storage::RuntimeStore;
 
 use anyhow::{Context, Result, bail};
-use cadder_protocol::{LogAttributionKind, LogSeverity, LogStreamIdentity};
+use cadder_ipc::{LogAttributionKind, LogSeverity, LogStreamIdentity};
 use runtime_guard_record::{
   RuntimeGuardGenerationBinding, RuntimeGuardGenerationLock, RuntimeGuardReplacementBinding,
 };
@@ -359,7 +359,7 @@ async fn acquire_containment_lock(paths: &RuntimePaths) -> Result<RuntimeGuardGe
 #[cfg(test)]
 mod tests {
   use super::*;
-  use cadder_protocol::{QueryStateRequest, QueryStateResponse, message_types, new_request_id};
+  use cadder_ipc::{QueryStateRequest, QueryStateResponse, message_types, new_request_id};
   use std::fs;
   use tokio::time::{Duration, sleep, timeout};
 
@@ -423,7 +423,7 @@ mod tests {
     let store = RuntimeStore::open(paths.storage_paths());
     assert_eq!(store.state().backend, "files");
     let history = store
-      .query_history(Some(cadder_protocol::HistoryKind::Runtime), 10)
+      .query_history(Some(cadder_ipc::HistoryKind::Runtime), 10)
       .await;
     assert!(
       history

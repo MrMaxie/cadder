@@ -4,7 +4,7 @@ use cadder_daemon::{
   RealCaddyResolver, RuntimePaths, RuntimeProfile, ensure_daemon_running_with_options,
   shim_privilege_diagnostic,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, EntrypointInstanceIdentity, EntrypointRegistration,
   HeartbeatEntrypointRequest, LogStreamIdentity, OwnerProcessIdentity, RegisterEntrypointRequest,
   RegisterEntrypointResponse, ShimRunMetadata, SourcePath, UnregisterEntrypointRequest,
@@ -758,7 +758,7 @@ mod tests {
   use cadder_daemon::{
     CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer, DaemonState, ProcessRuntime,
   };
-  use cadder_protocol::{ProtocolError, ProtocolErrorCode, ProtocolErrorKind};
+  use cadder_ipc::{ProtocolError, ProtocolErrorCode, ProtocolErrorKind};
   use clap::CommandFactory;
   use std::{fs, path::Path, sync::Mutex as StdMutex};
   use tokio::{sync::watch, time::sleep};
@@ -1145,13 +1145,13 @@ mod tests {
 
     match target {
       ManagedRunTarget::Cadder(session) => {
-        let response: cadder_protocol::QueryStateResponse = session
+        let response: cadder_ipc::QueryStateResponse = session
           .lock()
           .await
           .request(
             message_types::QUERY_STATE_REQUEST,
             message_types::QUERY_STATE_RESPONSE,
-            &cadder_protocol::QueryStateRequest {
+            &cadder_ipc::QueryStateRequest {
               request_id: new_request_id("test-query"),
             },
           )
@@ -1294,10 +1294,7 @@ mod tests {
 
     assert_eq!(code, ExitCode::SUCCESS);
     assert!(snapshot.registrations.is_empty());
-    assert_eq!(
-      snapshot.config.status,
-      cadder_protocol::ConfigApplyStatus::Idle
-    );
+    assert_eq!(snapshot.config.status, cadder_ipc::ConfigApplyStatus::Idle);
     let _ = shutdown_tx.send(true);
   }
 

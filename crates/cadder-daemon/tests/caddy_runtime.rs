@@ -2,7 +2,7 @@ use cadder_daemon::{
   CaddyConfigAdapter, CaddyConfigCoordinator, CaddyLogStore, ProcessRuntime, RealCaddyResolver,
   RuntimePaths, RuntimeTimeouts,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, EntrypointInstanceIdentity, EntrypointRegistration, LogStreamIdentity,
   OwnerProcessIdentity, RegisteredDomain, RuntimeStatus, ShimRunMetadata, SourcePath,
 };
@@ -198,10 +198,10 @@ async fn coordinator_apply_tracks_runtime_success_failure_and_idle_stop() {
   let idle = coordinator.apply(&[active], &logs).await;
   let _ = runtime.stop().await;
 
-  assert_eq!(applied.status, cadder_protocol::ConfigApplyStatus::Applied);
-  assert_eq!(failed.status, cadder_protocol::ConfigApplyStatus::Failed);
+  assert_eq!(applied.status, cadder_ipc::ConfigApplyStatus::Applied);
+  assert_eq!(failed.status, cadder_ipc::ConfigApplyStatus::Failed);
   assert_eq!(failed.diagnostics[0].code, "runtime-apply-failed");
-  assert_eq!(idle.status, cadder_protocol::ConfigApplyStatus::Idle);
+  assert_eq!(idle.status, cadder_ipc::ConfigApplyStatus::Idle);
 }
 
 fn registration(id: &str, nonce: &str, config_path: &Path) -> EntrypointRegistration {

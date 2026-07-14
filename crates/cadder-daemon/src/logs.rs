@@ -1,4 +1,4 @@
-use cadder_protocol::{
+use cadder_ipc::{
   LogAttributionKind, LogEntry, LogEntryKind, LogSeverity, LogStreamIdentity, LogStreamStatus,
 };
 use chrono::Utc;

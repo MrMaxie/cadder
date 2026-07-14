@@ -1,5 +1,5 @@
 use crate::paths::RuntimePaths;
-use cadder_protocol::{AutostartDiagnostic, AutostartMode, AutostartStatus};
+use cadder_ipc::{AutostartDiagnostic, AutostartMode, AutostartStatus};
 #[cfg(unix)]
 use directories::BaseDirs;
 #[cfg(unix)]

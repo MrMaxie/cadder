@@ -8,7 +8,7 @@ use cadder_daemon::{
   CadderClient, DaemonLaunchOptions, IpcClientError, IpcClientResult, RuntimePaths,
   StateSubscription, ensure_daemon_running_with_options,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   BasicResponse, GuiStateSnapshot, LegacyCorrelatedRequest, LogSeverity, LogStreamIdentity,
   QueryLogsRequest, QueryStateRequest, QueryStateResponse, SetDomainEnabledRequest,
   SetEntrypointEnabledRequest, message_types, new_request_id,
@@ -369,7 +369,7 @@ pub fn connected_status(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use cadder_protocol::{
+  use cadder_ipc::{
     ActivationState, ConfigState, DomainName, EntrypointInstanceIdentity, EntrypointRegistration,
     OwnerProcessIdentity, ProtocolError, ProtocolErrorCode, ProtocolErrorKind, RegisteredDomain,
     RuntimeState, SourcePath,

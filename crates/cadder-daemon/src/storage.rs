@@ -1,6 +1,6 @@
 use crate::paths::StoragePaths;
 use anyhow::{Context, Result, anyhow, bail};
-use cadder_protocol::{HistoryKind, HistoryRecord, RuntimeDiagnostic, StorageState};
+use cadder_ipc::{HistoryKind, HistoryRecord, RuntimeDiagnostic, StorageState};
 use chrono::Utc;
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};

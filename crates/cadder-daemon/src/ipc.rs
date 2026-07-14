@@ -12,7 +12,7 @@ use crate::{
   operation_registry::{AuthorizedLegacyEnvelope, authorize_legacy},
 };
 use anyhow::{Context, Result};
-use cadder_protocol::{
+use cadder_ipc::{
   BasicResponse, CLIENT_HELLO_OPERATION, CapabilityId, ClientHello, HeartbeatEntrypointRequest,
   IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity,
   OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass, OperationShape, PROTOCOL_VERSION,
@@ -82,7 +82,7 @@ struct UnarySupervisionContext<'a> {
 struct OwnedMutationWriteContext<'a> {
   fence: &'a OperationFence,
   request_id: Option<&'a RequestId>,
-  definition: &'a cadder_protocol::OperationDefinition,
+  definition: &'a cadder_ipc::OperationDefinition,
   response_type: &'a str,
   deadline: Instant,
   limits: IpcLimits,
@@ -1773,13 +1773,13 @@ impl OwnedMutationRequest {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum OwnedMutationResponse {
-  Register(cadder_protocol::RegisterEntrypointResponse),
-  Basic(cadder_protocol::BasicResponse),
-  Autostart(cadder_protocol::SetAutostartResponse),
-  Iis(Box<cadder_protocol::SetIisHandoffResponse>),
+  Register(cadder_ipc::RegisterEntrypointResponse),
+  Basic(cadder_ipc::BasicResponse),
+  Autostart(cadder_ipc::SetAutostartResponse),
+  Iis(Box<cadder_ipc::SetIisHandoffResponse>),
 }
 
-fn operation_uses_fence(definition: &cadder_protocol::OperationDefinition) -> bool {
+fn operation_uses_fence(definition: &cadder_ipc::OperationDefinition) -> bool {
   definition.access() == OperationAccess::Mutation
     && definition.name() != message_types::SHUTDOWN_DAEMON_REQUEST
 }
@@ -1795,7 +1795,7 @@ async fn wait_for_operation_cancellation(fence: Option<&OperationFence>) {
 }
 
 async fn wait_for_request_drain(
-  definition: &cadder_protocol::OperationDefinition,
+  definition: &cadder_ipc::OperationDefinition,
   request_drain: &CancellationToken,
 ) {
   if definition.name() == message_types::SHUTDOWN_DAEMON_REQUEST {
@@ -2132,7 +2132,7 @@ fn pipelined_request_id(line: &str) -> Option<RequestId> {
 async fn send_operation_timeout<W>(
   writer: &mut W,
   request_id: Option<RequestId>,
-  definition: &cadder_protocol::OperationDefinition,
+  definition: &cadder_ipc::OperationDefinition,
   limits: IpcLimits,
 ) -> Result<()>
 where
@@ -2380,7 +2380,7 @@ where
       send_response!(message_types::QUERY_LOGS_RESPONSE, response);
     }
     message_types::QUERY_HISTORY_REQUEST => {
-      let request = decode_request!(cadder_protocol::QueryHistoryRequest);
+      let request = decode_request!(cadder_ipc::QueryHistoryRequest);
       let response = state.query_history(request).await;
       send_response!(message_types::QUERY_HISTORY_RESPONSE, response);
     }
@@ -2430,7 +2430,7 @@ where
         request_id_from_payload(envelope),
         ProtocolError::unsupported_capability(
           format!("message-type:{other}"),
-          cadder_protocol::current_capabilities(),
+          cadder_ipc::current_capabilities(),
         ),
       );
       send_response!(message_types::PROTOCOL_ERROR_RESPONSE, response);
@@ -4535,7 +4535,7 @@ mod tests {
     discover_ipc_endpoint, logs::LogQuery, operation_fence::OperationFenceAuthority,
     state::RegistrationPublishTestHook,
   };
-  use cadder_protocol::{
+  use cadder_ipc::{
     ActivationState, AutostartMode, BasicResponse, EntrypointInstanceIdentity,
     EntrypointRegistration, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY, OwnerProcessIdentity,
     ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest,
@@ -4883,7 +4883,7 @@ mod tests {
       .unwrap_err();
     let snapshot = observed_state.snapshot().await;
     let history = observed_state
-      .query_history(cadder_protocol::QueryHistoryRequest {
+      .query_history(cadder_ipc::QueryHistoryRequest {
         request_id: "shutdown-contained-history".to_string(),
         kind: None,
         limit: Some(10),
@@ -4990,7 +4990,7 @@ mod tests {
       message_types::SET_AUTOSTART_REQUEST,
       &SetAutostartRequest {
         request_id: request_id.to_string(),
-        mode: cadder_protocol::AutostartMode::Daemon,
+        mode: cadder_ipc::AutostartMode::Daemon,
       },
     )
     .await
@@ -5403,7 +5403,7 @@ mod tests {
           &StateChangedEvent {
             request_id: "stream-limits-records".to_string(),
             sequence_number,
-            change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+            change_kind: cadder_ipc::StateChangeKind::RuntimeChanged,
             snapshot: snapshot.clone(),
             registration_id: None,
           },
@@ -5438,7 +5438,7 @@ mod tests {
     let event = StateChangedEvent {
       request_id: "stream-limits-bytes".to_string(),
       sequence_number: 1,
-      change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+      change_kind: cadder_ipc::StateChangeKind::RuntimeChanged,
       snapshot: state.snapshot().await,
       registration_id: None,
     };
@@ -5466,7 +5466,7 @@ mod tests {
     let event = |sequence_number| StateChangedEvent {
       request_id: "stream-limits-in-flight".to_string(),
       sequence_number,
-      change_kind: cadder_protocol::StateChangeKind::RuntimeChanged,
+      change_kind: cadder_ipc::StateChangeKind::RuntimeChanged,
       snapshot: snapshot.clone(),
       registration_id: None,
     };
@@ -6282,9 +6282,9 @@ mod tests {
     sleep(Duration::from_millis(125)).await;
     let history = daemon
       .state
-      .query_history(cadder_protocol::QueryHistoryRequest {
+      .query_history(cadder_ipc::QueryHistoryRequest {
         request_id: "autostart-timeout-history".to_string(),
-        kind: Some(cadder_protocol::HistoryKind::Autostart),
+        kind: Some(cadder_ipc::HistoryKind::Autostart),
         limit: Some(10),
       })
       .await;
@@ -7087,7 +7087,7 @@ mod tests {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       let envelope = serde_json::json!({
-        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "protocolVersion": cadder_ipc::PROTOCOL_VERSION,
         "type": message_types::PROTOCOL_ERROR_RESPONSE,
         "payload": {
           "requestId": "typed-legacy-1",
@@ -7174,7 +7174,7 @@ mod tests {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       let envelope = serde_json::json!({
-        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "protocolVersion": cadder_ipc::PROTOCOL_VERSION,
         "type": message_types::PROTOCOL_ERROR_RESPONSE,
         "payload": {
           "requestId": "typed-nested-original-1",
@@ -7223,7 +7223,7 @@ mod tests {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       let envelope = serde_json::json!({
-        "protocolVersion": cadder_protocol::PROTOCOL_VERSION,
+        "protocolVersion": cadder_ipc::PROTOCOL_VERSION,
         "type": message_types::PROTOCOL_ERROR_RESPONSE,
         "payload": {
           "requestId": "typed-null-nested-1",
@@ -7446,7 +7446,7 @@ mod tests {
     let server = ScriptedIpcServer::start(|conn| async move {
       let (_line, mut writer) = read_one_request(conn).await;
       let envelope = serde_json::json!({
-        "protocolVersion": cadder_protocol::MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1),
+        "protocolVersion": cadder_ipc::MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1),
         "type": "unexpected-response",
         "payload": {}
       });

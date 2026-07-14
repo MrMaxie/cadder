@@ -1,7 +1,7 @@
 use super::*;
 
 impl DaemonState {
-  pub async fn query_logs(&self, request: cadder_protocol::QueryLogsRequest) -> QueryLogsResponse {
+  pub async fn query_logs(&self, request: cadder_ipc::QueryLogsRequest) -> QueryLogsResponse {
     let active = self.stream_is_active(&request.stream).await;
     let result = self.logs.query(
       LogQuery {

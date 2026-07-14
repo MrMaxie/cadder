@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use cadder_operator::{
+use cadder_api::{
   ConnectionStateView, DomainSelector, OperatorContext, OperatorError, unavailable_status,
 };
-use cadder_protocol::{LogStreamIdentity, RuntimeStatus as ProtocolRuntimeStatus};
+use cadder_ipc::{LogStreamIdentity, RuntimeStatus as ProtocolRuntimeStatus};
 use ratatui::widgets::TableState;
 use tui_term::vt100::Screen;
 
@@ -682,7 +682,7 @@ mod tests {
     app
       .complete_daemon_start(Err(OperatorError::new(
         "tui",
-        cadder_operator::OperatorErrorKind::DaemonStartFailure,
+        cadder_api::OperatorErrorKind::DaemonStartFailure,
         "cadderd exited before it became ready.",
         Some("Configure the real Caddy executable, then retry.".to_string()),
       )))

@@ -1,4 +1,4 @@
-use cadder_protocol::{ProtocolError, ProtocolErrorKind, RequestId};
+use cadder_ipc::{ProtocolError, ProtocolErrorKind, RequestId};
 use serde::Serialize;
 use std::{error::Error as StdError, fmt};
 use thiserror::Error;

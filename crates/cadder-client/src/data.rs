@@ -1,5 +1,5 @@
-use cadder_operator::{domains_view, entrypoints_view};
-use cadder_protocol::{GuiStateSnapshot, LogStreamIdentity};
+use cadder_api::{domains_view, entrypoints_view};
+use cadder_ipc::{GuiStateSnapshot, LogStreamIdentity};
 
 #[derive(Debug, Clone, Default)]
 pub struct DataModel {

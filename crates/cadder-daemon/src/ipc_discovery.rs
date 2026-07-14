@@ -6,9 +6,7 @@ use crate::{
   ipc_client_error::LocalIpcErrorContext,
 };
 use anyhow::{Context, Result, bail};
-use cadder_protocol::{
-  CapabilityId, ProtocolVersionRange, SUPPORTED_PROTOCOL_VERSIONS, capabilities,
-};
+use cadder_ipc::{CapabilityId, ProtocolVersionRange, SUPPORTED_PROTOCOL_VERSIONS, capabilities};
 use chrono::{DateTime, Utc};
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};

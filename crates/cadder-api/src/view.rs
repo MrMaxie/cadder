@@ -1,4 +1,4 @@
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, ConfigDiagnostic, ConfigState, EntrypointRegistration, GuiStateSnapshot,
   LogEntry, LogStreamIdentity, LogStreamStatus, QueryLogsResponse, RuntimeDiagnostic, RuntimeState,
   canonicalize_domain,
@@ -367,7 +367,7 @@ pub enum DomainResolveError {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use cadder_protocol::{
+  use cadder_ipc::{
     DomainName, EntrypointInstanceIdentity, OwnerProcessIdentity, RegisteredDomain, SourcePath,
   };
 

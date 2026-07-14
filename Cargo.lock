@@ -399,12 +399,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "cadder"
+name = "cadder-api"
 version = "0.8.0"
 dependencies = [
+ "anyhow",
  "cadder-daemon",
- "cadder-operator",
- "cadder-protocol",
+ "cadder-ipc",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "cadder-client"
+version = "0.8.0"
+dependencies = [
+ "cadder-api",
+ "cadder-daemon",
+ "cadder-ipc",
  "clap",
  "color-eyre",
  "crossterm",
@@ -419,8 +433,9 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "bytes",
- "cadder-protocol",
+ "cadder-ipc",
  "chrono",
+ "clap",
  "directories",
  "figment",
  "fs4",
@@ -440,26 +455,13 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
+ "tracing-subscriber",
  "widestring",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "cadder-operator"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "cadder-daemon",
- "cadder-protocol",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "cadder-protocol"
+name = "cadder-ipc"
 version = "0.8.0"
 dependencies = [
  "chrono",
@@ -476,26 +478,12 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "cadder-daemon",
- "cadder-protocol",
+ "cadder-ipc",
  "chrono",
  "clap",
  "serde_json",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "cadderd"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "cadder-daemon",
- "cadder-protocol",
- "chrono",
- "clap",
- "serde_json",
- "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]

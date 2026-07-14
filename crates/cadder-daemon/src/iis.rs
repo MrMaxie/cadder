@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use cadder_protocol::{
+use cadder_ipc::{
   IisBinding, IisBindingIdentity, IisHandoffState, IisIssue, IisIssueKind,
   IisRestoreMetadataSummary, canonicalize_domain,
 };

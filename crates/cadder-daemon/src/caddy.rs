@@ -12,7 +12,7 @@ use crate::{
   runtime::{CaddyRuntime, ProcessRuntime},
 };
 use anyhow::{Context, Result, anyhow};
-use cadder_protocol::{
+use cadder_ipc::{
   ConfigApplyStatus, ConfigDiagnostic, ConfigState, EntrypointRegistration, LogAttributionKind,
   LogSeverity, RegisteredDomain,
 };
@@ -913,7 +913,7 @@ impl CaddyConfigCoordinator {
     self.runtime.clone()
   }
 
-  pub async fn runtime_state(&self) -> cadder_protocol::RuntimeState {
+  pub async fn runtime_state(&self) -> cadder_ipc::RuntimeState {
     self.runtime.inspect().await
   }
 
@@ -1115,7 +1115,7 @@ impl CaddyConfigCoordinator {
       CaddyApplyAction::Stop { attempted } => {
         if let Err(error) = self.runtime.stop().await {
           logs.append(
-            cadder_protocol::LogStreamIdentity::runtime_control(),
+            cadder_ipc::LogStreamIdentity::runtime_control(),
             LogSeverity::Error,
             error.to_string(),
             LogAttributionKind::RuntimeControl,
@@ -1277,7 +1277,7 @@ fn mock_caddyfile_hosts(config: &str) -> BTreeSet<String> {
     };
     for token in site_labels.split([',', ' ', '\t']) {
       if let Some(host) = mock_host_from_site_token(token) {
-        hosts.insert(cadder_protocol::canonicalize_domain(&host));
+        hosts.insert(cadder_ipc::canonicalize_domain(&host));
       }
     }
   }
@@ -1355,7 +1355,7 @@ fn filter_hosts_recursive(
         hosts.retain(|host| {
           let keep = host
             .as_str()
-            .map(cadder_protocol::canonicalize_domain)
+            .map(cadder_ipc::canonicalize_domain)
             .is_some_and(|host| enabled_hosts.contains(&host));
           if keep {
             *retained_any = true;
@@ -1436,7 +1436,7 @@ fn collect_hosts(value: &Value, hosts: &mut BTreeSet<String>) {
       if let Some(Value::Array(values)) = map.get("host") {
         for value in values {
           if let Some(host) = value.as_str() {
-            hosts.insert(cadder_protocol::canonicalize_domain(host));
+            hosts.insert(cadder_ipc::canonicalize_domain(host));
           }
         }
       }
@@ -1535,7 +1535,7 @@ fn detect_iis_route_conflicts(
 mod tests {
   use super::*;
   use crate::{paths::RuntimePaths, runtime::RuntimeTimeouts};
-  use cadder_protocol::{
+  use cadder_ipc::{
     ActivationState, EntrypointInstanceIdentity, LogStreamIdentity, OwnerProcessIdentity,
     SourcePath,
   };
@@ -2136,7 +2136,7 @@ app.localhost, http://api.localhost:8080 {
     let runtime = coordinator.runtime_state().await;
 
     assert_eq!(state.status, ConfigApplyStatus::Applied);
-    assert_eq!(runtime.status, cadder_protocol::RuntimeStatus::Running);
+    assert_eq!(runtime.status, cadder_ipc::RuntimeStatus::Running);
     assert_eq!(runtime.binary_path.as_deref(), Some("mock-caddy"));
     assert!(paths.effective_config_path().is_file());
   }
@@ -2364,7 +2364,7 @@ app.localhost, http://api.localhost:8080 {
     assert_eq!(coordinator.current_state().status, ConfigApplyStatus::Idle);
     assert_eq!(
       coordinator.runtime_state().await.status,
-      cadder_protocol::RuntimeStatus::Idle
+      cadder_ipc::RuntimeStatus::Idle
     );
     assert!(!coordinator.has_iis_proxy_routes_except("app.localhost"));
 
@@ -2914,7 +2914,7 @@ app.localhost, http://api.localhost:8080 {
     assert_eq!(coordinator.current_state().status, ConfigApplyStatus::Idle);
     assert_eq!(
       coordinator.runtime_state().await.status,
-      cadder_protocol::RuntimeStatus::Idle
+      cadder_ipc::RuntimeStatus::Idle
     );
     let _ = coordinator.adapter();
     let _ = coordinator.runtime();
@@ -2982,7 +2982,7 @@ app.localhost, http://api.localhost:8080 {
     let idle = coordinator.apply(&[registration("shim", &[])], &logs).await;
     let runtime_logs = logs.query(
       crate::logs::LogQuery {
-        stream: cadder_protocol::LogStreamIdentity::runtime_control(),
+        stream: cadder_ipc::LogStreamIdentity::runtime_control(),
         limit: 20,
         after_sequence: None,
         minimum_severity: None,

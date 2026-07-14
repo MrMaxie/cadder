@@ -1,6 +1,6 @@
 use anyhow::Error;
 use cadder_daemon::{IpcClientError, IpcClientPhase, LocalIpcErrorCode, LocalIpcErrorKind};
-use cadder_protocol::{ProtocolError, ProtocolErrorKind, RequestId};
+use cadder_ipc::{ProtocolError, ProtocolErrorKind, RequestId};
 use serde::Serialize;
 use std::{
   error::Error as StdError,
@@ -329,7 +329,7 @@ mod tests {
   use super::*;
   use anyhow::{Context, anyhow};
   use cadder_daemon::{CadderSession, RuntimePaths};
-  use cadder_protocol::ProtocolErrorCode;
+  use cadder_ipc::ProtocolErrorCode;
 
   #[test]
   fn exit_codes_remain_stable_for_all_error_kinds() {

@@ -1,4 +1,4 @@
-use cadder_protocol::{
+use cadder_ipc::{
   IpcEnvelope, OPERATION_REGISTRY, OperationDefinition, ProtocolError, ProtocolResult, RequestId,
 };
 use serde::de::DeserializeOwned;
@@ -50,7 +50,7 @@ impl AuthorizedLegacyEnvelope<'_> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use cadder_protocol::{
+  use cadder_ipc::{
     CURRENT_PROTOCOL_VERSION, CapabilityId, OperationAccess, OperationDeadlineClass,
     OperationShape, PROTOCOL_VERSION_1_0, ProtocolCapabilities, ProtocolErrorKind, ProtocolVersion,
     capabilities, message_types,

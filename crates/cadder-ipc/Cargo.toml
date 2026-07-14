@@ -1,5 +1,5 @@
 [package]
-name = "cadder-protocol"
+name = "cadder-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

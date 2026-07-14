@@ -1,11 +1,10 @@
 [workspace]
 members = [
-  "crates/cadder-operator",
-  "crates/cadder",
+  "crates/cadder-api",
+  "crates/cadder-client",
   "crates/cadder-daemon",
-  "crates/cadder-protocol",
+  "crates/cadder-ipc",
   "crates/cadder-shim",
-  "crates/cadderd",
   "xtask",
 ]
 resolver = "3"

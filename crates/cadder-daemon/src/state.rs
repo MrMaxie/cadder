@@ -12,7 +12,7 @@ use crate::{
   storage::RuntimeStore,
 };
 use anyhow::Result;
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, ConfigState, EntrypointRegistration, GuiStateSnapshot,
   HeartbeatEntrypointRequest, HistoryKind, IisBinding, IisFollowUpAction, IisHandoffState,
   IisIssue, IisIssueKind, IisOperationStep, LogAttributionKind, LogSeverity, LogStreamIdentity,
@@ -34,7 +34,7 @@ use tokio::sync::{Mutex, Notify, Semaphore, broadcast};
 #[cfg(test)]
 use crate::iis::IisMutation;
 #[cfg(test)]
-use cadder_protocol::{ConfigApplyStatus, IisElevationApproval, IisOperationStepStatus};
+use cadder_ipc::{ConfigApplyStatus, IisElevationApproval, IisOperationStepStatus};
 
 mod autostart_control;
 mod config_apply;

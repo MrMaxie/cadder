@@ -148,7 +148,7 @@ jobs:
         run: docker version
 
       - name: Build Cadder binaries
-        run: cargo build -p cadderd -p cadder-shim
+        run: cargo build -p cadder-daemon -p cadder-shim
 
       - name: Run Testcontainers end-to-end suite
         run: cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1

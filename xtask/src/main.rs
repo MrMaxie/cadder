@@ -47,17 +47,11 @@ const WINDOWS_COVERAGE_TOOLCHAIN: &str = "stable-x86_64-pc-windows-msvc";
 const WORKSPACE_MANIFEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
 const DOCS_SITE_DIR: &str = "docs/site";
 const RUNTIME_PORTABLE_BINARIES: [&str; 3] = ["cadderd", "cadder", "caddy"];
-const RUNTIME_RELEASE_PACKAGES: [&str; 3] = ["cadderd", "cadder", "cadder-shim"];
-const WORKSPACE_MEMBER_CONTRACTS: [WorkspaceMemberContract; 7] = [
+const RUNTIME_RELEASE_PACKAGES: [&str; 3] = ["cadder-daemon", "cadder-client", "cadder-shim"];
+const WORKSPACE_MEMBER_CONTRACTS: [WorkspaceMemberContract; 6] = [
   WorkspaceMemberContract::new(
     "crates/cadder-daemon",
     "cadder-daemon",
-    WorkspaceMemberClassification::Daemon,
-    false,
-  ),
-  WorkspaceMemberContract::new(
-    "crates/cadderd",
-    "cadderd",
     WorkspaceMemberClassification::Daemon,
     true,
   ),
@@ -68,21 +62,21 @@ const WORKSPACE_MEMBER_CONTRACTS: [WorkspaceMemberContract; 7] = [
     true,
   ),
   WorkspaceMemberContract::new(
-    "crates/cadder",
-    "cadder",
+    "crates/cadder-client",
+    "cadder-client",
     WorkspaceMemberClassification::OperatorClient,
     true,
   ),
   WorkspaceMemberContract::new(
-    "crates/cadder-operator",
-    "cadder-operator",
-    WorkspaceMemberClassification::OperatorClient,
+    "crates/cadder-api",
+    "cadder-api",
+    WorkspaceMemberClassification::ClientApi,
     false,
   ),
   WorkspaceMemberContract::new(
-    "crates/cadder-protocol",
-    "cadder-protocol",
-    WorkspaceMemberClassification::SharedProtocolApi,
+    "crates/cadder-ipc",
+    "cadder-ipc",
+    WorkspaceMemberClassification::SharedIpc,
     false,
   ),
   WorkspaceMemberContract::new(
@@ -259,7 +253,8 @@ enum WorkspaceMemberClassification {
   Daemon,
   Shim,
   OperatorClient,
-  SharedProtocolApi,
+  ClientApi,
+  SharedIpc,
   DocsTooling,
 }
 
@@ -269,7 +264,8 @@ impl WorkspaceMemberClassification {
       Self::Daemon => "daemon",
       Self::Shim => "shim",
       Self::OperatorClient => "operator client",
-      Self::SharedProtocolApi => "shared protocol/API",
+      Self::ClientApi => "client API",
+      Self::SharedIpc => "shared IPC",
       Self::DocsTooling => "docs/tooling",
     }
   }
@@ -3584,7 +3580,7 @@ version = ""
     write_workspace_topology_fixture(&dir);
     let cadder = WORKSPACE_MEMBER_CONTRACTS
       .iter()
-      .find(|contract| contract.path == "crates/cadder")
+      .find(|contract| contract.path == "crates/cadder-client")
       .copied()
       .unwrap();
     write_workspace_member_manifest(&dir, cadder, "cadder-web");
@@ -3594,7 +3590,7 @@ version = ""
     assert!(
       error
         .to_string()
-        .contains("package name must be \"cadder\"")
+        .contains("package name must be \"cadder-client\"")
     );
     fs::remove_dir_all(&dir).unwrap();
   }

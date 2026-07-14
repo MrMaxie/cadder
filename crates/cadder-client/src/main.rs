@@ -8,8 +8,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use app::App;
+use cadder_api::{OperatorContext, OperatorError};
 use cadder_daemon::DaemonLaunchOptions;
-use cadder_operator::OperatorContext;
 use clap::{Parser, Subcommand, error::ErrorKind};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use cadder_protocol::{MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolCapabilities};
+use cadder_ipc::{MIN_COMPATIBLE_PROTOCOL_VERSION, PROTOCOL_VERSION, ProtocolCapabilities};
 use chrono::{DateTime, Utc};
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};

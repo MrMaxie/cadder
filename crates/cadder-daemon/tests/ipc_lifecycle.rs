@@ -4,7 +4,7 @@ use cadder_daemon::{
   IpcEndpointPublication, LocalIpcErrorKind, ProcessRuntime, RealCaddyResolver, RuntimePaths,
   RuntimeTimeouts, discover_ipc_endpoint, ensure_daemon_running,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, ClientHello, ConfigApplyStatus, EntrypointInstanceIdentity,
   EntrypointRegistration, HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity,
   LogStreamIdentity, LogStreamStatus, OPERATION_REGISTRY, OwnerProcessIdentity, PROTOCOL_VERSION,
@@ -173,7 +173,7 @@ async fn raw_ipc_registration_records_history_in_memory_storage() {
   .await;
   let response: RegisterEntrypointResponse = read_raw_envelope(&mut reader).await.decode().unwrap();
   let snapshot = query_state(&harness.client).await;
-  let history = query_history(&harness.client, cadder_protocol::HistoryKind::Registration).await;
+  let history = query_history(&harness.client, cadder_ipc::HistoryKind::Registration).await;
   let storage = history.storage.as_ref().unwrap();
 
   assert!(response.accepted, "{}", response.message);
@@ -209,10 +209,7 @@ async fn ipc_local_operator_requests_cover_autostart_status() {
   #[cfg(all(unix, not(target_os = "macos")))]
   {
     assert!(!autostart.accepted, "{}", autostart.message);
-    assert_eq!(
-      autostart.status,
-      cadder_protocol::AutostartStatus::Unsupported
-    );
+    assert_eq!(autostart.status, cadder_ipc::AutostartStatus::Unsupported);
     assert!(
       autostart
         .diagnostics
@@ -231,25 +228,22 @@ async fn ipc_set_autostart_request_fails_closed_without_history() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
   let harness = Harness::start(FakeCaddy::new(fixture)).await;
 
-  let response: cadder_protocol::SetAutostartResponse = harness
+  let response: cadder_ipc::SetAutostartResponse = harness
     .client
     .request(
       message_types::SET_AUTOSTART_REQUEST,
       message_types::SET_AUTOSTART_RESPONSE,
       &SetAutostartRequest {
         request_id: new_request_id("test-set-autostart"),
-        mode: cadder_protocol::AutostartMode::Daemon,
+        mode: cadder_ipc::AutostartMode::Daemon,
       },
     )
     .await
     .unwrap();
-  let history = query_history(&harness.client, cadder_protocol::HistoryKind::Autostart).await;
+  let history = query_history(&harness.client, cadder_ipc::HistoryKind::Autostart).await;
 
   assert!(!response.accepted);
-  assert_eq!(
-    response.status,
-    cadder_protocol::AutostartStatus::Unsupported
-  );
+  assert_eq!(response.status, cadder_ipc::AutostartStatus::Unsupported);
   assert!(response.target.is_none());
   assert_eq!(
     response
@@ -299,7 +293,7 @@ async fn ipc_iis_operator_requests_return_typed_responses() {
   assert!(!handoff.accepted);
   assert_eq!(
     handoff.issue.as_ref().map(|issue| issue.kind),
-    Some(cadder_protocol::IisIssueKind::HandoffUnavailable)
+    Some(cadder_ipc::IisIssueKind::HandoffUnavailable)
   );
   assert!(handoff.message.contains("Upgrade Cadder"));
   assert!(handoff.binding.is_none());
@@ -317,7 +311,7 @@ async fn shutdown_coordinator_ipc_request_stops_server_and_rejects_new_clients()
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
+      &cadder_ipc::ShutdownDaemonRequest {
         request_id: new_request_id("shutdown-daemon"),
       },
     )
@@ -371,7 +365,7 @@ async fn shutdown_daemon_request_acknowledges_then_closes_after_stop_timeout() {
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
+      &cadder_ipc::ShutdownDaemonRequest {
         request_id: new_request_id("shutdown-daemon"),
       },
     )
@@ -402,9 +396,9 @@ async fn shutdown_daemon_request_acknowledges_then_closes_after_stop_timeout() {
   let snapshot = state.snapshot().await;
   let history = harness
     .state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: new_request_id("shutdown-history"),
-      kind: Some(cadder_protocol::HistoryKind::Runtime),
+      kind: Some(cadder_ipc::HistoryKind::Runtime),
       limit: Some(100),
     })
     .await;
@@ -697,7 +691,7 @@ async fn fake_caddy_reload_tracks_effective_config_after_domain_toggle() {
     restored.registrations[0].registered_domains[0].activation_state,
     ActivationState::Active
   );
-  let history = query_history(&harness.client, cadder_protocol::HistoryKind::Registration).await;
+  let history = query_history(&harness.client, cadder_ipc::HistoryKind::Registration).await;
   assert!(history.records.iter().any(|record| {
     record
       .summary
@@ -1143,7 +1137,7 @@ async fn shutdown_after_runtime_child_exit_is_accepted() {
     .request(
       message_types::SHUTDOWN_DAEMON_REQUEST,
       message_types::SHUTDOWN_DAEMON_RESPONSE,
-      &cadder_protocol::ShutdownDaemonRequest {
+      &cadder_ipc::ShutdownDaemonRequest {
         request_id: new_request_id("shutdown-daemon"),
       },
     )
@@ -1368,7 +1362,7 @@ async fn ipc_reports_unsupported_message_type() {
       .capabilities
       .as_ref()
       .expect("protocol error response should advertise daemon capabilities")
-      .supports(cadder_protocol::capabilities::LOGS)
+      .supports(cadder_ipc::capabilities::LOGS)
   );
   harness.shutdown().await;
 }
@@ -1382,13 +1376,13 @@ async fn operation_registry_rejects_missing_capability_before_payload_decode() {
   capabilities.supported_capabilities = capabilities
     .supported_capabilities
     .iter()
-    .filter(|capability| capability.as_str() != cadder_protocol::capabilities::LOGS)
+    .filter(|capability| capability.as_str() != cadder_ipc::capabilities::LOGS)
     .cloned()
     .collect();
   capabilities.supported_capability_versions = capabilities
     .supported_capability_versions
     .iter()
-    .filter(|capability| capability.name != cadder_protocol::capabilities::LOGS)
+    .filter(|capability| capability.name != cadder_ipc::capabilities::LOGS)
     .cloned()
     .collect();
   let request = IpcEnvelope {
@@ -1421,7 +1415,7 @@ async fn operation_registry_rejects_missing_capability_before_payload_decode() {
   assert_eq!(response.error.code.as_str(), "unsupported_capability");
   assert_eq!(
     response.error.required_capability.as_deref(),
-    Some(cadder_protocol::capabilities::LOGS)
+    Some(cadder_ipc::capabilities::LOGS)
   );
   harness.shutdown().await;
 }
@@ -1464,7 +1458,7 @@ async fn ipc_rejects_protocol_version_below_compatibility_floor_with_typed_guida
     },
   )
   .unwrap();
-  request.protocol_version = cadder_protocol::MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1);
+  request.protocol_version = cadder_ipc::MIN_COMPATIBLE_PROTOCOL_VERSION.saturating_sub(1);
   let rendered = serde_json::to_string(&request).unwrap();
 
   write_raw_line(&mut writer, &format!("{rendered}\n")).await;
@@ -1493,7 +1487,7 @@ async fn ipc_rejects_protocol_version_below_compatibility_floor_with_typed_guida
       .capabilities
       .as_ref()
       .expect("protocol error response should advertise daemon capabilities")
-      .supports(cadder_protocol::capabilities::LOGS)
+      .supports(cadder_ipc::capabilities::LOGS)
   );
   harness.shutdown().await;
 }
@@ -1787,7 +1781,7 @@ async fn ensure_daemon_running_returns_ok_when_socket_is_already_accepting() {
   peer.finish().await;
 }
 
-async fn query_state(client: &CadderClient) -> cadder_protocol::GuiStateSnapshot {
+async fn query_state(client: &CadderClient) -> cadder_ipc::GuiStateSnapshot {
   let response: QueryStateResponse = client
     .request(
       message_types::QUERY_STATE_REQUEST,
@@ -1814,7 +1808,7 @@ async fn wait_for_empty_registrations(client: &CadderClient, failure_message: &s
 async fn wait_for_runtime_status(
   client: &CadderClient,
   status: RuntimeStatus,
-) -> cadder_protocol::GuiStateSnapshot {
+) -> cadder_ipc::GuiStateSnapshot {
   for _ in 0..COMMAND_LOG_WAIT_ATTEMPTS {
     let snapshot = query_state(client).await;
     if snapshot.runtime.status == status {
@@ -1874,13 +1868,13 @@ async fn wait_for_runtime_control_log(
 
 async fn query_history(
   client: &CadderClient,
-  kind: cadder_protocol::HistoryKind,
-) -> cadder_protocol::QueryHistoryResponse {
+  kind: cadder_ipc::HistoryKind,
+) -> cadder_ipc::QueryHistoryResponse {
   client
     .request(
       message_types::QUERY_HISTORY_REQUEST,
       message_types::QUERY_HISTORY_RESPONSE,
-      &cadder_protocol::QueryHistoryRequest {
+      &cadder_ipc::QueryHistoryRequest {
         request_id: new_request_id("test-history"),
         kind: Some(kind),
         limit: Some(20),

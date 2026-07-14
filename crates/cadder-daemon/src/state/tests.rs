@@ -10,7 +10,7 @@ use crate::{
   CaddyConfigAdapter, CaddyConfigCoordinator, ProcessRuntime, RealCaddyResolver, RuntimePaths,
   operation_fence::RevokeOutcome,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   AutostartMode, AutostartStatus, EntrypointInstanceIdentity, LogAttributionKind, LogSeverity,
   LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity, QueryLogsRequest, RegisteredDomain,
   SourcePath,
@@ -538,7 +538,7 @@ async fn register_and_unregister_preserve_owner_boundary() {
   assert!(unregistered.snapshot.registrations.is_empty());
   assert_eq!(state.inner.lock().await.sequence, 2);
   let history = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "registration-history".to_string(),
       kind: Some(HistoryKind::Registration),
       limit: Some(10),
@@ -985,7 +985,7 @@ async fn set_autostart_fails_closed_without_history() {
     })
     .await;
   let history = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "history".to_string(),
       kind: Some(HistoryKind::Autostart),
       limit: Some(10),
@@ -1022,7 +1022,7 @@ async fn revoked_autostart_fence_prevents_apply_and_history() {
     )
     .await;
   let history = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "history".to_string(),
       kind: Some(HistoryKind::Autostart),
       limit: Some(10),
@@ -1998,7 +1998,7 @@ async fn registration_event_matches_the_published_mock_runtime_state() {
   assert_eq!(event.snapshot.config, snapshot.config);
   assert_eq!(
     event.snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Running
+    cadder_ipc::RuntimeStatus::Running
   );
 }
 
@@ -2016,10 +2016,7 @@ async fn inactive_registration_commits_through_the_stop_transaction() {
   let snapshot = state.snapshot().await;
 
   assert!(response.accepted);
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Idle
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Idle);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Idle);
   assert_eq!(snapshot.registrations.len(), 1);
   assert!(!paths.effective_config_path().exists());
@@ -2211,7 +2208,7 @@ async fn query_history_returns_persisted_registration_events() {
     .await;
 
   let response = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "history".to_string(),
       kind: Some(HistoryKind::Registration),
       limit: Some(10),
@@ -2249,7 +2246,7 @@ async fn query_history_reports_storage_diagnostics_when_worker_queue_is_full() {
 
   let response = tokio::time::timeout(
     std::time::Duration::from_millis(100),
-    state.query_history(cadder_protocol::QueryHistoryRequest {
+    state.query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "history".to_string(),
       kind: None,
       limit: Some(10),
@@ -2288,10 +2285,7 @@ async fn registration_storage_failure_rolls_back_runtime_and_memory_state() {
   assert!(!response.accepted);
   assert!(response.message.contains("durable storage failed"));
   assert!(snapshot.registrations.is_empty());
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Idle
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Idle);
   release.send(()).unwrap();
   state.store.contain_shutdown().await.unwrap();
 }
@@ -2363,7 +2357,7 @@ async fn operation_fence_timeout_before_delayed_commit_preserves_state() {
   let result = pending.await.unwrap();
   let snapshot = state.snapshot().await;
   let history = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "operation-fence-history".to_string(),
       kind: None,
       limit: Some(10),
@@ -2412,7 +2406,7 @@ async fn operation_fence_revoke_after_runtime_apply_rolls_back_before_worker_fin
   let result = pending.await.unwrap();
   let snapshot = state.snapshot().await;
   let history = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "operation-fence-after-apply-history".to_string(),
       kind: None,
       limit: Some(10),
@@ -2421,10 +2415,7 @@ async fn operation_fence_revoke_after_runtime_apply_rolls_back_before_worker_fin
 
   assert_eq!(result.unwrap_err(), CommitRejection::Revoked);
   assert!(snapshot.registrations.is_empty());
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Idle
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Idle);
   assert!(!paths.effective_config_path().exists());
   assert!(history.records.is_empty());
   assert_eq!(state.inner.lock().await.sequence, 0);
@@ -2451,7 +2442,7 @@ async fn operation_fence_revoke_after_runtime_stop_restores_previous_registratio
   let previous_config = fs::read(paths.effective_config_path()).unwrap();
   let sequence_before = state.inner.lock().await.sequence;
   let history_before = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "stop-rollback-history-before".to_string(),
       kind: None,
       limit: Some(10),
@@ -2486,7 +2477,7 @@ async fn operation_fence_revoke_after_runtime_stop_restores_previous_registratio
   );
   let snapshot = state.snapshot().await;
   let history_after = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "stop-rollback-history-after".to_string(),
       kind: None,
       limit: Some(10),
@@ -2499,10 +2490,7 @@ async fn operation_fence_revoke_after_runtime_stop_restores_previous_registratio
     snapshot.registrations[0].activation_state,
     ActivationState::Active
   );
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Running
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Running);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
   assert_eq!(
     fs::read(paths.effective_config_path()).unwrap(),
@@ -2541,7 +2529,7 @@ async fn operation_fence_revoke_after_unregister_reload_restores_all_registratio
   let previous_config = fs::read(paths.effective_config_path()).unwrap();
   let sequence_before = state.inner.lock().await.sequence;
   let history_before = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "reload-rollback-history-before".to_string(),
       kind: None,
       limit: Some(10),
@@ -2576,7 +2564,7 @@ async fn operation_fence_revoke_after_unregister_reload_restores_all_registratio
   );
   let snapshot = state.snapshot().await;
   let history_after = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "reload-rollback-history-after".to_string(),
       kind: None,
       limit: Some(10),
@@ -2586,10 +2574,7 @@ async fn operation_fence_revoke_after_unregister_reload_restores_all_registratio
     .len();
 
   assert_eq!(snapshot.registrations.len(), 2);
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Running
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Running);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
   assert_eq!(
     fs::read(paths.effective_config_path()).unwrap(),
@@ -2655,7 +2640,7 @@ async fn operation_fence_revoke_after_entrypoint_disable_restores_active_runtime
   let previous_config = fs::read(paths.effective_config_path()).unwrap();
   let sequence_before = state.inner.lock().await.sequence;
   let history_before = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "entrypoint-rollback-history-before".to_string(),
       kind: None,
       limit: Some(10),
@@ -2693,7 +2678,7 @@ async fn operation_fence_revoke_after_entrypoint_disable_restores_active_runtime
   );
   let snapshot = state.snapshot().await;
   let history_after = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "entrypoint-rollback-history-after".to_string(),
       kind: None,
       limit: Some(10),
@@ -2706,10 +2691,7 @@ async fn operation_fence_revoke_after_entrypoint_disable_restores_active_runtime
     snapshot.registrations[0].activation_state,
     ActivationState::Active
   );
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Running
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Running);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
   assert_eq!(
     fs::read(paths.effective_config_path()).unwrap(),
@@ -2742,7 +2724,7 @@ async fn operation_fence_revoke_after_domain_disable_restores_active_domains() {
   let previous_config = fs::read(paths.effective_config_path()).unwrap();
   let sequence_before = state.inner.lock().await.sequence;
   let history_before = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "domain-rollback-history-before".to_string(),
       kind: None,
       limit: Some(10),
@@ -2780,7 +2762,7 @@ async fn operation_fence_revoke_after_domain_disable_restores_active_domains() {
   );
   let snapshot = state.snapshot().await;
   let history_after = state
-    .query_history(cadder_protocol::QueryHistoryRequest {
+    .query_history(cadder_ipc::QueryHistoryRequest {
       request_id: "domain-rollback-history-after".to_string(),
       kind: None,
       limit: Some(10),
@@ -2795,10 +2777,7 @@ async fn operation_fence_revoke_after_domain_disable_restores_active_domains() {
       .iter()
       .all(|domain| domain.activation_state == ActivationState::Active)
   );
-  assert_eq!(
-    snapshot.runtime.status,
-    cadder_protocol::RuntimeStatus::Running
-  );
+  assert_eq!(snapshot.runtime.status, cadder_ipc::RuntimeStatus::Running);
   assert_eq!(snapshot.config.status, ConfigApplyStatus::Applied);
   assert_eq!(
     fs::read(paths.effective_config_path()).unwrap(),
