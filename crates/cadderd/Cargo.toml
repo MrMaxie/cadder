@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cadder per-user Caddy coordinator daemon"
+description = "Cadder portable Caddy coordinator daemon"
 
 [dependencies]
 anyhow = "1.0.102"

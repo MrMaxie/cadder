@@ -231,9 +231,7 @@ struct E2eHarness {
   container: Option<ContainerAsync<GenericImage>>,
   container_host: String,
   container_port: u16,
-  runtime_dir: PathBuf,
   client: CadderClient,
-  daemon_path: PathBuf,
   shim_path: PathBuf,
   proxy_command: PathBuf,
   proxy_log_path: PathBuf,
@@ -242,11 +240,13 @@ struct E2eHarness {
 
 impl E2eHarness {
   async fn start() -> Result<Self> {
-    let daemon_path = cadder_binary("CADDER_E2E_CADDERD", "cadderd")?;
-    let shim_path = cadder_binary("CADDER_E2E_CADDY_SHIM", "caddy")?;
+    let daemon_source = cadder_binary("CADDER_E2E_CADDERD", "cadderd")?;
+    let shim_source = cadder_binary("CADDER_E2E_CADDY_SHIM", "caddy")?;
     let temp = tempfile::tempdir().context("create e2e temp directory")?;
     let runtime_dir = temp.path().join("runtime");
     fs::create_dir_all(&runtime_dir).context("create e2e runtime directory")?;
+    let daemon_path = install_portable_binary(&daemon_source, &runtime_dir)?;
+    let shim_path = install_portable_binary(&shim_source, &runtime_dir)?;
 
     let mount = Mount::bind_mount(temp.path().display().to_string(), CONTAINER_WORKSPACE)
       .with_access_mode(AccessMode::ReadWrite);
@@ -272,7 +272,7 @@ impl E2eHarness {
     let proxy_log_path = temp.path().join("caddy-proxy.log");
     let paths = RuntimePaths::resolve(Some(runtime_dir.clone()))?;
     let client = CadderClient::new(paths);
-    let mut daemon = spawn_daemon(&daemon_path, &runtime_dir, &proxy_command).await?;
+    let mut daemon = spawn_daemon(&daemon_path, &proxy_command).await?;
     wait_for_daemon(&client, &mut daemon).await?;
 
     Ok(Self {
@@ -280,9 +280,7 @@ impl E2eHarness {
       container: Some(container),
       container_host,
       container_port,
-      runtime_dir,
       client,
-      daemon_path,
       shim_path,
       proxy_command,
       proxy_log_path,
@@ -302,10 +300,6 @@ impl E2eHarness {
   async fn spawn_shim(&self, project: &Project) -> Result<ManagedChild> {
     let mut command = Command::new(&self.shim_path);
     command
-      .arg("--cadder-runtime-dir")
-      .arg(&self.runtime_dir)
-      .arg("--cadder-daemon-path")
-      .arg(&self.daemon_path)
       .arg("run")
       .arg("--config")
       .arg(&project.config_path)
@@ -525,15 +519,9 @@ struct HttpResponse {
   body: String,
 }
 
-async fn spawn_daemon(
-  daemon_path: &Path,
-  runtime_dir: &Path,
-  proxy_command: &Path,
-) -> Result<Child> {
+async fn spawn_daemon(daemon_path: &Path, proxy_command: &Path) -> Result<Child> {
   let mut command = Command::new(daemon_path);
   command
-    .arg("--runtime-dir")
-    .arg(runtime_dir)
     .arg("--real-caddy")
     .arg(proxy_command)
     .stdin(Stdio::null())
@@ -543,6 +531,28 @@ async fn spawn_daemon(
   command
     .spawn()
     .with_context(|| format!("start cadderd {}", daemon_path.display()))
+}
+
+fn install_portable_binary(source: &Path, runtime_dir: &Path) -> Result<PathBuf> {
+  let file_name = source
+    .file_name()
+    .context("Cadder binary path must include a file name")?;
+  let destination = runtime_dir.join(file_name);
+  fs::copy(source, &destination).with_context(|| {
+    format!(
+      "copy portable Cadder binary from {} to {}",
+      source.display(),
+      destination.display()
+    )
+  })?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(&destination)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&destination, permissions)?;
+  }
+  Ok(destination)
 }
 
 async fn wait_for_daemon(client: &CadderClient, daemon: &mut Child) -> Result<()> {

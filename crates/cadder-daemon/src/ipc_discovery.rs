@@ -457,18 +457,6 @@ fn open_publication_lock(paths: &RuntimePaths) -> io::Result<File> {
   open_platform_publication_lock(paths)
 }
 
-#[cfg(unix)]
-fn ensure_runtime_dir(paths: &RuntimePaths) -> io::Result<()> {
-  crate::ipc_unix_security::secure_runtime_paths(paths)
-}
-
-#[cfg(windows)]
-fn ensure_runtime_dir(paths: &RuntimePaths) -> io::Result<()> {
-  fs::create_dir_all(paths.runtime_dir())?;
-  crate::ipc_windows_security::secure_owner_only_runtime_directory(paths.runtime_dir())
-}
-
-#[cfg(not(any(unix, windows)))]
 fn ensure_runtime_dir(paths: &RuntimePaths) -> io::Result<()> {
   fs::create_dir_all(paths.runtime_dir())
 }
@@ -959,7 +947,7 @@ mod tests {
   }
 
   #[test]
-  fn discovery_rejected_runtime_path_preserves_permission_classification() {
+  fn discovery_allows_a_portable_runtime_directory_link() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("target");
     let runtime = temp.path().join("runtime-link");
@@ -974,7 +962,7 @@ mod tests {
 
     assert_eq!(
       error.local_error().unwrap().code(),
-      LocalIpcErrorCode::PermissionDenied
+      LocalIpcErrorCode::DiscoveryUnavailable
     );
   }
 

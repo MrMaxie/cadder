@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use cadder_daemon::{
   CaddyBackendMode, DaemonLaunchMode, DaemonLaunchOptions, DaemonOptions,
-  RuntimeGuardHiddenOptions, RuntimePaths, RuntimeProfile, ensure_daemon_running_with_options,
-  run_daemon, run_runtime_guard,
+  RuntimeGuardHiddenOptions, RuntimePaths, ensure_daemon_running_with_options, run_daemon,
+  run_runtime_guard,
 };
 use clap::Parser;
 use std::{env, path::PathBuf};
@@ -12,23 +12,10 @@ use tokio::sync::watch;
 #[command(
   name = "cadderd",
   version,
-  about = "Cadder per-user Caddy coordinator daemon",
-  long_about = "Runs the per-user Cadder daemon that owns local IPC, project registrations, generated Caddy config, the Cadder-owned real Caddy process, diagnostics, and bounded logs."
+  about = "Cadder portable Caddy coordinator daemon",
+  long_about = "Runs the portable Cadder daemon that owns local IPC, project registrations, generated Caddy config, the Cadder-owned real Caddy process, diagnostics, and bounded logs."
 )]
 struct Args {
-  #[arg(
-    long,
-    help = "Override the Cadder runtime directory for IPC, lock, config, metadata, and logs"
-  )]
-  runtime_dir: Option<PathBuf>,
-
-  #[arg(
-    long,
-    value_parser = RuntimeProfile::parse_cli,
-    help = "Runtime profile used when --runtime-dir and CADDER_RUNTIME_DIR are not set"
-  )]
-  runtime_profile: Option<RuntimeProfile>,
-
   #[arg(
     long = "real-caddy",
     help = "Absolute path used when Cadder starts the real Caddy executable"
@@ -85,8 +72,8 @@ async fn main() -> Result<()> {
   let current_exe = env::current_exe().context("resolve current cadderd executable")?;
   run_daemon(
     DaemonOptions {
-      runtime_dir: args.runtime_dir,
-      runtime_profile: args.runtime_profile,
+      runtime_dir: None,
+      runtime_profile: None,
       real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,
       runtime_guard_executable: Some(current_exe),
@@ -97,7 +84,7 @@ async fn main() -> Result<()> {
 }
 
 async fn launch_runtime_guard(args: Args) -> Result<()> {
-  let paths = RuntimePaths::resolve_with_profile(args.runtime_dir, args.runtime_profile)?;
+  let paths = RuntimePaths::resolve(None)?;
   run_runtime_guard(RuntimeGuardHiddenOptions {
     paths,
     daemon_instance_id: args
@@ -114,14 +101,14 @@ async fn launch_runtime_guard(args: Args) -> Result<()> {
 }
 
 async fn launch_background_daemon(args: Args) -> Result<()> {
-  let paths = RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)?;
+  let paths = RuntimePaths::resolve(None)?;
   let current_exe = env::current_exe().context("resolve current cadderd executable")?;
 
   ensure_daemon_running_with_options(
     &paths,
     DaemonLaunchOptions {
       explicit_daemon: Some(current_exe),
-      runtime_profile: args.runtime_profile,
+      runtime_profile: None,
       real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,
       launch_mode: DaemonLaunchMode::Background,
@@ -163,17 +150,11 @@ mod tests {
     let help = Args::command().render_long_help().to_string();
 
     assert!(
-      help.contains("Override the Cadder runtime directory"),
-      "long help output should describe --runtime-dir: {help}"
-    );
-    assert!(
       help.contains("Absolute path used when Cadder starts the real Caddy executable"),
       "long help output should describe --real-caddy: {help}"
     );
-    assert!(
-      help.contains("Runtime profile used when --runtime-dir"),
-      "long help output should describe --runtime-profile: {help}"
-    );
+    assert!(!help.contains("--runtime-dir"));
+    assert!(!help.contains("--runtime-profile"));
     assert!(
       help.contains("Caddy backend mode used by the daemon"),
       "long help output should describe --caddy-backend: {help}"
@@ -186,17 +167,18 @@ mod tests {
 
   #[test]
   fn background_flag_is_explicit_detached_launcher() {
-    let args = Args::parse_from([
-      "cadderd",
-      "--background",
-      "--runtime-dir",
-      "C:/temp/cadder-runtime",
-      "--caddy-backend",
-      "mock",
-    ]);
+    let args = Args::parse_from(["cadderd", "--background", "--caddy-backend", "mock"]);
 
     assert!(args.background);
     assert!(!args.detach_ready);
     assert_eq!(args.caddy_backend, Some(CaddyBackendMode::Mock));
+  }
+
+  #[test]
+  fn runtime_selection_options_are_rejected() {
+    let error = Args::try_parse_from(["cadderd", "--runtime-dir", "runtime-test"])
+      .expect_err("removed runtime selection option should be rejected");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
   }
 }

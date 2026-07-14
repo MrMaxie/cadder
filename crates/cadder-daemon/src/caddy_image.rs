@@ -44,6 +44,7 @@ const REQUIRED_CADDY_MODULES: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaddyImageSource {
   ExplicitDaemonOverride,
+  PortableConfiguration,
   UserConfiguration,
   SystemConfiguration,
   Path,
@@ -55,6 +56,7 @@ impl CaddyImageSource {
   pub(crate) fn description(self) -> &'static str {
     match self {
       Self::ExplicitDaemonOverride => "explicit daemon override",
+      Self::PortableConfiguration => "portable configuration",
       Self::UserConfiguration => "per-user configuration",
       Self::SystemConfiguration => "system configuration",
       Self::Path => "PATH",

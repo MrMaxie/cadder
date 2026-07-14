@@ -405,6 +405,7 @@ dependencies = [
  "cadder-daemon",
  "cadder-operator",
  "cadder-protocol",
+ "clap",
  "color-eyre",
  "crossterm",
  "ratatui",

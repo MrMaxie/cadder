@@ -46,21 +46,23 @@ fn unique_trusted_runtime_dir(name: &str) -> PathBuf {
 }
 
 fn test_cadderd_executable(runtime_dir: &Path) -> PathBuf {
-  #[cfg(windows)]
-  {
-    let paths = RuntimePaths::resolve(Some(runtime_dir.to_path_buf())).unwrap();
-    paths.ensure_dirs().unwrap();
-    let executable = runtime_dir.join("cadderd-test.exe");
-    if !executable.exists() {
-      std::fs::copy(env!("CARGO_BIN_EXE_cadderd"), &executable).unwrap();
+  std::fs::create_dir_all(runtime_dir).unwrap();
+  let executable = runtime_dir.join(if cfg!(windows) {
+    "cadderd.exe"
+  } else {
+    "cadderd"
+  });
+  if !executable.exists() {
+    std::fs::copy(env!("CARGO_BIN_EXE_cadderd"), &executable).unwrap();
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+      permissions.set_mode(0o755);
+      std::fs::set_permissions(&executable, permissions).unwrap();
     }
-    executable
   }
-
-  #[cfg(not(windows))]
-  {
-    PathBuf::from(env!("CARGO_BIN_EXE_cadderd"))
-  }
+  executable
 }
 
 struct RetainedChild(Option<Child>);
@@ -126,11 +128,9 @@ impl Drop for RetainedChild {
   }
 }
 
-fn retained_cadderd(runtime_dir: &PathBuf) -> RetainedChild {
+fn retained_cadderd(runtime_dir: &Path) -> RetainedChild {
   let mut command = Command::new(test_cadderd_executable(runtime_dir));
   command
-    .arg("--runtime-dir")
-    .arg(runtime_dir)
     .arg("--caddy-backend")
     .arg("mock")
     .stdin(Stdio::null())
@@ -146,8 +146,6 @@ fn retained_real_cadderd(
 ) -> RetainedChild {
   let mut command = Command::new(test_cadderd_executable(runtime_dir));
   command
-    .arg("--runtime-dir")
-    .arg(runtime_dir)
     .arg("--caddy-backend")
     .arg("real")
     .arg("--real-caddy")
@@ -275,9 +273,7 @@ async fn cadderd_binary_repeated_start_succeeds_when_runtime_is_already_running(
   let mut child = retained_cadderd(&runtime_dir);
 
   let state = wait_for_state_or_exit(&client, &mut child).await;
-  let repeated = Command::new(env!("CARGO_BIN_EXE_cadderd"))
-    .arg("--runtime-dir")
-    .arg(&runtime_dir)
+  let repeated = Command::new(test_cadderd_executable(&runtime_dir))
     .arg("--caddy-backend")
     .arg("mock")
     .stdin(Stdio::null())
@@ -327,8 +323,6 @@ async fn runtime_guard_rejects_wrong_bootstrap_secret_before_record_or_lock() {
   let mut command = Command::new(test_cadderd_executable(&runtime_dir));
   command
     .arg("--runtime-guard")
-    .arg("--runtime-dir")
-    .arg(&runtime_dir)
     .arg("--runtime-guard-instance")
     .arg(&context.daemon_instance_id)
     .arg("--runtime-guard-owner-generation")

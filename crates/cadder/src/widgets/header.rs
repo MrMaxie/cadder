@@ -49,7 +49,7 @@ impl Widget for HeaderBar {
         buf,
         status_x,
         area.y,
-        "cadderd",
+        "Cadder",
         self.runtime_status.connection_label(),
         self.runtime_status.is_connected(),
       );
@@ -58,7 +58,7 @@ impl Widget for HeaderBar {
         buf,
         status_x + 23,
         area.y,
-        "caddy",
+        "Caddy",
         self.runtime_status.caddy_label(),
         self.runtime_status.caddy_label() == "running",
       );

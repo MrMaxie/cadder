@@ -13,7 +13,7 @@ See [Releases and downloads](../../reference/releases/) if you are deciding betw
 
 ## Configure Real Caddy
 
-Copy the provided `cadder.toml` template to the standard per-user Cadder configuration directory and set an absolute `defaults.real_caddy` path. You can skip this step when a trusted native `caddy` is already on `PATH`. See [cadder.toml](../../user-guide/cadder-toml/) for profiles and platform syntax.
+Edit the provided `cadder.toml` beside the Cadder executables. Set `[caddy].real_command` to the real Caddy command on `PATH`, or `[caddy].real_path` to its absolute path. See [cadder.toml](../../user-guide/cadder-toml/) for syntax.
 
 ## Run A Project
 

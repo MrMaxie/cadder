@@ -23,8 +23,6 @@ const COVERAGE_FAIL_UNDER_LINES: f64 = 85.0;
 const EXPECTED_OPENSPEC_VERSION: &str = "1.5.0";
 const COVERAGE_EXCLUDED_PACKAGES: [&str; 0] = [];
 const COVERAGE_IGNORED_FILENAME_REGEX: &str = "";
-const CADDER_RUNTIME_PROFILE_ENV: &str = "CADDER_RUNTIME_PROFILE";
-const CADDER_DEV_WORKSPACE_ENV: &str = "CADDER_DEV_WORKSPACE";
 const CADDER_CADDY_BACKEND_ENV: &str = "CADDER_CADDY_BACKEND";
 const DOCS_DOWNLOAD_SCRIPT: &str = "docs/site/public/cadder-downloads.js";
 const DOCS_WEBMANIFEST: &str = "docs/site/public/site.webmanifest";
@@ -200,13 +198,12 @@ const CANONICAL_ASSET_COPIES: [(&str, &str, &str); 2] = [
 ];
 const OBSOLETE_SCAFFOLD_ASSETS: [(&str, &str); 0] = [];
 const SAMPLE_CADDER_TOML: &str = r#"# Cadder configuration template.
-# Copy this file to the standard per-user Cadder configuration directory.
+# Keep this file beside the Cadder executables.
 
-[defaults]
-# real_caddy = "/absolute/path/to/caddy"
+[caddy]
+# real_command = "caddy-real"
+# real_path = "/absolute/path/to/caddy"
 
-# [profiles.dev]
-# real_caddy = "/absolute/path/to/caddy"
 "#;
 
 #[derive(Debug, Clone, Copy)]
@@ -941,14 +938,8 @@ struct DevEnvironment {
 
 impl DevEnvironment {
   fn for_workspace() -> Self {
-    let workspace_root = workspace_root();
-    let workspace = workspace_root.canonicalize().unwrap_or(workspace_root);
     Self {
-      values: vec![
-        (CADDER_RUNTIME_PROFILE_ENV, "dev".to_string()),
-        (CADDER_DEV_WORKSPACE_ENV, workspace.display().to_string()),
-        (CADDER_CADDY_BACKEND_ENV, "mock".to_string()),
-      ],
+      values: vec![(CADDER_CADDY_BACKEND_ENV, "mock".to_string())],
     }
   }
 

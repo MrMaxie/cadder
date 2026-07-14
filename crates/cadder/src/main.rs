@@ -4,13 +4,13 @@ mod logs;
 mod widgets;
 
 use std::io;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use app::App;
-use cadder_daemon::{DaemonLaunchOptions, RuntimeProfile};
+use cadder_daemon::DaemonLaunchOptions;
 use cadder_operator::OperatorContext;
+use clap::{Parser, Subcommand, error::ErrorKind};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -18,12 +18,28 @@ use ratatui::widgets::StatefulWidget;
 use ratatui::{DefaultTerminal, Frame};
 use widgets::{
   AppTabs, DetailOverlay, DimBackground, DomainsTab, HeaderBar, LOG_SHORTCUTS, LogsTab,
-  MAIN_SHORTCUTS, OFFLINE_SHORTCUTS, SettingsTab, ShortcutsBar,
+  MAIN_SHORTCUTS, OFFLINE_SHORTCUTS, STARTING_SHORTCUTS, SettingsTab, ShortcutsBar, StatusTab,
 };
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const ROOT_HELP: &str = "Cadder operator\n\nUsage:\n  cadder\n  cadder [OPTIONS] tui\n\nCommands:\n  tui  Open the full-screen operator\n\nOptions:\n  --runtime-dir <PATH>  Select an explicit runtime directory\n  --profile <NAME>      Select the default or dev runtime profile\n  -h, --help            Print help\n";
+#[derive(Debug, Parser)]
+#[command(
+  name = "cadder",
+  version,
+  about = "Cadder operator",
+  arg_required_else_help = true
+)]
+struct Cli {
+  #[command(subcommand)]
+  command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+  /// Open the full-screen operator.
+  Tui,
+}
 
 fn main() -> ExitCode {
   if let Err(error) = color_eyre::install() {
@@ -31,34 +47,34 @@ fn main() -> ExitCode {
     return ExitCode::from(9);
   }
 
-  match parse_args(std::env::args().skip(1)) {
-    Ok(ParseResult::Help) => {
-      print!("{ROOT_HELP}");
-      ExitCode::SUCCESS
-    }
-    Ok(ParseResult::Tui(options)) => match run_tui(options) {
+  match Cli::try_parse() {
+    Ok(Cli {
+      command: Command::Tui,
+    }) => match run_tui() {
       Ok(()) => ExitCode::SUCCESS,
       Err(error) => {
         eprintln!("Could not run the Cadder TUI: {error}");
         ExitCode::from(9)
       }
     },
-    Err(message) => {
-      eprintln!("{message}\n\n{ROOT_HELP}");
-      ExitCode::from(2)
+    Err(error) => {
+      let exit_code = cli_error_exit_code(&error);
+      let _ = error.print();
+      exit_code
     }
   }
 }
 
-fn run_tui(options: TuiOptions) -> Result<()> {
-  let context = OperatorContext::new(
-    "tui",
-    options.runtime_dir,
-    DaemonLaunchOptions {
-      runtime_profile: options.profile,
-      ..DaemonLaunchOptions::default()
-    },
-  )?;
+fn cli_error_exit_code(error: &clap::Error) -> ExitCode {
+  if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+    ExitCode::SUCCESS
+  } else {
+    ExitCode::from(error.exit_code() as u8)
+  }
+}
+
+fn run_tui() -> Result<()> {
+  let context = OperatorContext::new("tui", None, DaemonLaunchOptions::default())?;
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .build()?;
@@ -75,16 +91,27 @@ fn run(
   terminal: &mut DefaultTerminal,
   app: &mut App,
 ) -> Result<()> {
+  let mut daemon_start: Option<tokio::task::JoinHandle<std::result::Result<(), OperatorError>>> =
+    None;
+
   while !app.should_quit() {
     runtime.block_on(app.refresh_if_due());
+    runtime.block_on(tokio::task::yield_now());
+    if daemon_start.as_ref().is_some_and(|task| task.is_finished())
+      && let Some(task) = daemon_start.take()
+    {
+      let result = runtime.block_on(task)?;
+      runtime.block_on(app.complete_daemon_start(result));
+    }
     terminal.draw(|frame| render(frame, app))?;
 
     if event::poll(Duration::from_millis(16))? {
       match handle_event(event::read()?, app)? {
         Some(UiAction::Refresh) => runtime.block_on(app.refresh()),
         Some(UiAction::StartDaemon) => {
-          terminal.draw(|frame| render(frame, app))?;
-          runtime.block_on(app.start_daemon());
+          let context = app.daemon_start_context();
+          daemon_start =
+            Some(runtime.spawn(async move { context.ensure_daemon_running("tui").await }));
         }
         Some(UiAction::Mutate(target)) => {
           terminal.draw(|frame| render(frame, app))?;
@@ -135,6 +162,9 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> Option<U
     KeyCode::PageDown if app.active_tab() == 2 => app.scroll_logs_down(10),
     KeyCode::Up => app.select_previous(),
     KeyCode::Down => app.select_next(),
+    KeyCode::Enter | KeyCode::Char(' ') if app.prepare_start_daemon_from_status() => {
+      return Some(UiAction::StartDaemon);
+    }
     KeyCode::Char(' ') => return app.prepare_toggle_current().map(UiAction::Mutate),
     KeyCode::Char('r' | 'R') => return Some(UiAction::Refresh),
     KeyCode::Char('s' | 'S') if app.prepare_start_daemon() => {
@@ -164,57 +194,6 @@ impl Drop for TerminalRestoreGuard {
   }
 }
 
-#[derive(Default)]
-struct TuiOptions {
-  runtime_dir: Option<PathBuf>,
-  profile: Option<RuntimeProfile>,
-}
-
-enum ParseResult {
-  Help,
-  Tui(TuiOptions),
-}
-
-fn parse_args(args: impl Iterator<Item = String>) -> std::result::Result<ParseResult, String> {
-  let args = args.collect::<Vec<_>>();
-  if args.is_empty()
-    || args
-      .iter()
-      .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-  {
-    return Ok(ParseResult::Help);
-  }
-
-  let mut options = TuiOptions::default();
-  let mut tui_requested = false;
-  let mut index = 0;
-  while index < args.len() {
-    match args[index].as_str() {
-      "tui" if !tui_requested => tui_requested = true,
-      "--runtime-dir" => {
-        index += 1;
-        let value = args
-          .get(index)
-          .ok_or_else(|| "--runtime-dir requires a path.".to_string())?;
-        options.runtime_dir = Some(PathBuf::from(value));
-      }
-      "--profile" => {
-        index += 1;
-        let value = args
-          .get(index)
-          .ok_or_else(|| "--profile requires `default` or `dev`.".to_string())?;
-        options.profile = Some(RuntimeProfile::parse_cli(value)?);
-      }
-      unknown => return Err(format!("Unknown Cadder command or option: `{unknown}`.")),
-    }
-    index += 1;
-  }
-
-  tui_requested
-    .then_some(ParseResult::Tui(options))
-    .ok_or_else(|| "A command is required.".to_string())
-}
-
 fn render(frame: &mut Frame<'_>, app: &mut App) {
   let root = frame.area();
   let (main_area, footer_area) = root_areas(root);
@@ -233,6 +212,8 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
 
   let shortcuts = if app.details().is_some() {
     app::DETAIL_SHORTCUTS.as_slice()
+  } else if app.is_starting_daemon() {
+    STARTING_SHORTCUTS.as_slice()
   } else if app.can_start_daemon() {
     OFFLINE_SHORTCUTS.as_slice()
   } else if app.active_tab() == 2 {
@@ -273,13 +254,25 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
       );
     }
     1 => {
-      let rows = app.settings_rows();
-      StatefulWidget::render(
-        SettingsTab::new(rows),
-        content_area,
-        frame.buffer_mut(),
-        app.active_table_state_mut(),
-      );
+      if app.shows_status_screen() {
+        frame.render_widget(
+          StatusTab::new(
+            app.status_message(),
+            app.connection_guidance(),
+            app.is_starting_daemon(),
+            app.can_start_daemon(),
+          ),
+          content_area,
+        );
+      } else {
+        let rows = app.settings_rows();
+        StatefulWidget::render(
+          SettingsTab::new(rows),
+          content_area,
+          frame.buffer_mut(),
+          app.active_table_state_mut(),
+        );
+      }
     }
     2 => {
       let screen = app.log_screen();
@@ -325,35 +318,51 @@ fn main_areas(area: Rect) -> (Rect, Rect, Rect) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use clap::CommandFactory;
 
   #[test]
-  fn bare_invocation_prints_help_instead_of_starting_tui() {
-    assert!(matches!(
-      parse_args(std::iter::empty()),
-      Ok(ParseResult::Help)
-    ));
+  fn bare_invocation_prints_help_instead_of_starting_the_tui() {
+    let error = Cli::try_parse_from(["cadder"]).expect_err("bare invocation should display help");
+
+    assert_eq!(
+      error.kind(),
+      ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    assert_eq!(cli_error_exit_code(&error), ExitCode::SUCCESS);
   }
 
   #[test]
-  fn tui_accepts_runtime_options_before_and_after_command() {
-    let result = parse_args(
-      ["--profile", "dev", "tui", "--runtime-dir", "runtime-test"]
-        .into_iter()
-        .map(ToString::to_string),
-    )
-    .expect("TUI options should parse");
-    let ParseResult::Tui(options) = result else {
-      panic!("expected TUI invocation");
-    };
-    assert_eq!(options.profile, Some(RuntimeProfile::Dev));
-    assert_eq!(options.runtime_dir, Some(PathBuf::from("runtime-test")));
+  fn tui_is_the_only_operator_command() {
+    let cli = Cli::try_parse_from(["cadder", "tui"]).expect("TUI should parse");
+
+    assert!(matches!(cli.command, Command::Tui));
   }
 
   #[test]
-  fn unknown_command_is_rejected_without_starting_tui() {
-    let Err(error) = parse_args(std::iter::once("web".to_string())) else {
-      panic!("unknown command should be rejected");
-    };
-    assert!(error.contains("Unknown Cadder command"));
+  fn removed_runtime_selection_options_are_rejected() {
+    let error = Cli::try_parse_from(["cadder", "--runtime-dir", "runtime-test", "tui"])
+      .expect_err("runtime selection options should be rejected");
+
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    assert_eq!(error.exit_code(), 2);
+  }
+
+  #[test]
+  fn unknown_command_is_rejected_without_starting_the_tui() {
+    let error =
+      Cli::try_parse_from(["cadder", "web"]).expect_err("unknown commands should be rejected");
+
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    assert_eq!(error.exit_code(), 2);
+  }
+
+  #[test]
+  fn root_help_is_generated_from_the_cli_definition() {
+    let help = Cli::command().render_help().to_string();
+
+    assert!(help.contains("Cadder operator"));
+    assert!(!help.contains("--runtime-dir"));
+    assert!(!help.contains("--profile"));
+    assert!(help.contains("tui"));
   }
 }

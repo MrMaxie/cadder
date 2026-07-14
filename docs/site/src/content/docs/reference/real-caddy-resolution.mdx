@@ -10,19 +10,18 @@ Cadder does not embed Caddy. The daemon resolves and pins one Caddy executable w
 The daemon uses this exact order:
 
 1. An absolute `--real-caddy` daemon-start override.
-2. `profiles.<profile>.real_caddy` in the standard per-user `cadder.toml`.
-3. `defaults.real_caddy` in the per-user file.
-4. `profiles.<profile>.real_caddy` in the system file.
-5. `defaults.real_caddy` in the system file.
-6. A native executable named `caddy` on `PATH` that is not Cadder's shim.
+2. `caddy.real_command` or `caddy.real_path` in `cadder.toml` beside the Cadder executables.
+3. `[caddy]` or `defaults.real_caddy` in the standard per-user file.
+4. The same configuration in the system file.
+5. A native executable named `caddy` on `PATH` that is not Cadder's shim.
 
 An invalid higher-priority value stops resolution. Cadder does not hide a broken configuration by selecting a lower-priority executable.
 
-Project files, registration working directories, files next to Cadder executables, `CADDER_CADDY_REAL_COMMAND`, and shim options do not participate in this chain.
+Project files, registration working directories, `CADDER_CADDY_REAL_COMMAND`, and shim options do not participate in this chain.
 
-## Path validation
+## Selection validation
 
-Every configured value is an absolute path. Cadder canonicalizes the executable and requires a regular native executable. Windows batch scripts and a final reparse point are rejected; Unix executables require an executable mode bit.
+`real_command` names one program resolved through `PATH`; it cannot include arguments or a path. `real_path` is an absolute path. In either case, Cadder canonicalizes the selected executable and requires a regular native executable. Windows batch scripts and a final reparse point are rejected; Unix executables require an executable mode bit.
 
 Cadder does not require a special owner, parent-directory permission layout, or hardened ACL for the Caddy executable or configuration file. Normal Scoop, package-manager, system, and user-local installations are valid inputs. Runtime image pinning, described below, detects replacement after selection.
 
@@ -36,7 +35,7 @@ On Windows, Cadder retains a read-only handle without write or delete sharing fo
 
 ## PATH and recursion safety
 
-PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that are not native executables.
+PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that are not native executables. A configured command checks only its configured program name.
 
 Cadder compares operating-system file identity, not just path text, when excluding its shim. A symlink or hardlink to `cadder-caddy` is therefore skipped even when it appears under the name `caddy`.
 
@@ -44,6 +43,6 @@ Cadder compares operating-system file identity, not just path text, when excludi
 
 The shim does not accept a real-Caddy selector. `caddy run` attaches only to the running Cadder daemon; it never starts an unmanaged Caddy process as recovery.
 
-Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` use the same per-user/system/PATH resolver. Their stderr notice identifies the output as real-Caddy inspection rather than Cadder runtime state.
+Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` use the same portable/per-user/system/PATH resolver. Their stderr notice identifies the output as real-Caddy inspection rather than Cadder runtime state.
 
 If resolution fails, the error names the rejected source and the action that restores a working setup.

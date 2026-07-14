@@ -209,7 +209,7 @@ impl OperatorError {
     Self::new(command, kind, message, guidance).with_ipc_error(error)
   }
 
-  pub fn daemon_start(command: &'static str, paths: &Path, error: IpcClientError) -> Self {
+  pub fn daemon_start(command: &'static str, _paths: &Path, error: IpcClientError) -> Self {
     let permission_denied = error.is_permission_denied();
     let kind = if permission_denied {
       OperatorErrorKind::PermissionOrElevation
@@ -221,10 +221,8 @@ impl OperatorError {
         "Use the account that owns this Cadder runtime and verify access to the daemon executable and runtime directory."
           .to_string()
       } else {
-        format!(
-          "Retry `cadder daemon start --runtime-dir \"{}\"` after fixing the daemon path or startup problem.",
-          paths.display()
-        )
+        "Fix the Cadder startup problem, then open Cadder and start it from Status."
+          .to_string()
       })
     });
 
@@ -322,12 +320,8 @@ pub fn error_indicates_permission(error: &Error) -> bool {
       .contains("access is denied")
 }
 
-pub fn start_guidance(paths: &Path) -> String {
-  format!(
-    "Start `cadderd --runtime-dir \"{}\"` or run `cadder daemon start --runtime-dir \"{}\"`, then retry.",
-    paths.display(),
-    paths.display()
-  )
+pub fn start_guidance(_paths: &Path) -> String {
+  "Open Cadder and start it from Status, then retry.".to_string()
 }
 
 #[cfg(test)]
@@ -361,7 +355,10 @@ mod tests {
 
     assert_eq!(mapped.kind, OperatorErrorKind::DaemonUnavailable);
     assert_eq!(mapped.exit_code().code(), 3);
-    assert!(mapped.guidance.unwrap().contains("cadder daemon start"));
+    assert_eq!(
+      mapped.guidance.as_deref(),
+      Some("Open Cadder and start it from Status, then retry.")
+    );
   }
 
   #[test]

@@ -3167,22 +3167,6 @@ impl CadderClient {
     }
   }
 
-  pub fn from_env() -> IpcClientResult<Self> {
-    RuntimePaths::resolve(None).map(Self::new).map_err(|error| {
-      IpcClientError::local(LocalIpcErrorContext {
-        kind: LocalIpcErrorKind::Transport,
-        phase: IpcClientPhase::EndpointResolve,
-        code: LocalIpcErrorCode::InvalidRuntime,
-        message: "Cadder could not resolve the selected runtime; no request was sent.".into(),
-        guidance: Some("Select a valid Cadder profile or runtime directory, then retry.".into()),
-        retryable: false,
-        request_id: None,
-        operation: None,
-        source: Some(error.into_boxed_dyn_error()),
-      })
-    })
-  }
-
   #[cfg(test)]
   fn with_deadlines(mut self, deadlines: IpcClientDeadlines) -> Self {
     self.deadlines = deadlines;
@@ -4158,6 +4142,7 @@ fn daemon_readiness_timeout(message: &'static str) -> IpcClientError {
 #[derive(Debug, Clone, Default)]
 pub struct DaemonLaunchOptions {
   pub explicit_daemon: Option<PathBuf>,
+  /// Test-only/internal runtime selection seam. Production launchers always use `None`.
   pub runtime_profile: Option<RuntimeProfile>,
   pub real_caddy_override: Option<PathBuf>,
   pub caddy_backend: Option<CaddyBackendMode>,
@@ -4332,10 +4317,7 @@ pub async fn ensure_daemon_running_with_options(
     command.current_dir(daemon_dir);
     prepend_path_dir(&mut command, daemon_dir);
   }
-  command
-    .arg("--runtime-dir")
-    .arg(paths.runtime_dir())
-    .arg("--detach-ready");
+  command.arg("--detach-ready");
   process_config.configure_stdio(&mut command);
   if let Some(real_caddy_override) = options.real_caddy_override {
     command.arg("--real-caddy").arg(real_caddy_override);
@@ -4343,7 +4325,6 @@ pub async fn ensure_daemon_running_with_options(
   if caddy_backend != CaddyBackendMode::Real {
     command.arg("--caddy-backend").arg(caddy_backend.as_str());
   }
-  command.env("CADDER_RUNTIME_DIR", paths.runtime_dir());
   let mut child = command.spawn().map_err(|error| {
     let code = launch_code_for_io(error.kind());
     daemon_launch_error(
@@ -6513,21 +6494,6 @@ mod tests {
       entries,
       BTreeMap::from([("shim-late".to_string(), "nonce-late".to_string())])
     );
-  }
-
-  #[test]
-  fn cadder_client_from_env_uses_runtime_dir_override() {
-    let _lock = lock_env();
-    let _snapshot = EnvSnapshot::capture("CADDER_RUNTIME_DIR");
-    let temp = tempfile::tempdir().unwrap();
-    let runtime_dir = temp.path().join("env-runtime");
-    unsafe {
-      env::set_var("CADDER_RUNTIME_DIR", &runtime_dir);
-    }
-
-    let client = CadderClient::from_env().unwrap();
-
-    assert_eq!(client.paths.runtime_dir(), runtime_dir);
   }
 
   #[test]

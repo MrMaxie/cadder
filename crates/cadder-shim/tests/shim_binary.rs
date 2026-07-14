@@ -137,9 +137,8 @@ fn unsupported_command_does_not_delegate_to_real_caddy() {
 }
 
 #[test]
-fn managed_run_reports_missing_backend_for_runtime_dir() {
+fn managed_run_reports_missing_backend_without_runtime_selection() {
   let runtime_dir = unique_runtime_dir("missing-backend");
-  let runtime_dir_arg = runtime_dir.display().to_string();
   let missing_daemon = runtime_dir.join(if cfg!(windows) {
     "missing-cadderd.exe"
   } else {
@@ -148,8 +147,6 @@ fn managed_run_reports_missing_backend_for_runtime_dir() {
   let missing_daemon_arg = missing_daemon.display().to_string();
 
   let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
     "--cadder-daemon-path",
     &missing_daemon_arg,
     "--cadder-caddy-backend",
@@ -169,20 +166,13 @@ fn managed_run_reports_missing_backend_for_runtime_dir() {
 #[test]
 fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
   let runtime_dir = unique_runtime_dir("managed-no-delegate");
-  let runtime_dir_arg = runtime_dir.display().to_string();
   let missing_daemon = runtime_dir.join(if cfg!(windows) {
     "missing-cadderd.exe"
   } else {
     "missing-cadderd"
   });
   let missing_daemon_arg = missing_daemon.display().to_string();
-  let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
-    "--cadder-daemon-path",
-    &missing_daemon_arg,
-    "run",
-  ]);
+  let output = run_shim(&["--cadder-daemon-path", &missing_daemon_arg, "run"]);
 
   assert_eq!(output.status.code(), Some(1));
   assert!(

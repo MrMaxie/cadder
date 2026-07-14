@@ -1,99 +1,48 @@
 ---
 title: Runtime and configuration
-description: Runtime directories, daemon state files, configuration sources, and environment overrides.
+description: Portable runtime files, daemon state, and real-Caddy configuration.
 ---
 
-Cadder keeps runtime state per user. Most users never need to choose the runtime directory manually.
+Cadder is portable: its runtime directory is the directory containing the executable that starts it. `cadderd`, `caddy`, and `cadder` must therefore be kept together in one installation directory. Cadder does not use the current working directory for runtime state.
 
-## Runtime Override
+## Runtime files
 
-Set `CADDER_RUNTIME_DIR` or pass `--runtime-dir` to use a specific directory:
-
-```sh
-cadderd --runtime-dir <runtime-dir>
-cadder --runtime-dir <runtime-dir> daemon status
-caddy --cadder-runtime-dir <runtime-dir> run
-```
-
-Use the same runtime override when you start `cadderd`, attach with `cadder`, or run the shim.
-
-## Development Profile
-
-Use the development profile when you need live local Cadder tooling without touching your normal daemon or real Caddy process:
-
-```sh
-CADDER_RUNTIME_PROFILE=dev
-CADDER_DEV_WORKSPACE=/absolute/path/to/cadder-checkout
-CADDER_CADDY_BACKEND=mock
-```
-
-The repository `xtask` exposes repeatable helpers:
-
-```sh
-cargo xtask dev-env --format powershell
-cargo xtask dev-run -- cadder daemon status
-```
-
-## Privilege Model
-
-Run `cadderd`, `cadder`, and shim-driven `caddy run` from the normal user account that owns the runtime. If Cadder detects elevated operator execution where the platform exposes that state, it reports a privilege diagnostic through the CLI or web surface.
-
-Read-only inspection, diagnostics, log queries, domain and entrypoint toggles, normal daemon control, and non-IIS workflows do not require administrator privileges. On Windows, IIS handoff requests administrator approval only for the short IIS binding mutation batch.
-
-## Runtime Files
-
-The daemon runtime directory contains ephemeral ownership and process files:
+The installation directory contains daemon coordination and persistent Cadder data:
 
 - `cadder.lock`, the daemon ownership lock;
 - `daemon.json`, daemon metadata used by clients;
-- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process.
+- `effective-caddy.json`, the generated Caddy configuration;
+- `data/`, durable manifests, generations, plans, secrets, recovery data, and `storage.lock`.
 
-The IPC socket name is derived from the runtime directory, so separate runtime directories do not collide.
+The IPC socket name is derived from that directory. Moving the portable installation moves its Cadder state with it.
 
-## Durable Storage
+## Development
 
-Cadder keeps durable profile data in the platform's per-user local-data directory. The file store contains:
-
-- `manifest.json`, which selects the active storage generation;
-- `generations/`, with versioned snapshots and JSON Lines transaction and log segments;
-- `plans/`, for typed operation plans;
-- `secrets/`, for Cadder-owned private key material;
-- `recovery/`, for preserved migration and corruption evidence;
-- `storage.lock`, which gives one daemon exclusive write ownership.
-
-JSON Lines records are bounded, checksummed, hash-chained, and terminated by LF. Cadder flushes accepted records before storage shutdown completes. General state, history, logs, manifests, and diagnostics contain redacted data rather than secrets.
+For development without starting real Caddy, use the mock backend:
 
 ```sh
-cadder history show --limit 50
+CADDER_CADDY_BACKEND=mock cadderd
 ```
 
-If the store cannot be opened or uses a newer unsupported schema, Cadder reports a storage diagnostic and refuses to modify the file set. It preserves invalid authoritative files for recovery instead of skipping or overwriting them.
-
-## Autostart
-
-Per-user autostart is configured through Cadder:
+The repository also provides repeatable helpers:
 
 ```sh
-cadder autostart status
-cadder autostart set disabled
-cadder autostart set daemon
+cargo xtask dev-env --format powershell
+cargo xtask dev-run -- cadder tui
 ```
 
-Supported platforms use native startup mechanisms and remove Cadder daemon startup entries when the mode changes. Unsupported or partially configured platforms return explicit diagnostics.
-
-## Configuration Sources
+## Real Caddy configuration
 
 Cadder resolves real Caddy through:
 
 - an absolute daemon-start override;
-- the selected profile and `defaults` in the standard per-user `cadder.toml`;
-- the selected profile and `defaults` in the administrator-owned system `cadder.toml`;
+- `caddy.real_command` or `caddy.real_path` in `cadder.toml` beside the Cadder executables;
+- `[caddy]` or `defaults.real_caddy` in the standard per-user `cadder.toml`;
+- the same configuration in the administrator-owned system `cadder.toml`;
 - a trusted native `caddy` on `PATH`.
 
-The user-facing TOML format is documented in [cadder.toml](../../user-guide/cadder-toml/).
+`CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND` do not select an executable. Project processes and shim invocations cannot replace the daemon's trusted real-Caddy source through inherited environment variables.
 
-## Environment boundaries
+## Autostart
 
-`CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND` do not select an executable. Project processes and shim invocations therefore cannot replace the daemon's trusted real-Caddy source through inherited environment variables.
-
-`CADDER_RUNTIME_DIR` remains an explicit advanced runtime-location override. It changes where one Cadder profile stores and discovers its own runtime; it does not select a program to execute.
+Autostart launches the portable `cadderd` executable directly. Keep the installation directory in place while autostart is enabled.

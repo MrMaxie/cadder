@@ -30,7 +30,7 @@ error.
 
 ## Expected Coverage
 
-- Host `cadderd` and host `caddy` shim binaries run with a unique `CADDER_RUNTIME_DIR`.
+- Host `cadderd` and host `caddy` shim binaries are copied into one temporary portable directory.
 - Testcontainers starts an official Caddy container with dynamic host port mapping.
 - A wrapper command delegates `adapt`, `run`, `reload`, and `stop` to real Caddy in the container.
 - Two shim sessions register with one daemon and serve distinct HTTP responses through the mapped

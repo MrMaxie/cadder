@@ -26,10 +26,15 @@ pub const LOG_SHORTCUTS: [Shortcut; 6] = [
 
 pub const OFFLINE_SHORTCUTS: [Shortcut; 5] = [
   Shortcut::new("Tab/Left/Right", "switch view"),
+  Shortcut::new("Enter", "start cadderd"),
   Shortcut::new("r", "retry"),
-  Shortcut::new("s", "start daemon"),
   Shortcut::new("Esc", "quit"),
   Shortcut::new("Ctrl+C", "quit"),
+];
+
+pub const STARTING_SHORTCUTS: [Shortcut; 2] = [
+  Shortcut::new("Starting", "cadderd"),
+  Shortcut::new("Esc", "quit"),
 ];
 
 #[derive(Debug, Clone, Copy)]

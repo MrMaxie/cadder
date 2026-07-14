@@ -31,6 +31,7 @@ pub struct App {
   active_tab: usize,
   details: Option<DetailsState>,
   pending: bool,
+  last_start_failed: bool,
   should_quit: bool,
   last_refresh: Instant,
 }
@@ -72,11 +73,12 @@ impl App {
         connection: ConnectionStatus::Connecting,
         caddy_status: ProtocolRuntimeStatus::Unknown,
       },
-      connection_message: "Connecting to cadderd...".to_string(),
+      connection_message: "Connecting to Cadder...".to_string(),
       connection_guidance: None,
       active_tab: 0,
       details: None,
       pending: false,
+      last_start_failed: false,
       should_quit: false,
       last_refresh: Instant::now() - REFRESH_INTERVAL,
     };
@@ -94,6 +96,7 @@ impl App {
     self.last_refresh = Instant::now();
     match self.context.query_state_response().await {
       Ok(response) => {
+        self.last_start_failed = false;
         let Some(snapshot) = response.snapshot else {
           self.set_connection_error("Cadder daemon returned no state snapshot.", None);
           return;
@@ -109,7 +112,24 @@ impl App {
         self.refresh_logs().await;
       }
       Err(error) => {
+        if self.last_start_failed {
+          return;
+        }
         let status = unavailable_status(&self.context, &error);
+        let (message, guidance) = match status.connection_state {
+          ConnectionStateView::NotRunning => {
+            let (message, guidance) = unavailable_copy(status.connection_state);
+            (message.to_string(), guidance.to_string())
+          }
+          ConnectionStateView::ConnectionFailed => (
+            status.message,
+            status.guidance.unwrap_or_else(|| {
+              "Inspect the daemon diagnostics for this runtime, correct the reported error, then retry."
+                .to_string()
+            }),
+          ),
+          ConnectionStateView::Connected => unreachable!("an unavailable status cannot be connected"),
+        };
         self.runtime_status = RuntimeStatus {
           connection: match status.connection_state {
             ConnectionStateView::NotRunning => ConnectionStatus::Offline,
@@ -118,16 +138,15 @@ impl App {
           },
           caddy_status: ProtocolRuntimeStatus::Unknown,
         };
-        self.connection_message = status.message;
-        self.connection_guidance = status.guidance;
+        self.connection_message = message;
+        self.connection_guidance = Some(guidance);
         self.data.clear_snapshot();
         self.ensure_selected_row();
-        self.logs.set_notice(
-          self
-            .connection_guidance
-            .clone()
-            .unwrap_or_else(|| "Press r to retry the connection.".to_string()),
-        );
+        self.logs.set_notice(format!(
+          "{}\r\n\r\n{}",
+          self.connection_message,
+          self.connection_guidance.as_deref().unwrap_or_default()
+        ));
       }
     }
   }
@@ -173,28 +192,57 @@ impl App {
     if !self.can_start_daemon() {
       return false;
     }
+    self.last_start_failed = false;
     self.pending = true;
-    self.details = Some(DetailsState::new(
-      " Starting cadderd ".to_string(),
-      vec!["Waiting for the selected daemon to become ready...".to_string()],
-    ));
     true
+  }
+
+  pub fn prepare_start_daemon_from_status(&mut self) -> bool {
+    self.active_tab == 1 && self.prepare_start_daemon()
   }
 
   pub const fn can_start_daemon(&self) -> bool {
     !self.pending && self.runtime_status.connection.can_start_daemon()
   }
 
-  pub async fn start_daemon(&mut self) {
-    let result = self.context.ensure_daemon_running("tui").await;
+  pub const fn is_starting_daemon(&self) -> bool {
+    self.pending && self.runtime_status.connection.can_start_daemon()
+  }
+
+  pub fn shows_status_screen(&self) -> bool {
+    self.runtime_status.connection != ConnectionStatus::Connected
+  }
+
+  pub fn daemon_start_context(&self) -> OperatorContext {
+    self.context.clone()
+  }
+
+  pub async fn complete_daemon_start(&mut self, result: Result<(), OperatorError>) {
     self.pending = false;
     match result {
       Ok(()) => {
         self.details = None;
         self.refresh().await;
       }
-      Err(error) => self.show_operator_error(error),
+      Err(error) => {
+        self.last_start_failed = true;
+        self.connection_message = error.message;
+        self.connection_guidance = error.guidance;
+        let notice = self.connection_guidance.as_deref().map_or_else(
+          || self.connection_message.clone(),
+          |guidance| format!("{}\r\n\r\n{guidance}", self.connection_message),
+        );
+        self.logs.set_notice(notice);
+      }
     }
+  }
+
+  pub fn status_message(&self) -> &str {
+    &self.connection_message
+  }
+
+  pub fn connection_guidance(&self) -> Option<&str> {
+    self.connection_guidance.as_deref()
   }
 
   pub fn prepare_toggle_current(&mut self) -> Option<MutationTarget> {
@@ -236,7 +284,7 @@ impl App {
     [
       "Domains".to_string(),
       "Status".to_string(),
-      format!("Logs ({})", self.logs.stream_label()),
+      "Logs".to_string(),
     ]
   }
 
@@ -374,6 +422,7 @@ impl App {
   pub fn active_row_len(&self) -> usize {
     match self.active_tab {
       0 => self.data.domain_rows().len(),
+      1 if self.shows_status_screen() => 0,
       1 => self
         .data
         .status_rows(self.runtime_status.connection_label())
@@ -466,14 +515,14 @@ impl RuntimeStatus {
     match self.connection {
       ConnectionStatus::Connecting => "connecting",
       ConnectionStatus::Connected => "connected",
-      ConnectionStatus::Offline => "not running",
+      ConnectionStatus::Offline => "—",
       ConnectionStatus::Error => "error",
     }
   }
 
   pub fn caddy_label(self) -> &'static str {
     if self.connection != ConnectionStatus::Connected {
-      return "unknown";
+      return "—";
     }
     match self.caddy_status {
       ProtocolRuntimeStatus::Unknown => "unknown",
@@ -508,13 +557,29 @@ fn connection_recovery_details(
     ConnectionStatus::Connected => " Connected ",
   };
   let recovery = match status {
-    ConnectionStatus::Offline => "Press s to start cadderd, or r to retry the connection.",
+    ConnectionStatus::Offline => "Open Status and press Enter to start Cadder.",
     _ => guidance.unwrap_or("Press r to retry the connection."),
   };
   (
     title.to_string(),
     vec![message.to_string(), recovery.to_string()],
   )
+}
+
+fn unavailable_copy(connection_state: ConnectionStateView) -> (&'static str, &'static str) {
+  match connection_state {
+    ConnectionStateView::NotRunning => (
+      "Cadder is not running.",
+      "Open Status and press Enter to start it.",
+    ),
+    ConnectionStateView::ConnectionFailed => (
+      "Could not connect to Cadder.",
+      "Press r to retry the connection.",
+    ),
+    ConnectionStateView::Connected => {
+      ("Cadder is unavailable.", "Press r to retry the connection.")
+    }
+  }
 }
 
 impl DetailsState {
@@ -547,6 +612,18 @@ impl DetailsState {
 mod tests {
   use super::*;
 
+  fn offline_app() -> App {
+    let context = OperatorContext::new("test", None, cadder_daemon::DaemonLaunchOptions::default())
+      .expect("test context should resolve the executable runtime directory");
+    let mut app = App::new(context);
+    app.runtime_status = RuntimeStatus {
+      connection: ConnectionStatus::Offline,
+      caddy_status: ProtocolRuntimeStatus::Unknown,
+    };
+    app.set_active_tab(1);
+    app
+  }
+
   #[test]
   fn runtime_status_labels_preserve_authoritative_caddy_states() {
     let label = |caddy_status| {
@@ -563,6 +640,77 @@ mod tests {
     assert_eq!(label(ProtocolRuntimeStatus::Running), "running");
     assert_eq!(label(ProtocolRuntimeStatus::Unhealthy), "unhealthy");
     assert_eq!(label(ProtocolRuntimeStatus::Idle), "idle");
+  }
+
+  #[test]
+  fn offline_status_uses_dashes_instead_of_unavailable_internal_states() {
+    let status = RuntimeStatus {
+      connection: ConnectionStatus::Offline,
+      caddy_status: ProtocolRuntimeStatus::Unknown,
+    };
+
+    assert_eq!(status.connection_label(), "—");
+    assert_eq!(status.caddy_label(), "—");
+  }
+
+  #[test]
+  fn offline_copy_offers_the_status_start_action_without_runtime_details() {
+    let (message, guidance) = unavailable_copy(ConnectionStateView::NotRunning);
+
+    assert_eq!(message, "Cadder is not running.");
+    assert_eq!(guidance, "Open Status and press Enter to start it.");
+    assert!(!message.contains("runtime"));
+    assert!(!guidance.contains("cadderd"));
+  }
+
+  #[test]
+  fn status_start_action_is_available_without_opening_a_modal() {
+    let mut app = offline_app();
+
+    assert_eq!(app.active_row_len(), 0);
+    assert!(app.prepare_start_daemon_from_status());
+    assert!(app.pending);
+    assert!(app.details().is_none());
+    assert!(app.is_starting_daemon());
+  }
+
+  #[tokio::test]
+  async fn daemon_start_failure_keeps_the_reported_error_visible() {
+    let mut app = offline_app();
+    app.pending = true;
+
+    app
+      .complete_daemon_start(Err(OperatorError::new(
+        "tui",
+        cadder_operator::OperatorErrorKind::DaemonStartFailure,
+        "cadderd exited before it became ready.",
+        Some("Configure the real Caddy executable, then retry.".to_string()),
+      )))
+      .await;
+
+    assert_eq!(
+      app.status_message(),
+      "cadderd exited before it became ready."
+    );
+    assert_eq!(
+      app.connection_guidance.as_deref(),
+      Some("Configure the real Caddy executable, then retry.")
+    );
+
+    app.refresh().await;
+    assert_eq!(
+      app.status_message(),
+      "cadderd exited before it became ready."
+    );
+  }
+
+  #[test]
+  fn status_start_action_is_unavailable_when_the_daemon_is_connected() {
+    let mut app = offline_app();
+    app.runtime_status.connection = ConnectionStatus::Connected;
+
+    assert!(!app.prepare_start_daemon_from_status());
+    assert!(!app.pending);
   }
 
   #[test]
@@ -584,8 +732,20 @@ mod tests {
       connection_recovery_details(ConnectionStatus::Offline, "cadderd is not running.", None);
 
     assert_eq!(title, " Offline ");
-    assert!(lines[1].contains("Press s"));
+    assert_eq!(lines[1], "Open Status and press Enter to start Cadder.");
     assert!(ConnectionStatus::Offline.can_start_daemon());
     assert!(!ConnectionStatus::Error.can_start_daemon());
+  }
+
+  #[test]
+  fn status_screen_shows_connection_failures_without_a_start_action() {
+    let mut app = offline_app();
+    app.runtime_status.connection = ConnectionStatus::Error;
+
+    assert!(app.shows_status_screen());
+    assert!(!app.can_start_daemon());
+
+    app.runtime_status.connection = ConnectionStatus::Connected;
+    assert!(!app.shows_status_screen());
   }
 }

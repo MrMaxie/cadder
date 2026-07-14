@@ -578,7 +578,7 @@ pub(crate) struct RuntimeGuardClient {
 impl RuntimeGuardClient {
   pub(crate) async fn spawn_authenticated(
     executable: &Path,
-    paths: &RuntimePaths,
+    _paths: &RuntimePaths,
     context: RuntimeGuardGenerationContext,
     generation: &RuntimeGuardGeneration,
     pinned_caddy: Option<RuntimeGuardPinnedCaddyIdentity>,
@@ -591,8 +591,6 @@ impl RuntimeGuardClient {
     let mut command = Command::new(image.path());
     command
       .arg("--runtime-guard")
-      .arg("--runtime-dir")
-      .arg(paths.runtime_dir())
       .arg("--runtime-guard-instance")
       .arg(&context.daemon_instance_id)
       .arg("--runtime-guard-owner-generation")

@@ -83,9 +83,8 @@ impl DaemonLock {
       LockMetadataRead::Valid(stale_owner) => Some(stale_owner),
       LockMetadataRead::Invalid { error } => {
         return Err(anyhow!(
-          "daemon lock metadata {} is unreadable ({error}); Cadder cannot prove the previous runtime generation is stale. Inspect the runtime with `cadder daemon status --runtime-dir \"{}\"` and preserve its files for diagnosis",
-          metadata_path.display(),
-          paths.runtime_dir().display()
+          "daemon lock metadata {} is unreadable ({error}); Cadder cannot prove the previous runtime generation is stale. preserve its files for diagnosis",
+          metadata_path.display()
         ));
       }
     };
@@ -526,11 +525,8 @@ fn active_owner_with_unreadable_metadata(
   )
 }
 
-fn recovery_options(paths: &RuntimePaths) -> String {
-  format!(
-    "recovery options: wait for that process to finish, inspect `cadder daemon status --runtime-dir \"{}\"`, stop the active owner if it is stale, then retry; do not delete runtime files while the owner process is active",
-    paths.runtime_dir().display()
-  )
+fn recovery_options(_paths: &RuntimePaths) -> String {
+  "recovery options: wait for that process to finish, stop the active owner if it is stale, then retry; do not delete runtime files while the owner process is active".to_string()
 }
 
 #[cfg(test)]

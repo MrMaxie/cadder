@@ -19,7 +19,7 @@ All release-facing Cadder binaries expose `--help` and `--version`. Runtime inst
 
 ## Runtime Model
 
-Cadder uses per-user runtime paths from `directories::ProjectDirs`, with `CADDER_RUNTIME_DIR` as the highest-priority override for tests and custom deployments. `CADDER_RUNTIME_PROFILE=dev` selects a repeatable development profile under the same per-user runtime base, using `CADDER_DEV_WORKSPACE` or `CADDER_DEV_ID` to derive an isolated runtime identity.
+Cadder is portable: each executable resolves the runtime directory as its own parent directory. The release binaries `cadderd`, `caddy`, and `cadder` must stay together, and Cadder does not use the current working directory for runtime state.
 
 The daemon owns:
 
@@ -28,7 +28,7 @@ The daemon owns:
 - an effective generated Caddy JSON config file;
 - ephemeral daemon metadata and bounded in-memory state.
 
-Durable profile data uses the platform's per-user local-data directory. Runtime overrides keep test and custom-deployment data isolated without mixing durable files with sockets or process ownership files.
+Durable Cadder data lives in `data/` under the portable runtime directory, alongside the daemon coordination files.
 
 Direct `cadderd` execution is the foreground diagnostic path. Explicit client-triggered starts use the detached background launch contract, redirect stdio away from the caller, and wait for the runtime socket before reporting success. Restart flows first request shutdown, then wait for the previous owner to release both the socket and runtime lock before launching the next daemon.
 
@@ -69,21 +69,19 @@ Supported v1.0 public messages include:
 Real Caddy resolution is layered and recursion-safe. The daemon selects one executable for its lifetime in this order:
 
 1. An absolute `--real-caddy` daemon-start override.
-2. The selected profile and then `defaults` in the standard per-user `cadder.toml`.
-3. The selected profile and then `defaults` in the administrator-owned system `cadder.toml`.
-4. A trusted native `caddy` executable on PATH.
+2. `[caddy]` in `cadder.toml` beside the Cadder executables.
+3. `[caddy]` or `defaults` in the standard per-user `cadder.toml`.
+4. The same configuration in the administrator-owned system `cadder.toml`.
+5. A trusted native `caddy` executable on PATH.
 
 The TOML schema is:
 
 ```toml
-[defaults]
-real_caddy = "/absolute/path/to/caddy"
-
-[profiles.dev]
-real_caddy = "/absolute/path/to/development/caddy"
+[caddy]
+real_command = "caddy-real"
 ```
 
-Project files, registration working directories, executable-adjacent files, environment selectors, and shim flags never select real Caddy. Cadder requires an absolute regular native executable but does not impose custom ownership or ACL rules on the Caddy installation or its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
+Project files, registration working directories, environment selectors, and shim flags never select real Caddy. `real_command` selects one program from PATH; `real_path` selects an absolute regular native executable. Cadder does not impose custom ownership or ACL rules on the Caddy installation or its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
 
 At daemon startup, Cadder opens the selected executable and pins its canonical path, source, operating-system file identity, SHA-256 digest, semantic version, required module inventory, and compatibility-probe revision. Cadder accepts Caddy versions from 2.11.3 up to, but not including, 3.0.0. Metadata commands use bounded output, a 30-second deadline, and no stdin. Every subsequent `adapt`, `run`, `reload`, and `stop` process passes through the same verified spawn gate. On Windows, the daemon retains a read-only handle without write or delete sharing for its lifetime. Each child starts suspended, joins Cadder's private kill-on-close Job Object, and resumes only after successful assignment. An identity or digest mismatch fails closed and the newly created process tree is terminated and joined before the operation returns.
 

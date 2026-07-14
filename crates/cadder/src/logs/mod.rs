@@ -6,7 +6,6 @@ pub(crate) const MAX_LOG_LINES: usize = 1_000;
 pub struct LogStore {
   screen: Option<Screen>,
   content: String,
-  stream_label: String,
   scrollback: usize,
   follow_tail: bool,
   viewport: Option<TerminalSize>,
@@ -31,8 +30,7 @@ impl LogStore {
   pub fn new() -> Self {
     Self {
       screen: None,
-      content: "Connect to cadderd to inspect runtime logs.".to_string(),
-      stream_label: "runtime-control".to_string(),
+      content: "Logs will appear here when Cadder is running.".to_string(),
       scrollback: 0,
       follow_tail: true,
       viewport: None,
@@ -40,7 +38,6 @@ impl LogStore {
   }
 
   pub fn replace(&mut self, logs: LogsView) {
-    self.stream_label = logs.stream.stream_id.clone();
     let mut lines = Vec::new();
     if logs.has_gap || logs.truncated_by_retention {
       lines.push("[gap] Earlier log entries are no longer available.".to_string());
@@ -54,10 +51,7 @@ impl LogStore {
       )
     }));
     if lines.is_empty() {
-      lines.push(format!(
-        "No retained entries for {} ({:?}).",
-        self.stream_label, logs.stream_status
-      ));
+      lines.push("No log entries available.".to_string());
     }
     self.content = lines.join("\r\n");
     self.rebuild_screen();
@@ -68,11 +62,15 @@ impl LogStore {
     self.rebuild_screen();
   }
 
-  pub fn stream_label(&self) -> &str {
-    &self.stream_label
-  }
-
   pub fn set_viewport(&mut self, rows: u16, cols: u16) {
+    if rows < 2 {
+      // vt100 panics while scrolling a one-row grid after a wrapped line.
+      self.viewport = None;
+      self.screen = None;
+      self.scrollback = 0;
+      return;
+    }
+
     let viewport = TerminalSize::new(rows, cols);
     if self.viewport == Some(viewport) {
       return;
@@ -137,6 +135,18 @@ mod tests {
 
     assert!(logs.screen().is_none());
     logs.set_viewport(10, 80);
+    assert!(logs.screen().is_some());
+  }
+
+  #[test]
+  fn one_row_viewport_skips_terminal_emulation() {
+    let mut logs = LogStore::new();
+
+    logs.set_notice("x".repeat(160));
+    logs.set_viewport(1, 80);
+    assert!(logs.screen().is_none());
+
+    logs.set_viewport(2, 80);
     assert!(logs.screen().is_some());
   }
 }

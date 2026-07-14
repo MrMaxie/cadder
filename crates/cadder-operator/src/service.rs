@@ -324,7 +324,7 @@ impl OperatorContext {
 }
 
 pub fn connection_state_from_error(error: &IpcClientError) -> ConnectionStateView {
-  if daemon_error_indicates_unavailable(error) {
+  if daemon_error_indicates_unavailable(error) || error.is_stale_instance() {
     ConnectionStateView::NotRunning
   } else {
     ConnectionStateView::ConnectionFailed
@@ -335,27 +335,21 @@ pub fn unavailable_status(
   context: &OperatorContext,
   error: &IpcClientError,
 ) -> crate::DaemonStatusView {
-  let runtime_dir = context.paths.runtime_dir();
   let connection_state = connection_state_from_error(error);
   let message = match connection_state {
-    ConnectionStateView::NotRunning => format!(
-      "Cadder daemon is not running for runtime `{}`.",
-      runtime_dir.display()
-    ),
-    ConnectionStateView::ConnectionFailed => format!(
-      "Could not attach to Cadder daemon for runtime `{}`: {}",
-      runtime_dir.display(),
-      sentence(error.message())
-    ),
-    ConnectionStateView::Connected => "Attached to cadderd.".to_string(),
+    ConnectionStateView::NotRunning => "Cadder is not running.".to_string(),
+    ConnectionStateView::ConnectionFailed => {
+      format!("Could not connect to Cadder: {}", sentence(error.message()))
+    }
+    ConnectionStateView::Connected => "Connected to Cadder.".to_string(),
   };
 
   crate::daemon_status_unavailable(
-    runtime_dir,
+    context.paths.runtime_dir(),
     connection_state,
     message,
     Some(if connection_state == ConnectionStateView::NotRunning {
-      crate::start_guidance(runtime_dir)
+      crate::start_guidance(context.paths.runtime_dir())
     } else {
       error.guidance().map(ToOwned::to_owned).unwrap_or_else(|| {
         "Inspect the daemon diagnostics for this runtime, correct the reported error, then retry."
@@ -619,7 +613,7 @@ mod tests {
       status
         .guidance
         .as_deref()
-        .is_some_and(|guidance| guidance.contains("cadderd --runtime-dir"))
+        .is_some_and(|guidance| guidance == "Open Cadder and start it from Status, then retry.")
     );
 
     let failed = IpcClientError::Daemon(ProtocolError::new(
@@ -640,5 +634,17 @@ mod tests {
       Some("Upgrade the older Cadder component.")
     );
     assert!(!status.guidance.unwrap().contains("daemon start"));
+
+    let stale = IpcClientError::Daemon(ProtocolError::new(
+      ProtocolErrorKind::StaleInstance,
+      ProtocolErrorCode::parse("stale_instance").unwrap(),
+      "the published daemon instance is no longer reachable",
+      None,
+      true,
+    ));
+    assert_eq!(
+      connection_state_from_error(&stale),
+      ConnectionStateView::NotRunning
+    );
   }
 }

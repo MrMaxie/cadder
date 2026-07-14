@@ -1,4 +1,3 @@
-use crate::paths::RuntimeProfile;
 use anyhow::{Context, Result};
 use figment::{
   Figment,
@@ -6,7 +5,6 @@ use figment::{
 };
 use serde::Deserialize;
 use std::{
-  collections::BTreeMap,
   fs::File,
   io::Read,
   path::{Path, PathBuf},
@@ -17,8 +15,15 @@ pub const CONFIG_FILE_NAME: &str = "cadder.toml";
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CadderConfig {
+  pub caddy: CaddyConfig,
   pub defaults: RuntimeConfig,
-  pub profiles: BTreeMap<String, RuntimeConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaddyConfig {
+  pub real_command: Option<String>,
+  pub real_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -45,13 +50,30 @@ impl CadderConfig {
       .with_context(|| format!("load Cadder configuration from {}", source.display()))
   }
 
-  pub fn real_caddy_for_profile(&self, profile: RuntimeProfile) -> Option<&Path> {
-    self
-      .profiles
-      .get(profile.as_str())
-      .and_then(|config| config.real_caddy.as_deref())
-      .or(self.defaults.real_caddy.as_deref())
+  pub(crate) fn real_caddy(&self) -> Result<Option<RealCaddySelection>> {
+    match (
+      &self.caddy.real_command,
+      &self.caddy.real_path,
+      &self.defaults.real_caddy,
+    ) {
+      (Some(_), Some(_), _) => Err(anyhow::anyhow!(
+        "caddy.real_command and caddy.real_path cannot both be configured"
+      )),
+      (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => Err(anyhow::anyhow!(
+        "[caddy] configuration and legacy defaults.real_caddy cannot both be configured"
+      )),
+      (Some(command), None, None) => Ok(Some(RealCaddySelection::Command(command.clone()))),
+      (None, Some(path), None) => Ok(Some(RealCaddySelection::Path(path.clone()))),
+      (None, None, Some(path)) => Ok(Some(RealCaddySelection::Path(path.clone()))),
+      (None, None, None) => Ok(None),
+    }
   }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RealCaddySelection {
+  Command(String),
+  Path(PathBuf),
 }
 
 #[cfg(test)]
@@ -60,32 +82,68 @@ mod tests {
   use std::fs;
 
   #[test]
-  fn trusted_caddy_source_reads_profile_before_defaults() {
+  fn real_caddy_reads_command_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(CONFIG_FILE_NAME);
-    fs::write(
-      &path,
-      "[defaults]\nreal_caddy = '/default/caddy'\n[profiles.dev]\nreal_caddy = '/dev/caddy'\n",
-    )
-    .unwrap();
+    fs::write(&path, "[caddy]\nreal_command = 'caddy-real'\n").unwrap();
 
     let config = CadderConfig::from_file(&path).unwrap();
 
     assert_eq!(
-      config.real_caddy_for_profile(RuntimeProfile::Dev),
-      Some(Path::new("/dev/caddy"))
-    );
-    assert_eq!(
-      config.real_caddy_for_profile(RuntimeProfile::Default),
-      Some(Path::new("/default/caddy"))
+      config.real_caddy().unwrap(),
+      Some(RealCaddySelection::Command("caddy-real".to_string()))
     );
   }
 
   #[test]
-  fn trusted_caddy_source_rejects_unknown_configuration_fields() {
+  fn real_caddy_reads_path_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(CONFIG_FILE_NAME);
-    fs::write(&path, "[defaults]\nreal_command = 'caddy'\n").unwrap();
+    fs::write(&path, "[caddy]\nreal_path = '/default/caddy'\n").unwrap();
+
+    let config = CadderConfig::from_file(&path).unwrap();
+
+    assert_eq!(
+      config.real_caddy().unwrap(),
+      Some(RealCaddySelection::Path(PathBuf::from("/default/caddy")))
+    );
+  }
+
+  #[test]
+  fn real_caddy_reads_legacy_path_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(&path, "[defaults]\nreal_caddy = '/default/caddy'\n").unwrap();
+
+    let config = CadderConfig::from_file(&path).unwrap();
+
+    assert_eq!(
+      config.real_caddy().unwrap(),
+      Some(RealCaddySelection::Path(PathBuf::from("/default/caddy")))
+    );
+  }
+
+  #[test]
+  fn real_caddy_rejects_command_and_path_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(
+      &path,
+      "[caddy]\nreal_command = 'caddy-real'\nreal_path = '/default/caddy'\n",
+    )
+    .unwrap();
+
+    let config = CadderConfig::from_file(&path).unwrap();
+    let error = config.real_caddy().unwrap_err();
+
+    assert!(error.to_string().contains("cannot both be configured"));
+  }
+
+  #[test]
+  fn real_caddy_rejects_unknown_configuration_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(CONFIG_FILE_NAME);
+    fs::write(&path, "[caddy]\nunknown = 'caddy'\n").unwrap();
 
     let error = CadderConfig::from_file(&path).unwrap_err();
 

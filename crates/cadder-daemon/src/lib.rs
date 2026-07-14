@@ -89,7 +89,9 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
+  /// Test-only/internal runtime selection seam. Production entrypoints always use `None`.
   pub runtime_dir: Option<PathBuf>,
+  /// Test-only/internal runtime selection seam. Production entrypoints always use `None`.
   pub runtime_profile: Option<RuntimeProfile>,
   pub real_caddy_override: Option<PathBuf>,
   pub caddy_backend: Option<CaddyBackendMode>,
@@ -298,9 +300,8 @@ async fn wait_for_daemon_runtime_released_with_limits(
   }
 
   bail!(
-    "previous cadderd owner did not release socket and daemon lock before timeout for runtime {}; retry restart after it exits, or inspect `cadder daemon status --runtime-dir \"{}\"` before removing stale runtime files",
+    "previous cadderd owner did not release socket and daemon lock before timeout for runtime {}; retry after it exits before removing stale runtime files",
     paths.runtime_dir().display(),
-    paths.runtime_dir().display()
   )
 }
 

@@ -322,7 +322,7 @@ fn coverage_command_reports_cargo_failure() {
 }
 
 #[test]
-fn dev_env_command_outputs_repeatable_json_without_local_workspace_contract() {
+fn dev_env_command_outputs_mock_backend_configuration() {
   let output = Command::new(xtask_bin())
     .args(["dev-env", "--format", "json"])
     .output()
@@ -331,15 +331,8 @@ fn dev_env_command_outputs_repeatable_json_without_local_workspace_contract() {
   let stdout = output.stdout.clone();
   assert_success(output);
   let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
-  assert_eq!(value["CADDER_RUNTIME_PROFILE"], "dev");
   assert_eq!(value["CADDER_CADDY_BACKEND"], "mock");
   assert!(value.get("CADDER_DESKTOP_DEV_WINDOWS").is_none());
-  assert!(
-    !value["CADDER_DEV_WORKSPACE"]
-      .as_str()
-      .unwrap()
-      .contains(".local")
-  );
 }
 
 #[test]
@@ -363,10 +356,6 @@ fn dev_run_command_invokes_program_with_dev_environment() {
   assert_success(output);
   assert!(fs::read_to_string(&log).unwrap().contains("status"));
   let env_value = fs::read_to_string(&env_log).unwrap();
-  assert!(
-    env_value.contains("CADDER_RUNTIME_PROFILE=dev"),
-    "{env_value}"
-  );
   assert!(
     env_value.contains("CADDER_CADDY_BACKEND=mock"),
     "{env_value}"
@@ -713,8 +702,6 @@ fn main() {{
   append_env_log(
     "CADDER_FAKE_TOOL_ENV_LOG",
     [
-      "CADDER_RUNTIME_PROFILE",
-      "CADDER_DEV_WORKSPACE",
       "CADDER_CADDY_BACKEND",
     ]
     .iter()
@@ -932,11 +919,10 @@ fn unique_suffix() -> u128 {
 }
 
 const SAMPLE_CADDER_TOML: &str = r#"# Cadder configuration template.
-# Copy this file to the standard per-user Cadder configuration directory.
+# Keep this file beside the Cadder executables.
 
-[defaults]
-# real_caddy = "/absolute/path/to/caddy"
+[caddy]
+# real_command = "caddy-real"
+# real_path = "/absolute/path/to/caddy"
 
-# [profiles.dev]
-# real_caddy = "/absolute/path/to/caddy"
 "#;

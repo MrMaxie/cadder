@@ -23,7 +23,6 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone)]
 pub struct AutostartManager {
-  runtime_dir: PathBuf,
   daemon_path: Option<PathBuf>,
   #[cfg(unix)]
   base_dirs: Option<BaseDirs>,
@@ -42,7 +41,6 @@ pub struct AutostartView {
 impl AutostartManager {
   pub fn disabled() -> Self {
     Self {
-      runtime_dir: PathBuf::new(),
       daemon_path: None,
       #[cfg(unix)]
       base_dirs: None,
@@ -51,10 +49,9 @@ impl AutostartManager {
     }
   }
 
-  pub fn new(paths: &RuntimePaths) -> Self {
+  pub fn new(_paths: &RuntimePaths) -> Self {
     let daemon_path = env::current_exe().ok();
     Self {
-      runtime_dir: paths.runtime_dir().to_path_buf(),
       daemon_path,
       #[cfg(unix)]
       base_dirs: BaseDirs::new(),
@@ -82,11 +79,7 @@ impl AutostartManager {
       )
     })?;
     let background_arg = daemon_background_arg();
-    Ok(format!(
-      "\"{}\"{background_arg} --runtime-dir \"{}\"",
-      daemon.display(),
-      self.runtime_dir.display()
-    ))
+    Ok(format!("\"{}\"{background_arg}", daemon.display()))
   }
 
   #[cfg(all(unix, not(target_os = "macos")))]
@@ -423,7 +416,6 @@ mod tests {
 
   fn manager_with_targets() -> AutostartManager {
     AutostartManager {
-      runtime_dir: PathBuf::from("D:/runtime"),
       daemon_path: Some(PathBuf::from("D:/bin/cadderd.exe")),
       #[cfg(unix)]
       base_dirs: None,
@@ -435,7 +427,6 @@ mod tests {
   #[cfg(all(unix, not(target_os = "macos")))]
   fn linux_manager(config_dir: PathBuf) -> AutostartManager {
     AutostartManager {
-      runtime_dir: PathBuf::from("/tmp/cadder-runtime"),
       daemon_path: Some(PathBuf::from("/opt/cadder/bin/cadderd")),
       base_dirs: None,
       config_dir_override: Some(config_dir),
@@ -452,12 +443,12 @@ mod tests {
   }
 
   #[test]
-  fn command_targets_include_runtime_dir_and_executable() {
+  fn command_targets_include_portable_daemon_executable() {
     let manager = manager_with_targets();
     let expected_daemon = if cfg!(windows) {
-      "\"D:/bin/cadderd.exe\" --background --runtime-dir \"D:/runtime\""
+      "\"D:/bin/cadderd.exe\" --background"
     } else {
-      "\"D:/bin/cadderd.exe\" --runtime-dir \"D:/runtime\""
+      "\"D:/bin/cadderd.exe\""
     };
 
     assert_eq!(manager.daemon_command().unwrap(), expected_daemon);
@@ -481,9 +472,9 @@ mod tests {
   #[cfg(all(unix, not(target_os = "macos")))]
   #[test]
   fn systemd_unit_contains_daemon_command() {
-    let unit = systemd_user_service("\"/bin/cadderd\" --runtime-dir \"/tmp/cadder\"");
+    let unit = systemd_user_service("\"/bin/cadderd\"");
 
-    assert!(unit.contains("ExecStart=\"/bin/cadderd\" --runtime-dir \"/tmp/cadder\""));
+    assert!(unit.contains("ExecStart=\"/bin/cadderd\""));
     assert!(unit.contains("Restart=on-failure"));
   }
 
@@ -508,7 +499,7 @@ mod tests {
     let paths = linux_autostart_paths(&manager).unwrap();
     write_parented(
       &paths.daemon_service,
-      systemd_user_service("\"/opt/cadder/bin/cadderd\" --runtime-dir \"/tmp/cadder-runtime\""),
+      systemd_user_service("\"/opt/cadder/bin/cadderd\""),
     )
     .unwrap();
 
@@ -530,7 +521,7 @@ mod tests {
     let paths = linux_autostart_paths(&manager).unwrap();
     write_parented(
       &paths.daemon_service,
-      systemd_user_service("\"/opt/cadder/bin/cadderd\" --runtime-dir \"/tmp/cadder-runtime\""),
+      systemd_user_service("\"/opt/cadder/bin/cadderd\""),
     )
     .unwrap();
     write_parented_symlink(
@@ -557,7 +548,7 @@ mod tests {
     let paths = linux_autostart_paths(&manager).unwrap();
     write_parented(
       &paths.daemon_service,
-      systemd_user_service("\"/opt/cadder/bin/cadderd\" --runtime-dir \"/tmp/cadder-runtime\""),
+      systemd_user_service("\"/opt/cadder/bin/cadderd\""),
     )
     .unwrap();
     write_parented_symlink(paths.daemon_service.clone(), &paths.daemon_enablement_link).unwrap();

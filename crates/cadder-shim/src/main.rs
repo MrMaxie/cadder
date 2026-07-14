@@ -34,16 +34,6 @@ use tokio::{
   long_about = "Acts as the Cadder-managed caddy command. `caddy run` requires a running cadderd backend and registers the current project; other commands are classified by the shim policy table before they are delegated to the safely resolved real Caddy binary or rejected."
 )]
 struct ShimArgs {
-  #[arg(long = "cadder-runtime-dir", hide = true)]
-  runtime_dir: Option<PathBuf>,
-
-  #[arg(
-    long = "cadder-runtime-profile",
-    hide = true,
-    value_parser = RuntimeProfile::parse_cli
-  )]
-  runtime_profile: Option<RuntimeProfile>,
-
   #[arg(long = "cadder-daemon-path", hide = true)]
   daemon_path: Option<PathBuf>,
 
@@ -64,6 +54,10 @@ struct ShimArgs {
     help = "Arguments for the caddy command; `run` is managed by Cadder and other commands must have an explicit shim policy"
   )]
   caddy_args: Vec<String>,
+
+  #[cfg(test)]
+  #[arg(skip)]
+  test_runtime_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,9 +287,7 @@ async fn write_read_only_real_caddy_inspection_notice(
   args: &ShimArgs,
   command: ClassifiedShimCommand<'_>,
 ) {
-  let Ok(paths) =
-    RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)
-  else {
+  let Ok(paths) = runtime_paths_for_args(args) else {
     return;
   };
 
@@ -324,10 +316,7 @@ fn read_only_real_caddy_inspection_message(
     )
   };
   let recovery = if unavailable {
-    format!(
-      "Run `cadder daemon start --runtime-dir \"{}\"`, then retry Cadder runtime inspection.",
-      paths.runtime_dir().display()
-    )
+    "Start `cadderd`, then retry Cadder runtime inspection.".to_string()
   } else {
     error.guidance().map(ToOwned::to_owned).unwrap_or_else(|| {
       "Inspect the Cadder daemon diagnostics, correct the reported error, then retry runtime inspection."
@@ -365,7 +354,7 @@ async fn run_managed_until<F>(args: ShimArgs, shutdown: F) -> Result<ExitCode>
 where
   F: Future<Output = std::io::Result<()>>,
 {
-  let paths = RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)?;
+  let paths = runtime_paths_for_args(&args)?;
   let session = match open_managed_run_target(&args, &paths).await? {
     ManagedRunTarget::Cadder(session) => session,
     ManagedRunTarget::Exit(code) => return Ok(code),
@@ -527,7 +516,6 @@ async fn start_missing_daemon(args: &ShimArgs, paths: &RuntimePaths) -> IpcClien
     paths,
     DaemonLaunchOptions {
       explicit_daemon: args.daemon_path.clone(),
-      runtime_profile: args.runtime_profile,
       real_caddy_override: None,
       caddy_backend: args.caddy_backend,
       ..DaemonLaunchOptions::default()
@@ -584,10 +572,8 @@ fn managed_recovery_failed_message(
   let recovery = if recovery_stage == ManagedRecoveryStage::PostStartAttach
     && recovery_error.is_daemon_unavailable()
   {
-    format!(
-      "Run `cadderd --runtime-dir \"{}\"` in foreground diagnostic mode, correct the startup error, then retry.",
-      paths.runtime_dir().display()
-    )
+    "Run `cadderd` in foreground diagnostic mode, correct the startup error, then retry."
+      .to_string()
   } else {
     recovery_error
       .guidance()
@@ -618,7 +604,7 @@ fn managed_backend_unavailable_message(paths: &RuntimePaths, error: &IpcClientEr
     format!(
       "Cadder backend `cadderd` is not running for runtime `{runtime_dir}`.\n\
        Managed `caddy run` was not delegated to real Caddy.\n\
-       Next: Run `cadder daemon start --runtime-dir \"{runtime_dir}\"`, then retry `caddy run`.{details}"
+       Next: Start `cadderd`, then retry `caddy run`.{details}"
     )
   } else {
     let guidance = error.guidance().unwrap_or(
@@ -739,8 +725,7 @@ async fn delegate_to_real_caddy(args: &ShimArgs) -> Result<ExitCode> {
 }
 
 async fn run_real_caddy_fallback(args: &ShimArgs) -> Result<ExitCode> {
-  let profile = real_caddy_profile(args)?;
-  let resolver = RealCaddyResolver::from_trusted_sources(profile);
+  let resolver = RealCaddyResolver::from_trusted_sources(real_caddy_profile());
   let binary = resolver.resolve()?;
   let status = Command::new(binary)
     .args(&args.caddy_args)
@@ -753,11 +738,18 @@ async fn run_real_caddy_fallback(args: &ShimArgs) -> Result<ExitCode> {
   Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
 }
 
-fn real_caddy_profile(args: &ShimArgs) -> Result<RuntimeProfile> {
-  Ok(
-    RuntimePaths::resolve_with_profile(args.runtime_dir.clone(), args.runtime_profile)?
-      .runtime_profile(),
-  )
+fn real_caddy_profile() -> RuntimeProfile {
+  RuntimeProfile::Default
+}
+
+fn runtime_paths_for_args(args: &ShimArgs) -> Result<RuntimePaths> {
+  #[cfg(test)]
+  if let Some(runtime_dir) = &args.test_runtime_dir {
+    return RuntimePaths::resolve(Some(runtime_dir.clone()));
+  }
+
+  let _ = args;
+  RuntimePaths::resolve(None)
 }
 
 #[cfg(test)]
@@ -947,7 +939,7 @@ mod tests {
     let message = managed_backend_unavailable_message(&paths, &error);
 
     assert!(message.contains("Cadder backend `cadderd` is not running"));
-    assert!(message.contains("Next: Run `cadder daemon start --runtime-dir"));
+    assert!(message.contains("Next: Start `cadderd`"));
     assert!(message.contains("retry `caddy run`"));
     assert!(
       message
@@ -972,7 +964,7 @@ mod tests {
     assert!(message.contains("cadderd` is not running"));
     assert!(message.contains("read-only `caddy version`"));
     assert!(message.contains("real-Caddy inspection, not Cadder runtime state"));
-    assert!(message.contains("cadder daemon start"));
+    assert!(message.contains("Start `cadderd`"));
     assert!(!message.lines().next().unwrap().contains("os error"));
     assert!(
       message
@@ -990,7 +982,7 @@ mod tests {
     ));
     let permission_message = read_only_real_caddy_inspection_message(&paths, command, &permission);
     assert!(permission_message.contains("Next: Use the account that owns this runtime."));
-    assert!(!permission_message.contains("cadder daemon start"));
+    assert!(!permission_message.contains("Start `cadderd`"));
     assert!(
       !permission_message
         .lines()
@@ -1014,7 +1006,7 @@ mod tests {
     assert!(message.contains("could not attach `caddy run`"));
     assert!(message.contains("protocol mismatch"));
     assert!(message.contains("\nNext: Inspect the Cadder daemon diagnostics"));
-    assert!(!message.contains("cadder daemon start"));
+    assert!(!message.contains("Start `cadderd`"));
 
     let permission = IpcClientError::Daemon(ProtocolError::access_denied(
       message_types::QUERY_STATE_REQUEST,
@@ -1023,7 +1015,7 @@ mod tests {
     ));
     let permission_message = managed_backend_unavailable_message(&paths, &permission);
     assert!(permission_message.contains("Next: Use the account that owns this runtime."));
-    assert!(!permission_message.contains("cadder daemon start"));
+    assert!(!permission_message.contains("Start `cadderd`"));
     let unavailable = ipc_error(
       ProtocolErrorKind::Internal,
       "daemon_unavailable",
@@ -1087,12 +1079,11 @@ mod tests {
     ));
     let missing_daemon = runtime_dir.join(fake_daemon_name_for_test());
     let code = run_managed(ShimArgs {
-      runtime_dir: Some(runtime_dir),
-      runtime_profile: None,
       daemon_path: Some(missing_daemon),
       rejected_real_caddy_selector: None,
       caddy_backend: Some(CaddyBackendMode::Mock),
       caddy_args: vec!["run".to_string()],
+      test_runtime_dir: Some(runtime_dir),
     })
     .await
     .unwrap();
@@ -1101,18 +1092,8 @@ mod tests {
   }
 
   #[test]
-  fn real_caddy_delegation_uses_the_requested_runtime_profile() {
-    let temp = tempfile::tempdir().unwrap();
-    let args = ShimArgs {
-      runtime_dir: Some(temp.path().join("runtime")),
-      runtime_profile: Some(RuntimeProfile::Dev),
-      daemon_path: None,
-      rejected_real_caddy_selector: None,
-      caddy_backend: None,
-      caddy_args: vec!["version".to_string()],
-    };
-
-    assert_eq!(real_caddy_profile(&args).unwrap(), RuntimeProfile::Dev);
+  fn real_caddy_delegation_uses_the_single_default_profile() {
+    assert_eq!(real_caddy_profile(), RuntimeProfile::Default);
   }
 
   #[tokio::test]
@@ -1123,12 +1104,11 @@ mod tests {
     write_fake_caddy(&fake_caddy);
 
     let code = run_managed(ShimArgs {
-      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
-      runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
       rejected_real_caddy_selector: Some(fake_caddy.display().to_string()),
       caddy_backend: None,
       caddy_args: vec!["run".to_string()],
+      test_runtime_dir: Some(paths.runtime_dir().to_path_buf()),
     })
     .await
     .unwrap();
@@ -1145,12 +1125,11 @@ mod tests {
     let server = DaemonServer::new(paths.clone(), state);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let args = ShimArgs {
-      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
-      runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
       rejected_real_caddy_selector: None,
       caddy_backend: Some(CaddyBackendMode::Mock),
       caddy_args: vec!["run".to_string()],
+      test_runtime_dir: Some(paths.runtime_dir().to_path_buf()),
     };
     let starter = move |_args: ShimArgs, paths: RuntimePaths| async move {
       tokio::spawn(async move {
@@ -1190,12 +1169,11 @@ mod tests {
     let temp = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
     let args = ShimArgs {
-      runtime_dir: Some(paths.runtime_dir().to_path_buf()),
-      runtime_profile: None,
       daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
       rejected_real_caddy_selector: Some("definitely-missing-caddy-binary".to_string()),
       caddy_backend: None,
       caddy_args: vec!["run".to_string()],
+      test_runtime_dir: Some(paths.runtime_dir().to_path_buf()),
     };
     let starter = |_args: ShimArgs, _paths: RuntimePaths| async {
       Err(ipc_error(
@@ -1296,8 +1274,6 @@ mod tests {
 
     let code = run_managed_until(
       ShimArgs {
-        runtime_dir: Some(paths.runtime_dir().to_path_buf()),
-        runtime_profile: None,
         daemon_path: None,
         rejected_real_caddy_selector: None,
         caddy_backend: None,
@@ -1308,6 +1284,7 @@ mod tests {
           "--adapter".to_string(),
           "caddyfile".to_string(),
         ],
+        test_runtime_dir: Some(paths.runtime_dir().to_path_buf()),
       },
       async { Ok(()) },
     )

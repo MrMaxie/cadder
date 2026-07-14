@@ -1028,7 +1028,7 @@ mod tests {
       message: "Autostart is unavailable.".to_string(),
       mode: AutostartMode::Daemon,
       status: AutostartStatus::Unsupported,
-      target: Some("cadderd --runtime-dir runtime".to_string()),
+      target: Some("cadderd".to_string()),
       diagnostics: vec![AutostartDiagnostic {
         code: "unsupported".to_string(),
         message: "OS autostart is unsupported.".to_string(),
