@@ -22,11 +22,11 @@
 - [x] 3.5 `[RUN-005]` `[IPC-009]` Implement the shared accept, request/stream, and owned-runtime shutdown phases and their fixed budgets (verification: `cargo test -p cadder-daemon shutdown_coordinator`)
 - [x] 3.6 `[RUN-005]` `[IPC-009]` Bound interruptible storage flush and join, retain ownership while an in-progress non-interruptible durability or rollback operation finishes under fail-stop containment, and perform generation-matched discovery and lock cleanup (verification: `cargo test -p cadder-daemon shutdown_storage`)
 
-## 4. Trusted Caddy and ownership containment
+## 4. Explicit Caddy selection and ownership containment
 
-- [x] 4.1 `[CAD-001]` Move real-Caddy selection to explicit daemon override, trusted per-user/system selectors, and safe PATH; validate containing-directory ownership/write permissions; remove project, environment, executable-adjacent, and shim selectors (verification: `cargo test -p cadder-daemon trusted_caddy_source`)
+- [x] 4.1 `[CAD-001]` Move real-Caddy selection to explicit daemon override, standard per-user/system selectors, and native PATH; require an absolute regular native executable, exclude the active shim by file identity, avoid custom executable or containing-directory ACL policy, and remove project, environment, executable-adjacent, and shim selectors (verification: `cargo test -p cadder-daemon trusted_caddy_source`)
 - [x] 4.2 `[CAD-001]` Pin and reverify Caddy handle identity, digest, semantic version, modules, and probe revision at every spawn seam within the runtime-owner threat boundary (verification: `cargo test -p cadder-daemon pinned_caddy_image`)
-- [ ] 4.3 `[RUN-004]` `[RUN-009]` Implement the authenticated runtime-guard protocol, generation lock, containment record, and replacement proof (verification: `cargo test -p cadderd --test cadderd_binary runtime_guard`)
+- [x] 4.3 `[RUN-004]` `[RUN-009]` Implement the authenticated runtime-guard protocol, generation lock, containment record, and replacement proof (verification: `cargo test -p cadderd --test cadderd_binary runtime_guard`)
 - [ ] 4.4 `[RUN-004]` `[RUN-009]` Prove forced owner loss terminates only the owned child and grandchild within ten seconds on each supported OS family (verification: Windows, Linux, and macOS jobs run `cargo test -p cadderd --test cadderd_binary containment`)
 
 ## 5. Safe shim and registration lease
@@ -43,7 +43,8 @@
 - [ ] 6.2 `[REG-002]` `[REG-003]` `[REG-005]` `[IPC-003]` `[IPC-007]` Migrate the shim session and reconnect state machine to the shared client without changing delegated output (verification: `cargo test -p cadder-shim --test shim_binary ipc`)
 - [ ] 6.3 `[IPC-003]` `[IPC-004]` `[IPC-006]` `[IPC-007]` Migrate operator requests and state subscriptions to the shared client foundation (verification: `cargo test -p cadder-operator ipc`)
 - [ ] 6.4 `[REG-002]` `[REG-003]` `[REG-005]` `[IPC-007]` Add terminal golden and pseudo-terminal tests for human unavailable, reconnect, restored, conflict, timeout, shutdown and Ctrl+C outcomes, exact delegated stdout/exit status, the stderr delegation notice, no ANSI, non-TTY, and `TERM=dumb` (verification: `cargo test --workspace terminal_ux`)
-- [ ] 6.5 `[REG-005]` `[REG-006]` `[IPC-003]` Update architecture, real-Caddy selection, shim recovery, protocol, and security documentation for their intended audiences (verification: `cargo xtask docs check`)
+- [ ] 6.5 `[REG-005]` `[REG-006]` `[IPC-003]` Update architecture, real-Caddy selection, shim recovery, protocol, and security documentation for their intended audiences (verification: `cargo xtask docs-check`)
+- [x] 6.6 `[TUI-001]` `[TUI-002]` `[TUI-003]` `[TUI-005]` Launch the TUI only through `cadder tui`, replace embedded and pseudorandom production state with the shared operator client, show explicit connected, unavailable, and error states, and route supported mutations through the operator API (verification: `cargo test -p cadder tui`)
 
 ## 7. Final verification
 

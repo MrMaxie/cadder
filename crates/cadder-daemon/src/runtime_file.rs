@@ -16,6 +16,7 @@ const CREATE_ATTEMPTS: usize = 8;
 #[derive(Debug)]
 pub(crate) struct StagedRuntimeConfig {
   candidate_path: PathBuf,
+  generation: String,
   effective_path: PathBuf,
   promoted: bool,
 }
@@ -44,6 +45,10 @@ impl StagedRuntimeConfig {
 
   pub(crate) fn path(&self) -> &Path {
     &self.candidate_path
+  }
+
+  pub(crate) fn generation(&self) -> &str {
+    &self.generation
   }
 
   pub(crate) fn promote(&mut self) -> Result<()> {
@@ -138,12 +143,13 @@ fn create_candidate(
   effective_path: PathBuf,
 ) -> Result<(StagedRuntimeConfig, File)> {
   for _ in 0..CREATE_ATTEMPTS {
-    let candidate_path = candidate_path(paths)?;
+    let (generation, candidate_path) = candidate_path(paths)?;
     match create_owner_only_runtime_file(paths, &candidate_path) {
       Ok(file) => {
         return Ok((
           StagedRuntimeConfig {
             candidate_path,
+            generation,
             effective_path,
             promoted: false,
           },
@@ -157,13 +163,34 @@ fn create_candidate(
   bail!("could not allocate a unique staged Caddy config after {CREATE_ATTEMPTS} attempts")
 }
 
-fn candidate_path(paths: &RuntimePaths) -> Result<PathBuf> {
+fn candidate_path(paths: &RuntimePaths) -> Result<(String, PathBuf)> {
   let mut bytes = [0_u8; GENERATION_BYTES];
   getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
-  Ok(paths.runtime_dir().join(format!(
-    "{CANDIDATE_PREFIX}{}{CANDIDATE_SUFFIX}",
-    hex::encode(bytes)
-  )))
+  let generation = hex::encode(bytes);
+  let path = candidate_path_for_generation(paths, &generation)?;
+  Ok((generation, path))
+}
+
+pub(crate) fn validated_candidate_path(paths: &RuntimePaths, generation: &str) -> Result<PathBuf> {
+  let path = candidate_path_for_generation(paths, generation)?;
+  validate_owner_only_runtime_file(&path)
+    .with_context(|| format!("validate staged Caddy config {}", path.display()))?;
+  Ok(path)
+}
+
+fn candidate_path_for_generation(paths: &RuntimePaths, generation: &str) -> Result<PathBuf> {
+  anyhow::ensure!(
+    generation.len() == GENERATION_BYTES * 2
+      && generation
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+    "staged Caddy config generation is invalid"
+  );
+  Ok(
+    paths
+      .runtime_dir()
+      .join(format!("{CANDIDATE_PREFIX}{generation}{CANDIDATE_SUFFIX}")),
+  )
 }
 
 #[cfg(unix)]
@@ -341,6 +368,28 @@ mod tests {
           & 0o777,
         0o600
       );
+    }
+  }
+
+  #[tokio::test]
+  async fn validated_candidate_path_accepts_only_the_exact_staged_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    paths.ensure_dirs().unwrap();
+    let staged = StagedRuntimeConfig::stage(&paths, b"candidate")
+      .await
+      .unwrap();
+
+    assert_eq!(
+      validated_candidate_path(&paths, staged.generation()).unwrap(),
+      staged.path()
+    );
+    for invalid in [
+      "00112233445566778899aabbccddeef",
+      "00112233445566778899AABBCCDDEEFF",
+      "../../effective-caddy.json",
+    ] {
+      assert!(validated_candidate_path(&paths, invalid).is_err());
     }
   }
 

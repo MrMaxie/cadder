@@ -6,9 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cadder-daemon = { version = "0.8.0", path = "../cadder-daemon" }
+cadder-operator = { version = "0.8.0", path = "../cadder-operator" }
+cadder-protocol = { version = "0.8.0", path = "../cadder-protocol" }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_yaml = { version = "0.10.4", package = "yaml_serde" }
+tokio = { version = "=1.52.3", features = ["rt"] }
 tui-term = "0.3.4"

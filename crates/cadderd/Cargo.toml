@@ -15,4 +15,5 @@ tracing-subscriber = "0.3.23"
 
 [dev-dependencies]
 cadder-protocol = { path = "../cadder-protocol" }
+chrono = "=0.4.45"
 serde_json = "=1.0.150"

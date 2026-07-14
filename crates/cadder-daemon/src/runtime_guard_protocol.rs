@@ -4,7 +4,8 @@ use crate::{
   ipc_codec::{BoundedNdjsonCodec, IpcCodecError, encode_json_frame},
   runtime_guard_record::{
     RuntimeGuardChildIdentity, RuntimeGuardGeneration, RuntimeGuardGenerationContext,
-    RuntimeGuardIdentity, RuntimeGuardRecordState, RuntimeGuardTerminalOutcome,
+    RuntimeGuardIdentity, RuntimeGuardPinnedCaddyIdentity, RuntimeGuardRecordState,
+    RuntimeGuardTerminalOutcome,
   },
 };
 use bytes::BytesMut;
@@ -23,6 +24,7 @@ pub struct RuntimeGuardBootstrapRequest {
   pub context: RuntimeGuardGenerationContext,
   pub request_id: u64,
   pub nonce: String,
+  pub pinned_caddy: Option<RuntimeGuardPinnedCaddyIdentity>,
 }
 
 impl fmt::Debug for RuntimeGuardBootstrapRequest {
@@ -33,6 +35,7 @@ impl fmt::Debug for RuntimeGuardBootstrapRequest {
       .field("context", &self.context)
       .field("request_id", &self.request_id)
       .field("nonce", &"[REDACTED]")
+      .field("pinned_caddy", &self.pinned_caddy)
       .finish()
   }
 }
@@ -44,6 +47,15 @@ pub struct RuntimeGuardStartRequest {
   pub context: RuntimeGuardGenerationContext,
   pub request_id: u64,
   pub child_generation: String,
+  pub config_generation: String,
+}
+
+/// One bounded Caddy output record forwarded outside the control protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeGuardLogFrame {
+  pub channel: String,
+  pub message: String,
 }
 
 /// Context-bound command without an arbitrary payload.
@@ -244,7 +256,10 @@ impl RuntimeGuardProtocol {
         self.authenticated = true;
       }
       RuntimeGuardRequest::Start(start) => {
-        if !self.ready || !valid_generation_id(&start.child_generation) {
+        if !self.ready
+          || !valid_generation_id(&start.child_generation)
+          || !valid_generation_id(&start.config_generation)
+        {
           return self.fail(RuntimeGuardProtocolError::InvalidOperationState);
         }
       }
@@ -479,6 +494,7 @@ mod tests {
       context,
       request_id: 1,
       nonce: "00".repeat(32),
+      pinned_caddy: None,
     });
 
     let error = protocol.decode(&mut frame(&request)).unwrap_err();
@@ -609,6 +625,7 @@ mod tests {
       context: context.clone(),
       request_id: 2,
       child_generation: "1234567890abcdef1234567890abcdef".to_string(),
+      config_generation: "abcdef1234567890abcdef1234567890".to_string(),
     });
 
     let decoded = protocol.decode(&mut frame(&start)).unwrap().unwrap();
@@ -632,6 +649,7 @@ mod tests {
       context,
       request_id: 2,
       child_generation: "1234567890abcdef1234567890abcdef".to_string(),
+      config_generation: "abcdef1234567890abcdef1234567890".to_string(),
     });
     let mut value = serde_json::to_value(start).unwrap();
     let object = value.as_object_mut().unwrap();
@@ -647,6 +665,23 @@ mod tests {
       .unwrap_err();
 
     assert!(matches!(error, RuntimeGuardProtocolError::InvalidFrame));
+  }
+
+  #[test]
+  fn runtime_guard_protocol_rejects_invalid_config_generation() {
+    let (mut protocol, context, nonce) = protocol_fixture();
+    complete_bootstrap(&mut protocol, context.clone(), nonce);
+    let start = RuntimeGuardRequest::Start(RuntimeGuardStartRequest {
+      context,
+      request_id: 2,
+      child_generation: "1234567890abcdef1234567890abcdef".to_string(),
+      config_generation: "../../effective-caddy.json".to_string(),
+    });
+
+    assert!(matches!(
+      protocol.decode(&mut frame(&start)),
+      Err(RuntimeGuardProtocolError::InvalidOperationState)
+    ));
   }
 
   fn protocol_fixture() -> (RuntimeGuardProtocol, RuntimeGuardGenerationContext, String) {
@@ -671,6 +706,7 @@ mod tests {
       context,
       request_id: 1,
       nonce,
+      pinned_caddy: None,
     })
   }
 

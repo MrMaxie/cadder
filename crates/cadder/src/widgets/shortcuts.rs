@@ -5,21 +5,31 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::widgets::theme::THEME;
 
-pub const MAIN_SHORTCUTS: [Shortcut; 6] = [
-  Shortcut::new("Left/Right", "switch tab"),
+pub const MAIN_SHORTCUTS: [Shortcut; 7] = [
+  Shortcut::new("Tab/Left/Right", "switch view"),
   Shortcut::new("Up/Down", "select row"),
-  Shortcut::new("Space", "toggle enabled"),
+  Shortcut::new("Space", "request toggle"),
   Shortcut::new("Enter", "details"),
+  Shortcut::new("r", "refresh"),
   Shortcut::new("Esc", "quit"),
-  Shortcut::new("Ctrl+C/X", "quit"),
+  Shortcut::new("Ctrl+C", "quit"),
 ];
 
-pub const LOG_SHORTCUTS: [Shortcut; 5] = [
-  Shortcut::new("Left/Right", "switch tab"),
+pub const LOG_SHORTCUTS: [Shortcut; 6] = [
+  Shortcut::new("Tab/Left/Right", "switch view"),
   Shortcut::new("Up/Down", "scroll logs"),
   Shortcut::new("PgUp/PgDn", "scroll logs"),
+  Shortcut::new("r", "refresh"),
   Shortcut::new("Esc", "quit"),
-  Shortcut::new("Ctrl+C/X", "quit"),
+  Shortcut::new("Ctrl+C", "quit"),
+];
+
+pub const OFFLINE_SHORTCUTS: [Shortcut; 5] = [
+  Shortcut::new("Tab/Left/Right", "switch view"),
+  Shortcut::new("r", "retry"),
+  Shortcut::new("s", "start daemon"),
+  Shortcut::new("Esc", "quit"),
+  Shortcut::new("Ctrl+C", "quit"),
 ];
 
 #[derive(Debug, Clone, Copy)]

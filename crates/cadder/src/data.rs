@@ -1,34 +1,9 @@
-use color_eyre::eyre::{Context, Result};
-use serde::Deserialize;
+use cadder_operator::{domains_view, entrypoints_view};
+use cadder_protocol::{GuiStateSnapshot, LogStreamIdentity};
 
-const MOCK_DATA: &str = include_str!("mock_data.yaml");
-const MOCK_SETTINGS: &str = include_str!("mock_settings.yaml");
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DataModel {
-  projects: Vec<Project>,
-  settings: Settings,
-}
-
-#[derive(Debug, Clone)]
-pub struct Project {
-  name: String,
-  enabled: bool,
-  is_iis: bool,
-  domains: Vec<Domain>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Domain {
-  name: String,
-  port: u16,
-  enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Settings {
-  deamon_autorun: bool,
-  rewire_iis: bool,
+  snapshot: Option<GuiStateSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,195 +13,288 @@ pub struct DomainTableRow {
   enabled: bool,
   visually_enabled: bool,
   name: String,
-  port: Option<u16>,
+  endpoint: String,
   count: Option<usize>,
   spaced_before: bool,
-  is_iis: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct SettingsTableRow {
   entity: EntityId,
-  enabled: bool,
   name: String,
+  value: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityId {
-  Project(usize),
-  Domain { project: usize, domain: usize },
-  Setting(SettingId),
+  Entrypoint(String),
+  Domain {
+    registration_id: String,
+    canonical_domain: String,
+  },
+  Status(StatusId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingId {
-  DeamonAutorun,
-  RewireIis,
+pub enum StatusId {
+  Connection,
+  Runtime,
+  Config,
+  Storage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainRowKind {
-  Project,
+  Entrypoint,
   Domain,
 }
 
-impl DataModel {
-  pub fn load() -> Result<Self> {
-    let data: MockDataFile = serde_yaml::from_str(MOCK_DATA).wrap_err("parsing mock_data.yaml")?;
-    let settings: SettingsFile =
-      serde_yaml::from_str(MOCK_SETTINGS).wrap_err("parsing mock_settings.yaml")?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationTarget {
+  pub entity: EntityId,
+  pub enabled: bool,
+}
 
-    Ok(Self {
-      projects: data.into_projects(),
-      settings: Settings {
-        deamon_autorun: settings.deamon_autorun,
-        rewire_iis: settings.rewire_iis,
-      },
-    })
+impl DataModel {
+  pub fn replace_snapshot(&mut self, snapshot: GuiStateSnapshot) {
+    self.snapshot = Some(snapshot);
+  }
+
+  pub fn clear_snapshot(&mut self) {
+    self.snapshot = None;
   }
 
   pub fn domain_rows(&self) -> Vec<DomainTableRow> {
-    self
-      .projects
+    let Some(snapshot) = &self.snapshot else {
+      return Vec::new();
+    };
+    let entrypoints = entrypoints_view(snapshot);
+    let domains = domains_view(snapshot, None);
+
+    entrypoints
+      .entrypoints
       .iter()
       .enumerate()
-      .flat_map(|(project_index, project)| {
-        let project_row = DomainTableRow {
-          entity: EntityId::Project(project_index),
-          kind: DomainRowKind::Project,
-          enabled: project.enabled,
-          visually_enabled: project.enabled,
-          name: project.name.clone(),
-          port: None,
-          count: Some(project.domains.len()),
-          spaced_before: project_index > 0,
-          is_iis: project.is_iis,
+      .flat_map(|(entrypoint_index, entrypoint)| {
+        let registration_id = entrypoint.registration_id.clone();
+        let entrypoint_enabled = entrypoint.activation_state.is_enabled();
+        let entrypoint_row = DomainTableRow {
+          entity: EntityId::Entrypoint(registration_id.clone()),
+          kind: DomainRowKind::Entrypoint,
+          enabled: entrypoint_enabled,
+          visually_enabled: entrypoint_enabled,
+          name: entrypoint.working_directory.clone(),
+          endpoint: format!("{} domains", entrypoint.domain_count),
+          count: Some(entrypoint.domain_count),
+          spaced_before: entrypoint_index > 0,
         };
-
-        std::iter::once(project_row).chain(project.domains.iter().enumerate().map(
-          move |(domain_index, domain)| DomainTableRow {
+        let domain_rows = domains
+          .domains
+          .iter()
+          .filter(move |domain| domain.registration_id == registration_id)
+          .map(move |domain| DomainTableRow {
             entity: EntityId::Domain {
-              project: project_index,
-              domain: domain_index,
+              registration_id: domain.registration_id.clone(),
+              canonical_domain: domain.canonical_domain.clone(),
             },
             kind: DomainRowKind::Domain,
-            enabled: domain.enabled,
-            visually_enabled: project.enabled && domain.enabled,
-            name: domain.name.clone(),
-            port: Some(domain.port),
+            enabled: domain.activation_state.is_enabled(),
+            visually_enabled: entrypoint_enabled && domain.activation_state.is_enabled(),
+            name: domain.domain.clone(),
+            endpoint: domain.upstream.clone().unwrap_or_default(),
             count: None,
             spaced_before: false,
-            is_iis: false,
-          },
-        ))
+          });
+
+        std::iter::once(entrypoint_row).chain(domain_rows)
       })
       .collect()
   }
 
-  pub fn settings_rows(&self) -> Vec<SettingsTableRow> {
-    vec![
-      SettingsTableRow {
-        entity: EntityId::Setting(SettingId::DeamonAutorun),
-        enabled: self.settings.deamon_autorun,
-        name: "deamon autorun".to_string(),
-      },
-      SettingsTableRow {
-        entity: EntityId::Setting(SettingId::RewireIis),
-        enabled: self.settings.rewire_iis,
-        name: "rewire IIS".to_string(),
-      },
-    ]
+  pub fn status_rows(&self, connection: &str) -> Vec<SettingsTableRow> {
+    let mut rows = vec![SettingsTableRow {
+      entity: EntityId::Status(StatusId::Connection),
+      name: "Daemon".to_string(),
+      value: connection.to_string(),
+    }];
+    if let Some(snapshot) = &self.snapshot {
+      rows.extend([
+        SettingsTableRow {
+          entity: EntityId::Status(StatusId::Runtime),
+          name: "Caddy runtime".to_string(),
+          value: format!("{:?}", snapshot.runtime.status),
+        },
+        SettingsTableRow {
+          entity: EntityId::Status(StatusId::Config),
+          name: "Configuration".to_string(),
+          value: format!("{:?}", snapshot.config.status),
+        },
+        SettingsTableRow {
+          entity: EntityId::Status(StatusId::Storage),
+          name: "Storage".to_string(),
+          value: snapshot.storage.as_ref().map_or_else(
+            || "Unavailable".to_string(),
+            |storage| storage.backend.clone(),
+          ),
+        },
+      ]);
+    }
+    rows
   }
 
-  pub fn toggle(&mut self, entity: EntityId) {
+  pub fn mutation_target(&self, entity: &EntityId) -> Option<MutationTarget> {
+    let snapshot = self.snapshot.as_ref()?;
     match entity {
-      EntityId::Project(index) => {
-        if let Some(project) = self.projects.get_mut(index) {
-          project.enabled = !project.enabled;
-        }
-      }
-      EntityId::Domain { project, domain } => {
-        if let Some(domain) = self
-          .projects
-          .get_mut(project)
-          .and_then(|project| project.domains.get_mut(domain))
-        {
-          domain.enabled = !domain.enabled;
-        }
-      }
-      EntityId::Setting(SettingId::DeamonAutorun) => {
-        self.settings.deamon_autorun = !self.settings.deamon_autorun;
-      }
-      EntityId::Setting(SettingId::RewireIis) => {
-        self.settings.rewire_iis = !self.settings.rewire_iis;
-      }
+      EntityId::Entrypoint(registration_id) => snapshot
+        .registrations
+        .iter()
+        .find(|entrypoint| entrypoint.registration_id == *registration_id)
+        .map(|entrypoint| MutationTarget {
+          entity: entity.clone(),
+          enabled: !entrypoint.activation_state.is_enabled(),
+        }),
+      EntityId::Domain {
+        registration_id,
+        canonical_domain,
+      } => snapshot
+        .registrations
+        .iter()
+        .find(|entrypoint| entrypoint.registration_id == *registration_id)
+        .and_then(|entrypoint| {
+          entrypoint
+            .registered_domains
+            .iter()
+            .find(|domain| domain.name.canonical == *canonical_domain)
+        })
+        .map(|domain| MutationTarget {
+          entity: entity.clone(),
+          enabled: !domain.activation_state.is_enabled(),
+        }),
+      EntityId::Status(_) => None,
     }
   }
 
-  pub fn describe(&self, entity: EntityId) -> Vec<String> {
+  pub fn log_stream(&self, entity: &EntityId) -> Option<LogStreamIdentity> {
+    let snapshot = self.snapshot.as_ref()?;
     match entity {
-      EntityId::Project(index) => self
-        .projects
-        .get(index)
-        .map(|project| {
-          vec![
-            format!("Selected project: {}", project.name),
-            format!("Enabled: {}", yes_no(project.enabled)),
-            format!("Domains: {}", project.domains.len()),
-          ]
+      EntityId::Entrypoint(registration_id) => snapshot
+        .registrations
+        .iter()
+        .find(|entrypoint| entrypoint.registration_id == *registration_id)
+        .map(|entrypoint| entrypoint.log_stream.clone()),
+      EntityId::Domain {
+        registration_id,
+        canonical_domain,
+      } => snapshot
+        .registrations
+        .iter()
+        .find(|entrypoint| entrypoint.registration_id == *registration_id)
+        .and_then(|entrypoint| {
+          entrypoint
+            .registered_domains
+            .iter()
+            .find(|domain| domain.name.canonical == *canonical_domain)
         })
-        .unwrap_or_else(|| vec!["Selected project: unavailable".to_string()]),
-      EntityId::Domain { project, domain } => self
-        .projects
-        .get(project)
-        .and_then(|project_data| {
-          project_data
-            .domains
-            .get(domain)
-            .map(|domain_data| (project_data, domain_data))
-        })
-        .map(|(project_data, domain_data)| {
-          vec![
-            format!("Selected domain: {}", domain_data.name),
-            format!("Project: {}", project_data.name),
-            format!("Port: :{}", domain_data.port),
-            format!("Enabled: {}", yes_no(domain_data.enabled)),
-          ]
-        })
-        .unwrap_or_else(|| vec!["Selected domain: unavailable".to_string()]),
-      EntityId::Setting(SettingId::DeamonAutorun) => vec![
-        "Selected setting: deamon autorun".to_string(),
-        format!("Enabled: {}", yes_no(self.settings.deamon_autorun)),
-      ],
-      EntityId::Setting(SettingId::RewireIis) => vec![
-        "Selected setting: rewire IIS".to_string(),
-        format!("Enabled: {}", yes_no(self.settings.rewire_iis)),
-      ],
+        .map(|domain| domain.log_stream.clone()),
+      EntityId::Status(_) => None,
     }
   }
 
-  pub fn title(&self, entity: EntityId) -> String {
+  pub fn describe(&self, entity: &EntityId) -> Vec<String> {
+    let Some(snapshot) = &self.snapshot else {
+      return vec!["No daemon snapshot is available.".to_string()];
+    };
     match entity {
-      EntityId::Project(index) => self
-        .projects
-        .get(index)
-        .map(|project| format!(" {} ", project.name))
-        .unwrap_or_else(|| " Selected ".to_string()),
-      EntityId::Domain { project, domain } => self
-        .projects
-        .get(project)
-        .and_then(|project| project.domains.get(domain))
-        .map(|domain| format!(" {} ", domain.name))
-        .unwrap_or_else(|| " Selected ".to_string()),
-      EntityId::Setting(SettingId::DeamonAutorun) => " deamon autorun ".to_string(),
-      EntityId::Setting(SettingId::RewireIis) => " rewire IIS ".to_string(),
+      EntityId::Entrypoint(registration_id) => entrypoints_view(snapshot)
+        .entrypoints
+        .into_iter()
+        .find(|entrypoint| entrypoint.registration_id == *registration_id)
+        .map(|entrypoint| {
+          vec![
+            format!("Registration: {}", entrypoint.registration_id),
+            format!("State: {:?}", entrypoint.activation_state),
+            format!("Working directory: {}", entrypoint.working_directory),
+            format!("Config: {}", entrypoint.config_path),
+            format!("Process: {}", entrypoint.process_id),
+            format!("Domains: {}", entrypoint.domain_count),
+          ]
+        })
+        .unwrap_or_else(|| vec!["Entrypoint is no longer present.".to_string()]),
+      EntityId::Domain {
+        registration_id,
+        canonical_domain,
+      } => domains_view(snapshot, Some(registration_id))
+        .domains
+        .into_iter()
+        .find(|domain| domain.canonical_domain == *canonical_domain)
+        .map(|domain| {
+          vec![
+            format!("Domain: {}", domain.domain),
+            format!("State: {:?}", domain.activation_state),
+            format!("Entrypoint: {}", domain.registration_id),
+            format!("Upstream: {}", domain.upstream.as_deref().unwrap_or("none")),
+            format!("Config: {}", domain.config_path),
+          ]
+        })
+        .unwrap_or_else(|| vec!["Domain is no longer present.".to_string()]),
+      EntityId::Status(status) => self.describe_status(*status),
+    }
+  }
+
+  pub fn title(&self, entity: &EntityId) -> String {
+    match entity {
+      EntityId::Entrypoint(registration_id) => format!(" {registration_id} "),
+      EntityId::Domain {
+        canonical_domain, ..
+      } => format!(" {canonical_domain} "),
+      EntityId::Status(status) => format!(" {status:?} "),
+    }
+  }
+
+  fn describe_status(&self, status: StatusId) -> Vec<String> {
+    let Some(snapshot) = &self.snapshot else {
+      return vec!["No daemon snapshot is available.".to_string()];
+    };
+    match status {
+      StatusId::Connection => vec![
+        "Daemon connection is active.".to_string(),
+        format!("Snapshot captured: {}", snapshot.captured_at_utc),
+      ],
+      StatusId::Runtime => vec![
+        format!("Caddy runtime: {:?}", snapshot.runtime.status),
+        format!(
+          "Version: {}",
+          snapshot.runtime.version.as_deref().unwrap_or("unavailable")
+        ),
+        format!(
+          "Admin endpoint: {}",
+          snapshot
+            .runtime
+            .admin_endpoint
+            .as_deref()
+            .unwrap_or("unavailable")
+        ),
+      ],
+      StatusId::Config => vec![
+        format!("Configuration: {:?}", snapshot.config.status),
+        format!("Diagnostics: {}", snapshot.config.diagnostics.len()),
+      ],
+      StatusId::Storage => snapshot.storage.as_ref().map_or_else(
+        || vec!["Storage information is unavailable.".to_string()],
+        |storage| {
+          vec![
+            format!("Backend: {}", storage.backend),
+            format!("Schema version: {}", storage.schema_version),
+          ]
+        },
+      ),
     }
   }
 }
 
 impl DomainTableRow {
-  pub const fn entity(&self) -> EntityId {
-    self.entity
+  pub fn entity(&self) -> EntityId {
+    self.entity.clone()
   }
 
   pub const fn kind(&self) -> DomainRowKind {
@@ -245,8 +313,8 @@ impl DomainTableRow {
     &self.name
   }
 
-  pub const fn port(&self) -> Option<u16> {
-    self.port
+  pub fn endpoint(&self) -> &str {
+    &self.endpoint
   }
 
   pub const fn count(&self) -> Option<usize> {
@@ -256,101 +324,18 @@ impl DomainTableRow {
   pub const fn spaced_before(&self) -> bool {
     self.spaced_before
   }
-
-  pub const fn is_iis(&self) -> bool {
-    self.is_iis
-  }
 }
 
 impl SettingsTableRow {
-  pub const fn entity(&self) -> EntityId {
-    self.entity
-  }
-
-  pub const fn enabled(&self) -> bool {
-    self.enabled
+  pub fn entity(&self) -> EntityId {
+    self.entity.clone()
   }
 
   pub fn name(&self) -> &str {
     &self.name
   }
-}
 
-#[derive(Debug, Deserialize)]
-struct MockDataFile {
-  #[serde(default)]
-  projects: Vec<ProjectFile>,
-  iis: Option<IisFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectFile {
-  name: String,
-  #[serde(default)]
-  enabled: bool,
-  #[serde(default)]
-  domains: Vec<DomainFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IisFile {
-  #[serde(default)]
-  enabled: bool,
-  #[serde(default)]
-  domains: Vec<DomainFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DomainFile {
-  domain: String,
-  port: u16,
-  #[serde(default)]
-  enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct SettingsFile {
-  deamon_autorun: bool,
-  #[serde(default)]
-  rewire_iis: bool,
-}
-
-impl MockDataFile {
-  fn into_projects(self) -> Vec<Project> {
-    let mut projects = self
-      .projects
-      .into_iter()
-      .map(|project| Project {
-        name: project.name,
-        enabled: project.enabled,
-        is_iis: false,
-        domains: project.domains.into_iter().map(Domain::from).collect(),
-      })
-      .collect::<Vec<_>>();
-
-    if let Some(iis) = self.iis {
-      projects.push(Project {
-        name: "IIS".to_string(),
-        enabled: iis.enabled,
-        is_iis: true,
-        domains: iis.domains.into_iter().map(Domain::from).collect(),
-      });
-    }
-
-    projects
+  pub fn value(&self) -> &str {
+    &self.value
   }
-}
-
-impl From<DomainFile> for Domain {
-  fn from(value: DomainFile) -> Self {
-    Self {
-      name: value.domain,
-      port: value.port,
-      enabled: value.enabled,
-    }
-  }
-}
-
-const fn yes_no(value: bool) -> &'static str {
-  if value { "yes" } else { "no" }
 }

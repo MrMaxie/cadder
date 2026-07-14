@@ -14,16 +14,19 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub(crate) struct ProcessTreeChild {
   inner: Box<dyn ChildWrapper>,
+  #[cfg(unix)]
+  active_process_group_id: Option<libc::pid_t>,
   #[cfg(windows)]
   job: WindowsJob,
 }
 
 impl ProcessTreeChild {
-  pub(crate) fn spawn(mut command: Command) -> io::Result<Self> {
+  pub(crate) fn spawn(command: Command) -> io::Result<Self> {
     #[cfg(windows)]
     {
       use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 
+      let mut command = command;
       command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
       command.kill_on_drop(true);
       let child = command.spawn()?;
@@ -46,8 +49,15 @@ impl ProcessTreeChild {
       let mut command = CommandWrap::from(command);
       command.wrap(process_wrap::tokio::ProcessGroup::leader());
       command.wrap(KillOnDrop);
+      let inner = command.spawn()?;
+      let process_group_id = inner
+        .id()
+        .ok_or_else(|| io::Error::other("spawned Unix child does not expose a process ID"))?
+        .try_into()
+        .map_err(|_| io::Error::other("spawned Unix child process ID exceeds pid_t"))?;
       Ok(Self {
-        inner: command.spawn()?,
+        inner,
+        active_process_group_id: Some(process_group_id),
       })
     }
   }
@@ -66,6 +76,15 @@ impl ProcessTreeChild {
 
   pub(crate) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
     let status = self.inner.try_wait()?;
+    #[cfg(unix)]
+    if status.is_some()
+      && let Some(process_group_id) = self.active_process_group_id
+    {
+      if !unix_process_group_is_empty(process_group_id)? {
+        return Ok(None);
+      }
+      self.active_process_group_id = None;
+    }
     #[cfg(windows)]
     if status.is_some() && self.job.active_processes()? != 0 {
       return Ok(None);
@@ -75,6 +94,8 @@ impl ProcessTreeChild {
 
   pub(crate) async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
     let status = self.inner.wait().await?;
+    #[cfg(unix)]
+    self.wait_until_unix_process_group_empty().await?;
     #[cfg(windows)]
     self.job.wait_until_empty().await?;
     Ok(status)
@@ -91,7 +112,12 @@ impl ProcessTreeChild {
     #[cfg(windows)]
     return self.job.terminate();
     #[cfg(unix)]
-    self.inner.start_kill()
+    {
+      if self.active_process_group_id.is_none() {
+        return Ok(());
+      }
+      self.inner.start_kill()
+    }
   }
 
   pub(crate) async fn terminate_and_join(&mut self, operation: &str) -> Result<()> {
@@ -179,6 +205,35 @@ impl ProcessTreeChild {
         anyhow::bail!("{operation} timed out after {} ms", deadline.as_millis());
       }
     }
+  }
+
+  #[cfg(unix)]
+  async fn wait_until_unix_process_group_empty(&mut self) -> io::Result<()> {
+    let Some(process_group_id) = self.active_process_group_id else {
+      return Ok(());
+    };
+    loop {
+      if unix_process_group_is_empty(process_group_id)? {
+        self.active_process_group_id = None;
+        return Ok(());
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  }
+}
+
+#[cfg(unix)]
+fn unix_process_group_is_empty(process_group_id: libc::pid_t) -> io::Result<bool> {
+  // SAFETY: signal zero does not deliver a signal; a negative PID queries the process group.
+  if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+    return Ok(false);
+  }
+
+  let error = io::Error::last_os_error();
+  match error.raw_os_error() {
+    Some(libc::ESRCH) => Ok(true),
+    Some(libc::EPERM) => Ok(false),
+    _ => Err(error),
   }
 }
 
@@ -469,6 +524,50 @@ mod tests {
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
   }
 
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn wait_keeps_tree_non_empty_after_leader_exits_until_grandchild_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let grandchild_started = temp.path().join("grandchild-started");
+    let program = write_orphaned_grandchild_process_tree(temp.path(), &grandchild_started);
+    let mut command = Command::new(program);
+    command.stdout(std::process::Stdio::null());
+    command.stderr(std::process::Stdio::null());
+    let mut child = ProcessTreeChild::spawn(command).unwrap();
+    let process_group_id = child.id().unwrap() as libc::pid_t;
+
+    wait_for_file(&grandchild_started).await;
+    let grandchild_id = fs::read_to_string(&grandchild_started)
+      .unwrap()
+      .trim()
+      .parse::<libc::pid_t>()
+      .unwrap();
+    wait_for_unix_process_exit(&mut child, process_group_id).await;
+
+    assert!(unix_process_exists(grandchild_id));
+    assert_eq!(
+      unix_process_group_id(grandchild_id).unwrap(),
+      process_group_id
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(
+      timeout(Duration::from_millis(100), child.wait())
+        .await
+        .is_err(),
+      "wait completed while the orphaned grandchild still occupied the process group"
+    );
+
+    timeout(
+      CLEANUP_TIMEOUT + Duration::from_secs(1),
+      child.terminate_and_join("orphaned grandchild test tree"),
+    )
+    .await
+    .expect("orphaned grandchild cleanup exceeded its test deadline")
+    .unwrap();
+
+    assert!(unix_process_group_is_empty(process_group_id).unwrap());
+  }
+
   #[cfg(windows)]
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn pinned_caddy_image_windows_concurrent_children_are_resumed_and_reaped() {
@@ -503,6 +602,41 @@ mod tests {
       );
       sleep(Duration::from_millis(10)).await;
     }
+  }
+
+  #[cfg(unix)]
+  async fn wait_for_unix_process_exit(child: &mut ProcessTreeChild, process_id: libc::pid_t) {
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
+    while unix_process_exists(process_id) {
+      assert!(
+        child.try_wait().unwrap().is_none(),
+        "process tree reported completion before the leader exited"
+      );
+      assert!(
+        Instant::now() < deadline,
+        "process-tree leader did not exit within its deadline"
+      );
+      sleep(Duration::from_millis(10)).await;
+    }
+  }
+
+  #[cfg(unix)]
+  fn unix_process_exists(process_id: libc::pid_t) -> bool {
+    // SAFETY: signal zero only checks whether the process exists and can be signalled.
+    if unsafe { libc::kill(process_id, 0) } == 0 {
+      return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+  }
+
+  #[cfg(unix)]
+  fn unix_process_group_id(process_id: libc::pid_t) -> io::Result<libc::pid_t> {
+    // SAFETY: the syscall only queries the process identified by this integer PID.
+    let process_group_id = unsafe { libc::getpgid(process_id) };
+    if process_group_id == -1 {
+      return Err(io::Error::last_os_error());
+    }
+    Ok(process_group_id)
   }
 
   fn write_blocking_process_tree(dir: &Path, started: &Path) -> std::path::PathBuf {
@@ -544,5 +678,30 @@ echo started> "{started}"
       fs::set_permissions(&path, permissions).unwrap();
       path
     }
+  }
+
+  #[cfg(unix)]
+  fn write_orphaned_grandchild_process_tree(dir: &Path, started: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = dir.join("orphaned-grandchild-process-tree.sh");
+    fs::write(
+      &path,
+      format!(
+        r#"#!/bin/sh
+(
+  /bin/sleep 60 &
+  printf '%s\n' "$!" > '{started}'
+) &
+wait "$!"
+"#,
+        started = started.display()
+      ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+    path
   }
 }

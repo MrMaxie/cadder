@@ -1,9 +1,9 @@
 ---
 title: Real Caddy resolution
-description: Trusted sources, precedence, validation, and recursion protection for real Caddy.
+description: Explicit sources, precedence, validation, and recursion protection for real Caddy.
 ---
 
-Cadder does not embed Caddy. The daemon resolves and pins one trusted Caddy executable when it starts. Project registration never changes the selected executable.
+Cadder does not embed Caddy. The daemon resolves and pins one Caddy executable when it starts. Project registration never changes the selected executable.
 
 ## Precedence
 
@@ -12,23 +12,19 @@ The daemon uses this exact order:
 1. An absolute `--real-caddy` daemon-start override.
 2. `profiles.<profile>.real_caddy` in the standard per-user `cadder.toml`.
 3. `defaults.real_caddy` in the per-user file.
-4. `profiles.<profile>.real_caddy` in the administrator-owned system file.
+4. `profiles.<profile>.real_caddy` in the system file.
 5. `defaults.real_caddy` in the system file.
-6. A trusted native executable named `caddy` on `PATH`.
+6. A native executable named `caddy` on `PATH` that is not Cadder's shim.
 
-An invalid higher-priority value stops resolution. Cadder does not hide a broken or unsafe configuration by selecting a lower-priority executable.
+An invalid higher-priority value stops resolution. Cadder does not hide a broken configuration by selecting a lower-priority executable.
 
 Project files, registration working directories, files next to Cadder executables, `CADDER_CADDY_REAL_COMMAND`, and shim options do not participate in this chain.
 
 ## Path validation
 
-Every configured value is an absolute path. Cadder canonicalizes the executable, requires a regular native executable, and validates its owner and parent directories without changing their permissions.
+Every configured value is an absolute path. Cadder canonicalizes the executable and requires a regular native executable. Windows batch scripts and a final reparse point are rejected; Unix executables require an executable mode bit.
 
-On Windows, the owner is the runtime account, `SYSTEM`, `Administrators`, or `TrustedInstaller`, according to the source. A less-trusted access-control entry cannot grant write, delete, rename, owner-change, or DACL-change authority. Reparse points and `.bat` or `.cmd` scripts are rejected.
-
-On Linux and macOS, the owner is the runtime account or `root`, according to the source. Group-writable and world-writable components, symbolic links, and files without an executable bit are rejected.
-
-Configuration files pass the same provenance checks and are read through the validated file handle. This binds validation to the bytes Cadder parses.
+Cadder does not require a special owner, parent-directory permission layout, or hardened ACL for the Caddy executable or configuration file. Normal Scoop, package-manager, system, and user-local installations are valid inputs. Runtime image pinning, described below, detects replacement after selection.
 
 ## Version and image pinning
 
@@ -40,7 +36,7 @@ On Windows, Cadder retains a read-only handle without write or delete sharing fo
 
 ## PATH and recursion safety
 
-PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that fail the same trust policy.
+PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that are not native executables.
 
 Cadder compares operating-system file identity, not just path text, when excluding its shim. A symlink or hardlink to `cadder-caddy` is therefore skipped even when it appears under the name `caddy`.
 
@@ -50,4 +46,4 @@ The shim does not accept a real-Caddy selector. `caddy run` attaches only to the
 
 Read-only inspection commands such as `caddy version`, `caddy adapt`, and `caddy validate` use the same per-user/system/PATH resolver. Their stderr notice identifies the output as real-Caddy inspection rather than Cadder runtime state.
 
-If resolution fails, the error names the rejected source and the action that restores a trusted setup.
+If resolution fails, the error names the rejected source and the action that restores a working setup.

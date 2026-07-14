@@ -60,7 +60,7 @@ Each journey MUST state prerequisites, the expected successful result, relevant 
 
 #### Scenario: First managed project
 - **WHEN** a user follows the documented first-project journey on a supported platform
-- **THEN** the user installs Cadder, configures a trusted real Caddy source, explicitly sets up the shim alias, starts the daemon, runs a project, and verifies its state through `cadder`
+- **THEN** the user installs Cadder, configures an explicit real Caddy source, explicitly sets up the shim alias, starts the daemon, runs a project, and verifies its state through `cadder`
 
 #### Scenario: Safe uninstall guidance
 - **WHEN** a user follows the uninstall journey

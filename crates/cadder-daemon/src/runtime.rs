@@ -5,6 +5,10 @@ use crate::{
   runtime_file::{
     StagedRuntimeConfig, read_effective_config, remove_effective_config, restore_effective_config,
   },
+  runtime_guard::RuntimeGuardClient,
+  runtime_guard_protocol::RuntimeGuardLogFrame,
+  runtime_guard_record::RuntimeGuardChildIdentity,
+  runtime_lock::RuntimeContainmentMetadata,
 };
 use anyhow::{Context, Result};
 use cadder_protocol::{
@@ -244,6 +248,9 @@ impl From<ProcessRuntime> for CaddyRuntime {
 pub struct ProcessRuntime {
   resolver: RealCaddyResolver,
   paths: RuntimePaths,
+  guard: Option<Arc<Mutex<RuntimeGuardClient>>>,
+  containment_metadata: Option<RuntimeContainmentMetadata>,
+  guarded_child: Arc<Mutex<Option<RuntimeGuardChildIdentity>>>,
   child: Arc<Mutex<Option<OwnedRuntimeProcess>>>,
   snapshot: Arc<StdMutex<RuntimeState>>,
   log_tasks: TaskTracker,
@@ -333,6 +340,9 @@ impl ProcessRuntime {
     Self {
       resolver,
       paths,
+      guard: None,
+      containment_metadata: None,
+      guarded_child: Arc::new(Mutex::new(None)),
       child: Arc::new(Mutex::new(None)),
       snapshot: Arc::new(StdMutex::new(RuntimeState::idle())),
       log_tasks: TaskTracker::new(),
@@ -342,7 +352,22 @@ impl ProcessRuntime {
     }
   }
 
+  pub(crate) fn guarded(
+    resolver: RealCaddyResolver,
+    paths: RuntimePaths,
+    guard: Arc<Mutex<RuntimeGuardClient>>,
+    containment_metadata: RuntimeContainmentMetadata,
+  ) -> Self {
+    let mut runtime = Self::new(resolver, paths);
+    runtime.guard = Some(guard);
+    runtime.containment_metadata = Some(containment_metadata);
+    runtime
+  }
+
   pub async fn inspect(&self) -> RuntimeState {
+    if self.guard.is_some() {
+      return self.inspect_guarded().await;
+    }
     let Ok(mut guard) = self.child.try_lock() else {
       return self.snapshot();
     };
@@ -381,13 +406,12 @@ impl ProcessRuntime {
           return snapshot;
         }
         Ok(Some(status)) => {
-          *guard = None;
           let snapshot = RuntimeState {
             status: RuntimeStatus::Unhealthy,
             binary_path,
             version: None,
             process_id,
-            admin_endpoint: Some("localhost:2019".to_string()),
+            admin_endpoint: None,
             diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
               code: "runtime-exited".to_string(),
               message: format!("real Caddy runtime exited with status {status}"),
@@ -421,6 +445,50 @@ impl ProcessRuntime {
     snapshot
   }
 
+  async fn inspect_guarded(&self) -> RuntimeState {
+    let guard = self.guard.as_ref().expect("guarded runtime has a guard");
+    let status = guard.lock().await.status().await;
+    match status {
+      Ok(Some(child)) => {
+        *self.guarded_child.lock().await = Some(child.clone());
+        let snapshot = guarded_runtime_state(&child);
+        self.set_snapshot(snapshot.clone());
+        snapshot
+      }
+      Ok(None) => {
+        let previous = self.guarded_child.lock().await.take();
+        let snapshot = match previous {
+          Some(child) => RuntimeState {
+            status: RuntimeStatus::Unhealthy,
+            binary_path: Some(child.pinned_caddy.image.path.display().to_string()),
+            version: Some(child.pinned_caddy.version),
+            process_id: Some(child.process.process_id),
+            admin_endpoint: Some("localhost:2019".to_string()),
+            diagnostics: vec![cadder_protocol::RuntimeDiagnostic {
+              code: "runtime-exited".to_string(),
+              message: "real Caddy runtime exited".to_string(),
+              operation: Some("inspect".to_string()),
+            }],
+          },
+          None => RuntimeState::idle(),
+        };
+        self.set_snapshot(snapshot.clone());
+        snapshot
+      }
+      Err(error) => {
+        let mut snapshot = self.snapshot();
+        snapshot.status = RuntimeStatus::Unhealthy;
+        snapshot.diagnostics = vec![cadder_protocol::RuntimeDiagnostic {
+          code: "runtime-inspect-failed".to_string(),
+          message: format!("could not inspect guarded Caddy runtime: {error}"),
+          operation: Some("inspect".to_string()),
+        }];
+        self.set_snapshot(snapshot.clone());
+        snapshot
+      }
+    }
+  }
+
   fn snapshot(&self) -> RuntimeState {
     self
       .snapshot
@@ -452,7 +520,13 @@ impl ProcessRuntime {
     let was_running = self.runtime_is_running(logs).await?;
 
     let outcome = if !was_running {
-      self.start(staged.path(), logs).await
+      if self.guard.is_some() {
+        self.start_guarded(staged.generation(), logs).await
+      } else {
+        self.start(staged.path(), logs).await
+      }
+    } else if self.guard.is_some() {
+      self.restart_guarded(staged.generation(), logs).await
     } else {
       self.reload(staged.path(), logs).await
     };
@@ -548,6 +622,58 @@ impl ProcessRuntime {
     Ok(())
   }
 
+  async fn start_guarded(&self, config_generation: &str, logs: &CaddyLogStore) -> Result<()> {
+    if self.guarded_child.lock().await.is_some() {
+      anyhow::bail!("real Caddy runtime already owns a guarded child process");
+    }
+    let guard = self
+      .guard
+      .as_ref()
+      .context("guarded runtime has no guard")?;
+    let mut guard = guard.lock().await;
+    if let Some(logs_reader) = guard.take_logs() {
+      self.log_tasks.reopen();
+      spawn_guard_log_reader(&self.log_tasks, logs_reader, logs.clone());
+    }
+    let child = guard.start(config_generation).await?;
+    if let Err(error) = self
+      .containment_metadata
+      .as_ref()
+      .context("guarded runtime has no containment metadata")?
+      .update_last_child(child.clone())
+    {
+      let containment_error = guard.terminate().await.err();
+      return Err(match containment_error {
+        Some(containment_error) => error.context(format!(
+          "publish guarded Caddy child metadata; containment also failed: {containment_error}"
+        )),
+        None => error.context("publish guarded Caddy child metadata"),
+      });
+    }
+    drop(guard);
+    *self.guarded_child.lock().await = Some(child.clone());
+    self.set_snapshot(guarded_runtime_state(&child));
+    logs.append(
+      LogStreamIdentity::runtime_control(),
+      LogSeverity::Info,
+      "real Caddy runtime started under the runtime guard",
+      LogAttributionKind::RuntimeControl,
+      Some("start".to_string()),
+    );
+    Ok(())
+  }
+
+  async fn restart_guarded(&self, config_generation: &str, logs: &CaddyLogStore) -> Result<()> {
+    let guard = self
+      .guard
+      .as_ref()
+      .context("guarded runtime has no guard")?;
+    guard.lock().await.terminate().await?;
+    *self.guarded_child.lock().await = None;
+    self.set_snapshot(RuntimeState::idle());
+    self.start_guarded(config_generation, logs).await
+  }
+
   async fn reload(&self, config_path: &Path, logs: &CaddyLogStore) -> Result<()> {
     let image = self.resolver.verify_for_spawn().await?;
     let child = image
@@ -599,6 +725,9 @@ impl ProcessRuntime {
   }
 
   pub(crate) async fn stop_until(&self, deadline: Instant) -> RuntimeStopOutcome {
+    if self.guard.is_some() {
+      return self.stop_guarded_until(deadline).await;
+    }
     let deadlines = RuntimeStopDeadlines::new(deadline, self.timeouts);
     let mut child_guard = match timeout_at(deadline, self.child.lock()).await {
       Ok(guard) => guard,
@@ -694,7 +823,33 @@ impl ProcessRuntime {
     RuntimeStopOutcome::new(stop_error.map_or(Ok(()), Err), true)
   }
 
+  async fn stop_guarded_until(&self, deadline: Instant) -> RuntimeStopOutcome {
+    let guard = self.guard.as_ref().expect("guarded runtime has a guard");
+    match timeout_at(deadline, async { guard.lock().await.terminate().await }).await {
+      Ok(Ok(_)) => {
+        *self.guarded_child.lock().await = None;
+        self.set_snapshot(RuntimeState::idle());
+        RuntimeStopOutcome::new(Ok(()), true)
+      }
+      Ok(Err(error)) => {
+        RuntimeStopOutcome::new(Err(error).context("terminate guarded Caddy runtime"), false)
+      }
+      Err(_) => RuntimeStopOutcome::new(
+        Err(anyhow::anyhow!(
+          "guarded Caddy runtime kill did not complete before the shutdown deadline"
+        )),
+        false,
+      ),
+    }
+  }
+
   async fn contain(&self) -> Result<()> {
+    if let Some(guard) = &self.guard {
+      guard.lock().await.terminate().await?;
+      *self.guarded_child.lock().await = None;
+      self.set_snapshot(RuntimeState::idle());
+      return Ok(());
+    }
     let mut child_guard = self.child.lock().await;
     if let Some(owned) = child_guard.as_mut() {
       match owned.child.try_wait() {
@@ -724,6 +879,15 @@ impl ProcessRuntime {
   }
 
   async fn runtime_is_running(&self, logs: &CaddyLogStore) -> Result<bool> {
+    if let Some(guard) = &self.guard {
+      let child = guard.lock().await.status().await?;
+      let is_running = child.is_some();
+      *self.guarded_child.lock().await = child;
+      if !is_running {
+        self.set_snapshot(RuntimeState::idle());
+      }
+      return Ok(is_running);
+    }
     let mut guard = self.child.lock().await;
     #[cfg(test)]
     if self.force_inspect_failure.load(Ordering::SeqCst) && guard.is_some() {
@@ -791,7 +955,13 @@ impl ProcessRuntimeApplyReceipt {
           anyhow::anyhow!("running Caddy runtime did not have a previous effective config")
         })?;
         let mut rollback_config = StagedRuntimeConfig::stage(&runtime.paths, previous).await?;
-        runtime.reload(rollback_config.path(), logs).await?;
+        if runtime.guard.is_some() {
+          runtime
+            .restart_guarded(rollback_config.generation(), logs)
+            .await?;
+        } else {
+          runtime.reload(rollback_config.path(), logs).await?;
+        }
         rollback_config.promote()
       } else {
         runtime.stop().await?;
@@ -843,7 +1013,13 @@ impl ProcessRuntimeStopReceipt {
           anyhow::anyhow!("running Caddy runtime did not have a previous effective config")
         })?;
         let mut rollback_config = StagedRuntimeConfig::stage(&runtime.paths, previous).await?;
-        runtime.start(rollback_config.path(), logs).await?;
+        if runtime.guard.is_some() {
+          runtime
+            .start_guarded(rollback_config.generation(), logs)
+            .await?;
+        } else {
+          runtime.start(rollback_config.path(), logs).await?;
+        }
         rollback_config.promote()
       } else {
         restore_effective_config(&runtime.paths, previous_config.as_deref()).await
@@ -1017,6 +1193,59 @@ impl MockRuntimeStopReceipt {
   }
 }
 
+fn guarded_runtime_state(child: &RuntimeGuardChildIdentity) -> RuntimeState {
+  RuntimeState {
+    status: RuntimeStatus::Running,
+    binary_path: Some(child.pinned_caddy.image.path.display().to_string()),
+    version: Some(child.pinned_caddy.version.clone()),
+    process_id: Some(child.process.process_id),
+    admin_endpoint: None,
+    diagnostics: Vec::new(),
+  }
+}
+
+fn spawn_guard_log_reader(
+  tasks: &TaskTracker,
+  reader: tokio::process::ChildStderr,
+  logs: CaddyLogStore,
+) {
+  tasks.spawn(async move {
+    let mut frames =
+      tokio_util::codec::FramedRead::new(reader, crate::ipc_codec::BoundedNdjsonCodec::new());
+    while let Some(result) = futures_util::StreamExt::next(&mut frames).await {
+      let Ok(frame) = result else {
+        break;
+      };
+      let Ok(frame) = serde_json::from_str::<RuntimeGuardLogFrame>(&frame) else {
+        logs.append(
+          LogStreamIdentity::runtime_control(),
+          LogSeverity::Error,
+          "runtime guard emitted an invalid log frame",
+          LogAttributionKind::RuntimeControl,
+          Some("runtime-guard-log".to_string()),
+        );
+        break;
+      };
+      let severity = if frame.channel == "stderr" {
+        LogSeverity::Error
+      } else {
+        LogSeverity::Info
+      };
+      logs.append(
+        LogStreamIdentity {
+          stream_id: "runtime".to_string(),
+          domain_key: None,
+          channel: frame.channel,
+        },
+        severity,
+        frame.message,
+        LogAttributionKind::Runtime,
+        None,
+      );
+    }
+  });
+}
+
 async fn request_graceful_stop_until(
   image: crate::caddy_image::VerifiedCaddyImage,
   wait_deadline: Instant,
@@ -1126,7 +1355,7 @@ mod tests {
     RuntimeTimeouts {
       start_check: Duration::from_millis(250),
       reload: Duration::from_millis(500),
-      graceful_stop: Duration::from_secs(2),
+      graceful_stop: Duration::from_secs(3),
       stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
     }
@@ -1178,12 +1407,12 @@ mod tests {
     let stop = deadlines.stop.saturating_duration_since(started);
     let kill = deadlines.kill.saturating_duration_since(started);
 
-    assert!(graceful <= Duration::from_millis(2_100));
-    assert!(graceful >= Duration::from_millis(1_900));
-    assert!(stop <= Duration::from_millis(3_100));
-    assert!(stop >= Duration::from_millis(2_900));
-    assert!(kill <= Duration::from_millis(4_100));
-    assert!(kill >= Duration::from_millis(3_900));
+    assert!(graceful <= Duration::from_millis(3_100));
+    assert!(graceful >= Duration::from_millis(2_900));
+    assert!(stop <= Duration::from_millis(4_100));
+    assert!(stop >= Duration::from_millis(3_900));
+    assert!(kill <= Duration::from_millis(5_100));
+    assert!(kill >= Duration::from_millis(4_900));
     assert!(deadlines.kill < overall);
   }
 

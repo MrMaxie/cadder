@@ -1,12 +1,15 @@
-use tui_term::vt100::Screen;
+use cadder_operator::LogsView;
+use tui_term::vt100::{Parser, Screen};
 
 pub(crate) const MAX_LOG_LINES: usize = 1_000;
 
 pub struct LogStore {
   screen: Option<Screen>,
+  content: String,
+  stream_label: String,
   scrollback: usize,
   follow_tail: bool,
-  viewport: TerminalSize,
+  viewport: Option<TerminalSize>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -18,17 +21,9 @@ pub(crate) struct TerminalSize {
 impl TerminalSize {
   fn new(rows: u16, cols: u16) -> Self {
     Self {
-      rows: if rows == 0 { 1 } else { rows },
-      cols: if cols == 0 { 1 } else { cols },
+      rows: rows.max(1),
+      cols: cols.max(1),
     }
-  }
-
-  pub(crate) const fn rows(self) -> u16 {
-    self.rows
-  }
-
-  pub(crate) const fn cols(self) -> u16 {
-    self.cols
   }
 }
 
@@ -36,27 +31,54 @@ impl LogStore {
   pub fn new() -> Self {
     Self {
       screen: None,
+      content: "Connect to cadderd to inspect runtime logs.".to_string(),
+      stream_label: "runtime-control".to_string(),
       scrollback: 0,
       follow_tail: true,
-      viewport: TerminalSize::new(1, 1),
+      viewport: None,
     }
   }
 
-  pub fn poll(&mut self) {}
+  pub fn replace(&mut self, logs: LogsView) {
+    self.stream_label = logs.stream.stream_id.clone();
+    let mut lines = Vec::new();
+    if logs.has_gap || logs.truncated_by_retention {
+      lines.push("[gap] Earlier log entries are no longer available.".to_string());
+    }
+    lines.extend(logs.entries.into_iter().map(|entry| {
+      format!(
+        "{} [{:?}] {}",
+        entry.timestamp_utc.to_rfc3339(),
+        entry.severity,
+        entry.raw_message
+      )
+    }));
+    if lines.is_empty() {
+      lines.push(format!(
+        "No retained entries for {} ({:?}).",
+        self.stream_label, logs.stream_status
+      ));
+    }
+    self.content = lines.join("\r\n");
+    self.rebuild_screen();
+  }
+
+  pub fn set_notice(&mut self, message: impl Into<String>) {
+    self.content = message.into();
+    self.rebuild_screen();
+  }
+
+  pub fn stream_label(&self) -> &str {
+    &self.stream_label
+  }
 
   pub fn set_viewport(&mut self, rows: u16, cols: u16) {
     let viewport = TerminalSize::new(rows, cols);
-    let viewport_changed = self.viewport != viewport;
-    self.viewport = viewport;
-
-    if !viewport_changed {
+    if self.viewport == Some(viewport) {
       return;
     }
-
-    if let Some(screen) = &mut self.screen {
-      screen.set_size(viewport.rows(), viewport.cols());
-    }
-    self.clamp_scrollback();
+    self.viewport = Some(viewport);
+    self.rebuild_screen();
   }
 
   pub fn screen(&self) -> Option<Screen> {
@@ -68,11 +90,10 @@ impl LogStore {
   }
 
   pub fn scroll_up(&mut self, amount: usize) {
-    let available_scrollback = self.current_available_scrollback();
     self.scrollback = self
       .scrollback
       .saturating_add(amount)
-      .min(available_scrollback);
+      .min(self.current_available_scrollback());
     self.follow_tail = self.scrollback == 0;
   }
 
@@ -81,13 +102,20 @@ impl LogStore {
     self.follow_tail = self.scrollback == 0;
   }
 
-  fn current_available_scrollback(&self) -> usize {
-    self.screen.as_ref().map(available_scrollback).unwrap_or(0)
+  fn rebuild_screen(&mut self) {
+    let Some(viewport) = self.viewport else {
+      self.screen = None;
+      self.scrollback = 0;
+      return;
+    };
+    let mut parser = Parser::new(viewport.rows, viewport.cols, MAX_LOG_LINES);
+    parser.process(self.content.as_bytes());
+    self.screen = Some(parser.screen().clone());
+    self.scrollback = self.scrollback.min(self.current_available_scrollback());
   }
 
-  fn clamp_scrollback(&mut self) {
-    self.scrollback = self.scrollback.min(self.current_available_scrollback());
-    self.follow_tail = self.scrollback == 0;
+  fn current_available_scrollback(&self) -> usize {
+    self.screen.as_ref().map(available_scrollback).unwrap_or(0)
   }
 }
 
@@ -95,4 +123,20 @@ fn available_scrollback(screen: &Screen) -> usize {
   let mut screen = screen.clone();
   screen.set_scrollback(MAX_LOG_LINES);
   screen.scrollback()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn multiline_content_waits_for_the_first_real_viewport() {
+    let mut logs = LogStore::new();
+
+    logs.set_notice("first line\r\nsecond line\r\nthird line");
+
+    assert!(logs.screen().is_none());
+    logs.set_viewport(10, 80);
+    assert!(logs.screen().is_some());
+  }
 }

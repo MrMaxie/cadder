@@ -94,8 +94,8 @@ impl TableBodyRows {
 
   fn headers(&self) -> [&'static str; 3] {
     match self {
-      Self::Domains(_) => ["", "Name", "Port"],
-      Self::Settings(_) => ["", "Option", ""],
+      Self::Domains(_) => ["", "Entrypoint / domain", "Upstream"],
+      Self::Settings(_) => ["", "Component", "State"],
     }
   }
 
@@ -111,14 +111,11 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
   let visually_enabled = row.visually_enabled();
   let row_style = row_style(visually_enabled);
   let mut table_row = match row.kind() {
-    DomainRowKind::Project => Row::new([
+    DomainRowKind::Entrypoint => Row::new([
       Cell::from(checkbox(row.enabled(), visually_enabled)),
-      Cell::from(
-        Line::from(row.name().to_string())
-          .style(project_name_style(visually_enabled, row.is_iis())),
-      ),
+      Cell::from(Line::from(row.name().to_string()).style(project_name_style(visually_enabled))),
       Cell::from(right_aligned(format!(
-        "({})",
+        "{} domains",
         row.count().unwrap_or_default()
       ))),
     ])
@@ -126,11 +123,7 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
     DomainRowKind::Domain => Row::new([
       Cell::from(checkbox(row.enabled(), visually_enabled)),
       Cell::from(format!("  {}", row.name())),
-      Cell::from(right_aligned(
-        row
-          .port()
-          .map_or_else(String::new, |port| format!(":{port}")),
-      )),
+      Cell::from(right_aligned(row.endpoint().to_string())),
     ])
     .style(row_style),
   };
@@ -143,13 +136,12 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
 }
 
 fn settings_row(row: SettingsTableRow) -> Row<'static> {
-  let enabled = row.enabled();
   Row::new([
-    Cell::from(checkbox(enabled, enabled)),
-    Cell::from(row.name().to_string()),
     Cell::from(""),
+    Cell::from(row.name().to_string()),
+    Cell::from(right_aligned(row.value().to_string())),
   ])
-  .style(row_style(enabled))
+  .style(THEME.table_row())
 }
 
 fn checkbox(checked: bool, visually_enabled: bool) -> Span<'static> {
@@ -173,10 +165,8 @@ fn checkbox_style(enabled: bool) -> ratatui::style::Style {
   }
 }
 
-fn project_name_style(visual_enabled: bool, is_iis: bool) -> ratatui::style::Style {
-  if is_iis {
-    THEME.iis_project()
-  } else if visual_enabled {
+fn project_name_style(visual_enabled: bool) -> ratatui::style::Style {
+  if visual_enabled {
     THEME.accent_text()
   } else {
     THEME.table_disabled_row()

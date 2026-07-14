@@ -192,6 +192,7 @@ impl RuntimeGuardRecord {
     guard: RuntimeGuardIdentity,
     child: Option<RuntimeGuardChildIdentity>,
   ) -> Self {
+    let tree_empty = Some(child.is_none());
     Self {
       schema_version: RECORD_SCHEMA_VERSION,
       protocol_revision: GUARD_PROTOCOL_REVISION,
@@ -199,7 +200,25 @@ impl RuntimeGuardRecord {
       guard: Some(guard),
       child,
       state: RuntimeGuardRecordState::Ready,
-      tree_empty: None,
+      tree_empty,
+      terminal: None,
+    }
+  }
+
+  /// Creates a live-guard record after the last exact child tree has been joined.
+  pub(crate) fn ready_after_join(
+    context: RuntimeGuardGenerationContext,
+    guard: RuntimeGuardIdentity,
+    child: RuntimeGuardChildIdentity,
+  ) -> Self {
+    Self {
+      schema_version: RECORD_SCHEMA_VERSION,
+      protocol_revision: GUARD_PROTOCOL_REVISION,
+      context,
+      guard: Some(guard),
+      child: Some(child),
+      state: RuntimeGuardRecordState::Ready,
+      tree_empty: Some(true),
       terminal: None,
     }
   }
@@ -223,16 +242,18 @@ impl RuntimeGuardRecord {
     }
   }
 
-  /// Returns the immutable identities that stale daemon metadata must retain.
+  /// Returns the generation and last-child identities that stale metadata must retain.
   pub(crate) fn replacement_binding(&self) -> Result<RuntimeGuardReplacementBinding> {
     let guard = self
       .guard
       .clone()
-      .ok_or_else(|| anyhow::anyhow!("runtime containment record has no guard identity"))?;
+      .context("runtime containment record has no guard identity")?;
     Ok(RuntimeGuardReplacementBinding {
-      context: self.context.clone(),
-      guard,
-      child: self.child.clone(),
+      generation: RuntimeGuardGenerationBinding {
+        context: self.context.clone(),
+        guard,
+      },
+      last_child: self.child.clone(),
     })
   }
 
@@ -273,8 +294,12 @@ impl RuntimeGuardRecord {
       }
       RuntimeGuardRecordState::Ready => {
         ensure!(
-          self.guard.is_some() && self.tree_empty.is_none() && self.terminal.is_none(),
+          self.guard.is_some() && self.tree_empty.is_some() && self.terminal.is_none(),
           "ready runtime containment record has invalid terminal evidence"
+        );
+        ensure!(
+          self.child.is_some() || self.tree_empty == Some(true),
+          "ready runtime containment record without a child must prove an empty tree"
         );
       }
       RuntimeGuardRecordState::Terminal => {
@@ -300,13 +325,20 @@ impl RuntimeGuardRecord {
   }
 }
 
-/// Exact stale-generation identities required for replacement proof.
+/// Immutable identity of the guard generation recorded in daemon metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeGuardGenerationBinding {
+  pub(crate) context: RuntimeGuardGenerationContext,
+  pub(crate) guard: RuntimeGuardIdentity,
+}
+
+/// Exact immutable generation and mutable last-child evidence required for replacement proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RuntimeGuardReplacementBinding {
-  pub(crate) context: RuntimeGuardGenerationContext,
-  pub(crate) guard: RuntimeGuardIdentity,
-  pub(crate) child: Option<RuntimeGuardChildIdentity>,
+  pub(crate) generation: RuntimeGuardGenerationBinding,
+  pub(crate) last_child: Option<RuntimeGuardChildIdentity>,
 }
 
 /// Result of validating prior containment while holding the generation lock.
@@ -669,18 +701,18 @@ mod tests {
   }
 
   #[test]
-  fn runtime_guard_record_rejects_tree_empty_before_terminal() {
+  fn runtime_guard_record_rejects_nonempty_tree_without_a_child_identity() {
     let (_temp, paths) = fixture_paths();
     let mut record = RuntimeGuardRecord::ready(context(&paths), guard_identity(), None);
-    record.tree_empty = Some(true);
+    record.tree_empty = Some(false);
 
     let error = record.validate_for(&paths).unwrap_err();
 
-    assert!(error.to_string().contains("invalid terminal evidence"));
+    assert!(error.to_string().contains("must prove an empty tree"));
   }
 
   #[test]
-  fn runtime_guard_record_serializes_tree_empty_only_for_terminal_state() {
+  fn runtime_guard_record_serializes_explicit_tree_state() {
     let (_temp, paths) = fixture_paths();
     let ready = RuntimeGuardRecord::ready(context(&paths), guard_identity(), None);
     let terminal = terminal_record(&paths);
@@ -688,7 +720,7 @@ mod tests {
     let ready_json = serde_json::to_value(ready).unwrap();
     let terminal_json = serde_json::to_value(terminal).unwrap();
 
-    assert!(ready_json.get("treeEmpty").is_none());
+    assert_eq!(ready_json.get("treeEmpty"), Some(&serde_json::json!(true)));
     assert_eq!(
       terminal_json.get("treeEmpty"),
       Some(&serde_json::json!(true))
@@ -744,7 +776,7 @@ mod tests {
   }
 
   #[test]
-  fn runtime_guard_replacement_requires_exact_terminal_empty_tree_binding() {
+  fn runtime_guard_replacement_requires_exact_terminal_empty_tree_generation() {
     let (_temp, paths) = fixture_paths();
     let lock = RuntimeGuardGenerationLock::try_acquire(&paths)
       .unwrap()
@@ -762,6 +794,27 @@ mod tests {
   }
 
   #[test]
+  fn runtime_guard_replacement_rejects_terminal_child_missing_from_stale_metadata() {
+    let (_temp, paths) = fixture_paths();
+    let lock = RuntimeGuardGenerationLock::try_acquire(&paths)
+      .unwrap()
+      .unwrap();
+    let terminal = terminal_record(&paths);
+    let expected = RuntimeGuardRecord::ready(
+      terminal.context.clone(),
+      terminal.guard.clone().unwrap(),
+      None,
+    )
+    .replacement_binding()
+    .unwrap();
+    lock.publish(&terminal).unwrap();
+
+    let error = lock.prove_replacement(Some(&expected)).unwrap_err();
+
+    assert!(error.to_string().contains("does not match"));
+  }
+
+  #[test]
   fn runtime_guard_replacement_fails_closed_for_mismatch_and_nonterminal_state() {
     let (_temp, paths) = fixture_paths();
     let lock = RuntimeGuardGenerationLock::try_acquire(&paths)
@@ -769,7 +822,7 @@ mod tests {
       .unwrap();
     let terminal = terminal_record(&paths);
     let mut mismatched = terminal.replacement_binding().unwrap();
-    mismatched.child.as_mut().unwrap().pinned_caddy.image.sha256 = "bb".repeat(32);
+    mismatched.generation.context.nonce_commitment = "bb".repeat(32);
     lock.publish(&terminal).unwrap();
 
     let mismatch_error = lock.prove_replacement(Some(&mismatched)).unwrap_err();

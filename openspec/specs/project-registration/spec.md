@@ -76,7 +76,7 @@ The compatibility shim SHALL manage only `caddy run`. It SHALL delegate the read
 
 #### Scenario: Read-only command
 - **WHEN** a project invokes a supported read-only Caddy command through the shim
-- **THEN** the shim resolves the trusted real Caddy independently of project inputs and delegates the command
+- **THEN** the shim resolves the configured and pinned real Caddy independently of project inputs and delegates the command
 - **AND** stdout contains only the real command output while stderr identifies the delegation
 
 #### Scenario: Caddy lifecycle mutation

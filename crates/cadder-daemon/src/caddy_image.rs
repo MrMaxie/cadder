@@ -1,6 +1,9 @@
 //! Immutable evidence for the real-Caddy executable selected by the daemon.
 
-use crate::process_tree::ProcessTreeChild;
+use crate::{
+  process_tree::ProcessTreeChild,
+  runtime_guard_record::{RuntimeGuardImageIdentity, RuntimeGuardPinnedCaddyIdentity},
+};
 use anyhow::{Context, Result, ensure};
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -66,7 +69,29 @@ enum CaddyFileIdentity {
   #[cfg(unix)]
   Unix { device: u64, inode: u64 },
   #[cfg(windows)]
-  Windows { volume_serial: u32, file_index: u64 },
+  Windows {
+    volume_serial: u64,
+    file_id: [u8; 16],
+  },
+}
+
+impl CaddyFileIdentity {
+  fn stable_id(&self) -> String {
+    match self {
+      #[cfg(unix)]
+      Self::Unix { device, inode } => {
+        format!("unix-device-{device:016x}-inode-{inode:016x}")
+      }
+      #[cfg(windows)]
+      Self::Windows {
+        volume_serial,
+        file_id,
+      } => format!(
+        "windows-volume-{volume_serial:016x}-file-{}",
+        hex::encode(file_id)
+      ),
+    }
+  }
 }
 
 #[derive(Debug)]
@@ -99,15 +124,46 @@ impl OpenedCaddyImage {
     &self.canonical_path
   }
 
+  pub(crate) fn verify_runtime_guard_claim(
+    claim: &RuntimeGuardPinnedCaddyIdentity,
+  ) -> Result<Self> {
+    let opened = Self::open(&claim.image.path).context("open runtime-guard Caddy image")?;
+    ensure!(
+      opened.canonical_path == claim.image.path,
+      "runtime-guard Caddy path is not the claimed canonical path"
+    );
+    ensure!(
+      opened.identity.stable_id() == claim.image.file_identity,
+      "runtime-guard Caddy file identity does not match the pinned claim"
+    );
+    ensure!(
+      hex::encode(opened.digest) == claim.image.sha256,
+      "runtime-guard Caddy digest does not match the pinned claim"
+    );
+    let version = Version::parse(&claim.version)
+      .context("runtime-guard Caddy claim contains an invalid semantic version")?;
+    let minimum = Version::parse(MINIMUM_CADDY_VERSION).expect("minimum Caddy version is valid");
+    ensure!(
+      version >= minimum && version.major < 3,
+      "runtime-guard Caddy claim contains unsupported version {version}"
+    );
+    ensure!(
+      claim.probe_revision == CADDY_COMPATIBILITY_PROBE_REVISION,
+      "runtime-guard Caddy claim contains an unsupported compatibility probe revision"
+    );
+    Ok(opened)
+  }
+
   pub(crate) async fn spawn<F>(&self, operation: &str, configure: F) -> Result<ProcessTreeChild>
   where
     F: FnOnce(&mut Command),
   {
-    spawn_reverified(self.path(), operation, configure, || self.reverify_path()).await
+    self.reverify_image()?;
+    spawn_reverified(self.path(), operation, configure, || self.reverify_image()).await
   }
 
-  /// Confirms that the canonical pathname still resolves to the held executable identity.
-  pub(crate) fn reverify_path(&self) -> Result<()> {
+  /// Confirms that the canonical pathname still resolves to the held executable image.
+  pub(crate) fn reverify_image(&self) -> Result<()> {
     let current_path = self.canonical_path.canonicalize().with_context(|| {
       format!(
         "reverify pinned Caddy path {}",
@@ -125,6 +181,11 @@ impl OpenedCaddyImage {
     ensure!(
       file_identity(&current)? == self.identity,
       "pinned Caddy file identity changed at {}",
+      self.canonical_path.display()
+    );
+    ensure!(
+      file_digest(&current)? == self.digest,
+      "pinned Caddy digest changed at {}",
       self.canonical_path.display()
     );
     Ok(())
@@ -162,8 +223,9 @@ impl VerifiedCaddyImage {
   where
     F: FnOnce(&mut Command),
   {
+    self.opened.reverify_image()?;
     spawn_reverified(self.path(), operation, configure, || {
-      self.opened.reverify_path()
+      self.opened.reverify_image()
     })
     .await
   }
@@ -244,6 +306,18 @@ impl PinnedCaddyImage {
 
   pub(crate) fn version(&self) -> &Version {
     &self.version
+  }
+
+  pub(crate) fn runtime_guard_identity(&self) -> RuntimeGuardPinnedCaddyIdentity {
+    RuntimeGuardPinnedCaddyIdentity {
+      image: RuntimeGuardImageIdentity {
+        path: self.canonical_path.clone(),
+        file_identity: self.identity.stable_id(),
+        sha256: hex::encode(self.digest),
+      },
+      version: self.version.to_string(),
+      probe_revision: self.probe_revision.to_string(),
+    }
   }
 
   fn validate_compatibility_metadata(&self) -> Result<()> {
@@ -382,18 +456,25 @@ fn file_identity(file: &File) -> Result<CaddyFileIdentity> {
 fn file_identity(file: &File) -> Result<CaddyFileIdentity> {
   use std::os::windows::io::AsRawHandle;
   use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
   };
 
-  let mut information = BY_HANDLE_FILE_INFORMATION::default();
+  let mut information = FILE_ID_INFO::default();
   // SAFETY: `file` owns a live handle and `information` is a correctly sized output buffer.
-  if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+  if unsafe {
+    GetFileInformationByHandleEx(
+      file.as_raw_handle(),
+      FileIdInfo,
+      std::ptr::from_mut(&mut information).cast(),
+      std::mem::size_of::<FILE_ID_INFO>() as u32,
+    )
+  } == 0
+  {
     return Err(std::io::Error::last_os_error()).context("inspect pinned Caddy file identity");
   }
   Ok(CaddyFileIdentity::Windows {
-    volume_serial: information.dwVolumeSerialNumber,
-    file_index: (u64::from(information.nFileIndexHigh) << 32)
-      | u64::from(information.nFileIndexLow),
+    volume_serial: information.VolumeSerialNumber,
+    file_id: information.FileId.Identifier,
   })
 }
 
@@ -499,6 +580,25 @@ mod tests {
       let error = _pinned.verify().unwrap_err();
       assert!(error.to_string().contains("digest changed"));
     }
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn opened_caddy_image_rejects_digest_mutation_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let image = temp.path().join("caddy");
+    let alias = temp.path().join("caddy-alias");
+    write_image(&image, b"first image");
+    fs::hard_link(&image, &alias).unwrap();
+    let opened = OpenedCaddyImage::open(&image).unwrap();
+    fs::write(alias, b"second image").unwrap();
+
+    let error = opened
+      .spawn("mutated Caddy fixture", |_| {})
+      .await
+      .unwrap_err();
+
+    assert!(error.to_string().contains("digest changed"));
   }
 
   #[cfg(windows)]

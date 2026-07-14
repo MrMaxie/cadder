@@ -31,7 +31,7 @@ struct Args {
 
   #[arg(
     long = "real-caddy",
-    help = "Absolute trusted path used when Cadder starts the real Caddy executable"
+    help = "Absolute path used when Cadder starts the real Caddy executable"
   )]
   real_caddy_override: Option<PathBuf>,
 
@@ -167,7 +167,7 @@ mod tests {
       "long help output should describe --runtime-dir: {help}"
     );
     assert!(
-      help.contains("Absolute trusted path used when Cadder starts the real Caddy executable"),
+      help.contains("Absolute path used when Cadder starts the real Caddy executable"),
       "long help output should describe --real-caddy: {help}"
     );
     assert!(

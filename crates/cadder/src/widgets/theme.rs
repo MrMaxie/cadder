@@ -21,7 +21,6 @@ struct Colors {
   text_soft: Color,
   mint: Color,
   mint_soft: Color,
-  cyan_mint: Color,
   dim: Color,
 }
 
@@ -45,7 +44,6 @@ impl Theme {
       text_soft: Color::Rgb(187, 231, 224),
       mint: Color::Rgb(58, 232, 203),
       mint_soft: Color::Rgb(125, 244, 221),
-      cyan_mint: Color::Rgb(67, 213, 226),
       dim: Color::Rgb(45, 85, 80),
     };
 
@@ -164,12 +162,6 @@ impl Theme {
 
   pub fn disabled_marker(self) -> Style {
     Style::new().fg(self.colors.text_muted)
-  }
-
-  pub fn iis_project(self) -> Style {
-    Style::new()
-      .fg(self.colors.cyan_mint)
-      .add_modifier(Modifier::BOLD)
   }
 
   pub fn overlay(self) -> Style {

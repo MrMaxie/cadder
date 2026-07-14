@@ -22,7 +22,7 @@ For Windows paths, a literal TOML string keeps backslashes readable:
 real_caddy = 'C:\Program Files\Caddy\caddy.exe'
 ```
 
-`real_caddy` is always an absolute path to a native executable. Cadder rejects relative paths, command names, Windows batch scripts, symbolic-link substitutions, and files or parent directories that a less-trusted account can modify.
+`real_caddy` is always an absolute path to a native executable. Cadder rejects relative paths, command names, Windows batch scripts, final symbolic-link substitutions, and its own shim. It does not require custom ACL hardening for a normal Caddy installation.
 
 ## Configuration scope
 
@@ -33,9 +33,9 @@ Cadder uses this order:
 3. `defaults` in the per-user configuration.
 4. The selected profile in the administrator-owned system configuration.
 5. `defaults` in the system configuration.
-6. A trusted native `caddy` executable on `PATH`.
+6. A native `caddy` executable on `PATH` that is not Cadder's shim.
 
-Project directories, project `cadder.toml` files, environment variables, files next to Cadder binaries, and shim flags never select an executable. A malformed or unsafe higher-priority configuration fails closed instead of silently falling through to another source.
+Project directories, project `cadder.toml` files, environment variables, files next to Cadder binaries, and shim flags never select an executable. A malformed higher-priority configuration fails instead of silently falling through to another source.
 
 The system configuration is optional. Administrators place it in `%ProgramData%\Cadder\cadder.toml` on Windows, `/etc/cadder/cadder.toml` on Linux, or `/Library/Application Support/Cadder/cadder.toml` on macOS.
 

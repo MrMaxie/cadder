@@ -12,7 +12,7 @@ The product contract is limited to the daemon, shim, operator CLI, and TUI. Futu
 
 - `cadderd` owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, durable history, native autostart state, IIS handoff metadata, and bounded log storage.
 - `caddy` intentionally shadows Caddy for managed `caddy run` commands. It attaches to an already running daemon, registers the caller's config, heartbeats while alive, and unregisters on exit. Non-`run` commands are delegated to the safely resolved real Caddy binary.
-- `cadder` is the only operator-facing v1 binary. Its CLI and TUI support daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, settings, and watch flows. Both surfaces attach through the daemon protocol and render from mockable operator view models.
+- `cadder` is the only operator-facing v1 binary. Its CLI supports daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, settings, and watch flows. The current TUI slice covers runtime status, entrypoints, domains, retained logs, and explicit daemon recovery. Both surfaces attach through the daemon protocol and render from mockable operator view models.
 - Real Caddy is an external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
 
 All release-facing Cadder binaries expose `--help` and `--version`. Runtime installers and portable archives contain only `cadderd`, `cadder`, `caddy`, and `cadder.toml`.
@@ -38,7 +38,7 @@ Development workflows can select `CADDER_CADDY_BACKEND=mock` or `--caddy-backend
 
 The CLI is the stable automation surface for people, scripts, and agents. It supports `human`, `json`, and `jsonl` output modes where appropriate.
 
-The TUI is the interactive operator surface. It must render from mockable view models and cover the same daemon status, Caddy status, project/domain state, log access, IIS handoff, autostart, settings, and recovery actions as the CLI. The TUI must remain useful when `cadderd` is offline by showing daemon-unavailable status and a visible start action.
+The TUI is the interactive operator surface. Its current slice renders daemon and Caddy status, entrypoints, domains, retained logs, and recovery actions from the shared operator view models. It remains useful when `cadderd` is offline by showing daemon-unavailable status and a visible start action. Later OpenSpec changes can add dedicated IIS handoff, autostart, settings, diagnostics, and history views without embedding local state in the TUI.
 
 Web and Tauri GUI are future surfaces. They may return only as clients of the same daemon protocol and shared view-model contracts. Remote pairing, authentication, multi-host management, and update channels are out of scope for the reset.
 
@@ -83,7 +83,7 @@ real_caddy = "/absolute/path/to/caddy"
 real_caddy = "/absolute/path/to/development/caddy"
 ```
 
-Project files, registration working directories, executable-adjacent files, environment selectors, and shim flags never select real Caddy. Cadder validates owner and mutation permissions for the file and its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
+Project files, registration working directories, executable-adjacent files, environment selectors, and shim flags never select real Caddy. Cadder requires an absolute regular native executable but does not impose custom ownership or ACL rules on the Caddy installation or its parent directories. PATH fallback excludes the shim by operating-system file identity, including symlink and hardlink aliases.
 
 At daemon startup, Cadder opens the selected executable and pins its canonical path, source, operating-system file identity, SHA-256 digest, semantic version, required module inventory, and compatibility-probe revision. Cadder accepts Caddy versions from 2.11.3 up to, but not including, 3.0.0. Metadata commands use bounded output, a 30-second deadline, and no stdin. Every subsequent `adapt`, `run`, `reload`, and `stop` process passes through the same verified spawn gate. On Windows, the daemon retains a read-only handle without write or delete sharing for its lifetime. Each child starts suspended, joins Cadder's private kill-on-close Job Object, and resumes only after successful assignment. An identity or digest mismatch fails closed and the newly created process tree is terminated and joined before the operation returns.
 

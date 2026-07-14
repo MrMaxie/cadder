@@ -1089,8 +1089,8 @@ async fn exited_runtime_child_is_not_reported_running() {
   assert_eq!(snapshot.runtime.status, RuntimeStatus::Unhealthy);
   assert_eq!(snapshot.runtime.diagnostics[0].code, "runtime-exited");
   let follow_up = query_state(&harness.client).await;
-  assert_eq!(follow_up.runtime.status, RuntimeStatus::Idle);
-  assert!(follow_up.runtime.process_id.is_none());
+  assert_eq!(follow_up.runtime.status, RuntimeStatus::Unhealthy);
+  assert_eq!(follow_up.runtime.diagnostics[0].code, "runtime-exited");
   harness.shutdown().await;
 }
 
@@ -1209,6 +1209,7 @@ async fn runtime_restart_after_child_exit_publishes_recovered_snapshot() {
   );
   wait_for_command_log(&harness.command_log_path, "run").await;
   wait_for_command_log(&harness.command_log_path, "run-exited").await;
+  wait_for_runtime_status(&harness.client, RuntimeStatus::Unhealthy).await;
   let _registered = tokio::time::timeout(Duration::from_secs(1), subscription.next_event())
     .await
     .unwrap()

@@ -4,12 +4,12 @@
 Define how Cadder selects, validates, runs, configures, and recovers the real Caddy process without widening project trust.
 
 ## Requirements
-### Requirement: CAD-001: Real Caddy comes only from trusted sources
-The daemon SHALL resolve one real-Caddy installation, in order, from an explicit daemon-start override, trusted per-user configuration, trusted system configuration, or a safe PATH search. It MUST use a canonical executable path without a shell, exclude the active shim by file identity, and pin the resolved path, version, modules, and file identity for the daemon lifetime. Project files, registration working directories, executable-adjacent files, and shim-process overrides MUST NOT participate in resolution.
+### Requirement: CAD-001: Real Caddy comes only from explicit runtime sources
+The daemon SHALL resolve one real-Caddy installation, in order, from an explicit daemon-start override, standard per-user configuration, standard system configuration, or a native PATH search. It MUST use a canonical absolute path to a regular native executable without a shell, exclude the active shim by file identity, and pin the resolved path, version, modules, file identity, and digest for the daemon lifetime. Project files, registration working directories, executable-adjacent files, and shim-process overrides MUST NOT participate in resolution. Cadder MUST NOT require special ownership or access-control-list hardening for the selected executable or its containing directories.
 
-#### Scenario: Explicit trusted override
+#### Scenario: Explicit runtime override
 - **WHEN** the runtime owner supplies an absolute real-Caddy path through the daemon-start interface
-- **THEN** the daemon validates the executable and its containing path against owner or administrator permissions before selecting it
+- **THEN** the daemon verifies that it resolves to a regular native executable distinct from the active shim before selecting it
 
 #### Scenario: Project attempts to select a command
 - **WHEN** a project-local file, working directory, or registration argument names another Caddy command
@@ -22,7 +22,7 @@ The daemon SHALL resolve one real-Caddy installation, in order, from an explicit
 
 #### Scenario: Resolved executable changes
 - **WHEN** the selected path's file identity changes before a later spawn or validation
-- **THEN** the daemon refuses to execute it and reports that the trusted Caddy installation changed
+- **THEN** the daemon refuses to execute it and reports that the pinned Caddy installation changed
 
 ### Requirement: CAD-002: Caddy compatibility is verified
 Cadder 1.0 SHALL consider a real Caddy build eligible only when its semantic version is at least 2.11.3 and lower than 3.0.0, it contains every required standard module, and it passes the deterministic compatibility probe shipped with that exact Cadder release. The probe MUST verify adaptation of embedded fixtures covering every allowed Caddyfile directive, the closed adapted JSON schema, private Admin API authentication, transactional `/load`, `/config/` inspection, and bounded `/stop` against a disposable loopback-only runtime before any project traffic is served. A 2.x version alone MUST NOT establish compatibility.

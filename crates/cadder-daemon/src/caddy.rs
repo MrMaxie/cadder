@@ -5,9 +5,7 @@ use crate::{
     CADDY_COMPATIBILITY_PROBE_REVISION, CaddyImageSource, OpenedCaddyImage, PinnedCaddyImage,
     VerifiedCaddyImage,
   },
-  caddy_path_trust::{
-    CaddyPathProvenance, same_file_identity, validate_trusted_config, validate_trusted_executable,
-  },
+  caddy_path_trust::{open_caddy_config, same_file_identity, validate_caddy_executable},
   config::{CONFIG_FILE_NAME, CadderConfig},
   logs::CaddyLogStore,
   paths::{RuntimePaths, RuntimeProfile},
@@ -218,7 +216,7 @@ impl RealCaddyResolver {
   async fn capture_pinned_image(&self) -> Result<PinnedCaddyImage> {
     let resolved = self.resolve_evidence()?;
     let opened = OpenedCaddyImage::open(&resolved.path)?;
-    opened.reverify_path()?;
+    opened.reverify_image()?;
 
     #[cfg(any(test, debug_assertions))]
     if self.trust_policy == CaddyTrustPolicy::TestFixture {
@@ -250,37 +248,28 @@ impl RealCaddyResolver {
       return self.resolve_selected(
         path,
         CaddyImageSource::ExplicitDaemonOverride,
-        CaddyPathProvenance::UserOwned,
         &shim_candidates,
       );
     }
 
     if let Some(path) = &self.config_paths.user
-      && let Some(selected) = self.selection_from_config(
-        path,
-        CaddyImageSource::UserConfiguration,
-        CaddyPathProvenance::UserOwned,
-      )?
+      && let Some(selected) =
+        self.selection_from_config(path, CaddyImageSource::UserConfiguration)?
     {
       return self.resolve_selected(
         &selected,
         CaddyImageSource::UserConfiguration,
-        CaddyPathProvenance::UserOwned,
         &shim_candidates,
       );
     }
 
     if let Some(path) = &self.config_paths.system
-      && let Some(selected) = self.selection_from_config(
-        path,
-        CaddyImageSource::SystemConfiguration,
-        CaddyPathProvenance::SystemOwned,
-      )?
+      && let Some(selected) =
+        self.selection_from_config(path, CaddyImageSource::SystemConfiguration)?
     {
       return self.resolve_selected(
         &selected,
         CaddyImageSource::SystemConfiguration,
-        CaddyPathProvenance::SystemOwned,
         &shim_candidates,
       );
     }
@@ -291,21 +280,21 @@ impl RealCaddyResolver {
         source: CaddyImageSource::Path,
       })
       .context(
-        "could not resolve a trusted real Caddy executable. Pass an absolute daemon override, \
+        "could not resolve a usable real Caddy executable. Pass an absolute daemon override, \
          configure an absolute path in the per-user or system Cadder configuration, or install \
-         a trusted caddy executable on PATH",
+         a native caddy executable on PATH",
       )
   }
 
   pub fn resolution_help(error: &anyhow::Error) -> String {
     format!(
-      "Cadder could not resolve a trusted real Caddy executable.\n\n\
+      "Cadder could not resolve a usable real Caddy executable.\n\n\
        Cause: {error}\n\n\
-       Configure real Caddy with one of these trusted sources, in precedence order:\n\
+       Configure real Caddy with one of these explicit sources, in precedence order:\n\
        - an absolute --real-caddy daemon-start override\n\
        - defaults.real_caddy or profiles.<profile>.real_caddy in the per-user Cadder configuration\n\
-       - the same key in the administrator-owned system Cadder configuration\n\
-       - a trusted real caddy executable on PATH\n\n\
+       - the same key in the system Cadder configuration\n\
+       - a native real caddy executable on PATH\n\n\
        Project files, registration working directories, environment selectors, and shim flags never select the executable."
     )
   }
@@ -314,7 +303,6 @@ impl RealCaddyResolver {
     &self,
     path: &Path,
     source: CaddyImageSource,
-    provenance: CaddyPathProvenance,
   ) -> Result<Option<PathBuf>> {
     let source_description = source.description();
     match std::fs::symlink_metadata(path) {
@@ -327,7 +315,7 @@ impl RealCaddyResolver {
     }
     let config = match self.trust_policy {
       CaddyTrustPolicy::Enforce => {
-        let trusted = validate_trusted_config(path, provenance)
+        let trusted = open_caddy_config(path)
           .with_context(|| format!("validate {source_description} at {}", path.display()))?;
         let canonical_path = trusted.canonical_path().to_path_buf();
         CadderConfig::from_reader(trusted.into_file(), &canonical_path)?
@@ -359,7 +347,6 @@ impl RealCaddyResolver {
     &self,
     path: &Path,
     source: CaddyImageSource,
-    provenance: CaddyPathProvenance,
     shim_candidates: &[PathBuf],
   ) -> Result<ResolvedCaddyPath> {
     let source_description = source.description();
@@ -370,14 +357,12 @@ impl RealCaddyResolver {
       ));
     }
     let canonical = match self.trust_policy {
-      CaddyTrustPolicy::Enforce => {
-        validate_trusted_executable(path, provenance).with_context(|| {
-          format!(
-            "validate real Caddy from {source_description}: {}",
-            path.display()
-          )
-        })?
-      }
+      CaddyTrustPolicy::Enforce => validate_caddy_executable(path).with_context(|| {
+        format!(
+          "validate real Caddy from {source_description}: {}",
+          path.display()
+        )
+      })?,
       #[cfg(any(test, debug_assertions))]
       CaddyTrustPolicy::TestFixture => path
         .canonicalize()
@@ -496,9 +481,7 @@ fn resolve_caddy_on_path(
       }
       let canonical = match trust_policy {
         CaddyTrustPolicy::Enforce => {
-          let Ok(canonical) =
-            validate_trusted_executable(&candidate, CaddyPathProvenance::UserOwned)
-          else {
+          let Ok(canonical) = validate_caddy_executable(&candidate) else {
             continue;
           };
           canonical
@@ -1079,6 +1062,13 @@ fn iis_proxy_route(
 ) -> Value {
   let mut handler = json!({
       "handler": "reverse_proxy",
+      "headers": {
+          "request": {
+              "set": {
+                  "Host": [domain_key]
+              }
+          }
+      },
       "upstreams": [{ "dial": backend_dial }]
   });
   if backend_protocol == IisProxyBackendProtocol::Https {
@@ -1096,6 +1086,25 @@ fn iis_proxy_route(
       "handle": [handler],
       "terminal": true
   })
+}
+
+fn namespace_config_ids(value: &mut Value, namespace: &str) {
+  match value {
+    Value::Array(values) => {
+      for value in values {
+        namespace_config_ids(value, namespace);
+      }
+    }
+    Value::Object(object) => {
+      if let Some(Value::String(id)) = object.get_mut("@id") {
+        id.insert_str(0, namespace);
+      }
+      for value in object.values_mut() {
+        namespace_config_ids(value, namespace);
+      }
+    }
+    _ => {}
+  }
 }
 
 fn compose_config(
@@ -1131,7 +1140,10 @@ fn compose_config(
   tls_subjects.extend(iis_routes.keys().cloned());
   routes.extend(iis_routes.values().map(|route| route.route.clone()));
   let tls_subjects = tls_subjects.into_iter().collect::<Vec<_>>();
-  let http_routes = routes.clone();
+  let mut http_routes = routes.clone();
+  for route in &mut http_routes {
+    namespace_config_ids(route, "http_");
+  }
 
   json!({
       "admin": { "listen": "localhost:2019" },
@@ -2235,7 +2247,7 @@ app.localhost, http://api.localhost:8080 {
   }
 
   #[test]
-  fn trusted_caddy_source_resolution_help_names_only_trusted_sources() {
+  fn trusted_caddy_source_resolution_help_names_only_explicit_sources() {
     let resolver = RealCaddyResolver::with_test_sources(
       Some(PathBuf::from("relative-caddy")),
       RuntimeProfile::Default,
@@ -3023,7 +3035,12 @@ app.localhost, http://api.localhost:8080 {
       .and_then(Value::as_array)
       .unwrap();
 
-    assert_eq!(http_route, https_route);
+    let http_id = http_route.get("@id").and_then(Value::as_str).unwrap();
+    let https_id = https_route.get("@id").and_then(Value::as_str).unwrap();
+    assert_eq!(http_id, format!("http_{https_id}"));
+    assert_ne!(http_id, https_id);
+    assert_eq!(http_route.get("match"), https_route.get("match"));
+    assert_eq!(http_route.get("handle"), https_route.get("handle"));
     assert_eq!(
       https_route
         .pointer("/handle/0/transport/tls/server_name")
@@ -3049,6 +3066,12 @@ app.localhost, http://api.localhost:8080 {
       Some("127.0.0.1:41043")
     );
     assert!(route.pointer("/handle/0/transport").is_none());
+    assert_eq!(
+      route
+        .pointer("/handle/0/headers/request/set/Host/0")
+        .and_then(Value::as_str),
+      Some("app.localhost")
+    );
   }
 
   #[test]

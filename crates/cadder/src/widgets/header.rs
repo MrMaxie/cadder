@@ -5,7 +5,7 @@ use ratatui::widgets::Widget;
 use crate::app::RuntimeStatus;
 use crate::widgets::theme::THEME;
 
-const STATUS_WIDTH: u16 = 16;
+const STATUS_WIDTH: u16 = 42;
 
 pub struct HeaderBar {
   version: &'static str,
@@ -50,26 +50,35 @@ impl Widget for HeaderBar {
         status_x,
         area.y,
         "cadderd",
-        self.runtime_status.cadderd_running(),
+        self.runtime_status.connection_label(),
+        self.runtime_status.is_connected(),
       );
-      buf.set_string(status_x + 7, area.y, " • ", THEME.service_separator());
+      buf.set_string(status_x + 20, area.y, " • ", THEME.service_separator());
       render_service_status(
         buf,
-        status_x + 10,
+        status_x + 23,
         area.y,
         "caddy",
-        self.runtime_status.caddy_running(),
+        self.runtime_status.caddy_label(),
+        self.runtime_status.caddy_label() == "running",
       );
     }
   }
 }
 
-fn render_service_status(buf: &mut Buffer, x: u16, y: u16, label: &str, running: bool) {
-  let style = if running {
+fn render_service_status(
+  buf: &mut Buffer,
+  x: u16,
+  y: u16,
+  label: &str,
+  status: &str,
+  online: bool,
+) {
+  let style = if online {
     THEME.service_online()
   } else {
     THEME.service_offline()
   };
 
-  buf.set_string(x, y, label, style);
+  buf.set_string(x, y, format!("{label}: {status}"), style);
 }

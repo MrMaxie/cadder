@@ -8,10 +8,13 @@ use std::{
   fs::{self, File, OpenOptions},
   io::Write,
   path::{Path, PathBuf},
+  sync::{Arc, Mutex},
 };
 
 use crate::paths::RuntimePaths;
-use crate::runtime_guard_record::{RuntimeGuardReplacementBinding, RuntimeGuardReplacementProof};
+use crate::runtime_guard_record::{
+  RuntimeGuardChildIdentity, RuntimeGuardReplacementBinding, RuntimeGuardReplacementProof,
+};
 
 const LOCK_METADATA_VERSION: u16 = 3;
 
@@ -22,6 +25,17 @@ pub struct DaemonLock {
   metadata_generation: Option<String>,
   retain_metadata: bool,
   recovery: Option<DaemonLockRecovery>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeContainmentMetadata {
+  inner: Arc<Mutex<RuntimeContainmentMetadataInner>>,
+}
+
+#[derive(Debug)]
+struct RuntimeContainmentMetadataInner {
+  lock: DaemonLock,
+  binding: RuntimeGuardReplacementBinding,
 }
 
 #[derive(Debug)]
@@ -109,9 +123,9 @@ impl DaemonLock {
         "daemon lock generation changed before containment binding could be published"
       ));
     }
-    if binding.context.owner_generation != generation
-      || binding.context.profile != metadata.runtime_profile
-      || binding.context.runtime_id != metadata.instance_key
+    if binding.generation.context.owner_generation != generation
+      || binding.generation.context.profile != metadata.runtime_profile
+      || binding.generation.context.runtime_id != metadata.instance_key
     {
       return Err(anyhow!(
         "runtime guard binding does not identify the active daemon lock generation"
@@ -146,6 +160,30 @@ impl DaemonLock {
         active_owner_with_unreadable_metadata(paths, &lock_path, &metadata_path, &error.to_string())
       }
     }
+  }
+}
+
+impl RuntimeContainmentMetadata {
+  pub(crate) fn new(mut lock: DaemonLock, binding: RuntimeGuardReplacementBinding) -> Result<Self> {
+    lock.attach_containment(binding.clone())?;
+    Ok(Self {
+      inner: Arc::new(Mutex::new(RuntimeContainmentMetadataInner {
+        lock,
+        binding,
+      })),
+    })
+  }
+
+  pub(crate) fn update_last_child(&self, child: RuntimeGuardChildIdentity) -> Result<()> {
+    let mut inner = self
+      .inner
+      .lock()
+      .map_err(|_| anyhow!("runtime containment metadata lock is poisoned"))?;
+    let mut binding = inner.binding.clone();
+    binding.last_child = Some(child);
+    inner.lock.attach_containment(binding.clone())?;
+    inner.binding = binding;
+    Ok(())
   }
 }
 

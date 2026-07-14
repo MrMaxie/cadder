@@ -1,6 +1,6 @@
 //! Operating-system identities used by runtime-guard containment records.
 
-use crate::caddy_path_trust::{CaddyPathProvenance, validate_trusted_executable};
+use crate::caddy_path_trust::validate_runtime_guard_executable;
 use crate::runtime_guard_record::{
   RuntimeGuardIdentity, RuntimeGuardImageIdentity, RuntimeGuardProcessIdentity,
 };
@@ -12,9 +12,6 @@ use std::{
   io::{Read, Seek, SeekFrom},
   path::{Path, PathBuf},
 };
-
-#[cfg(debug_assertions)]
-const UNTRUSTED_TEST_FIXTURE_ENV: &str = "CADDER_TEST_ALLOW_UNTRUSTED_RUNTIME_GUARD";
 
 pub(crate) struct PinnedRuntimeGuardImage {
   path: PathBuf,
@@ -92,18 +89,7 @@ pub(crate) fn child_process_identity(process_id: u32) -> Result<RuntimeGuardProc
 }
 
 fn validate_guard_executable(path: &Path, operation: &str) -> Result<PathBuf> {
-  #[cfg(debug_assertions)]
-  if env::var_os(UNTRUSTED_TEST_FIXTURE_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
-    ensure!(
-      path.is_absolute(),
-      "runtime-guard test fixture path must be absolute"
-    );
-    return path
-      .canonicalize()
-      .with_context(|| format!("canonicalize runtime-guard test fixture {}", path.display()));
-  }
-
-  validate_trusted_executable(path, CaddyPathProvenance::UserOwned).context(operation.to_string())
+  validate_runtime_guard_executable(path).context(operation.to_string())
 }
 
 fn file_digest(file: &File) -> Result<String> {
@@ -262,24 +248,10 @@ fn validate_image_file(file: &File, path: &Path) -> Result<()> {
     "runtime-guard image is not executable"
   );
   ensure!(
-    metadata.uid() == 0 || metadata.uid() == current_effective_user_id(),
-    "runtime-guard image is not owned by root or the runtime owner"
-  );
-  ensure!(
-    metadata.permissions().mode() & 0o022 == 0,
-    "runtime-guard image is writable by a less-trusted Unix principal"
-  );
-  ensure!(
     metadata.nlink() > 0,
     "runtime-guard image has no filesystem links"
   );
   Ok(())
-}
-
-#[cfg(unix)]
-fn current_effective_user_id() -> u32 {
-  // SAFETY: `geteuid` reads process credentials and has no preconditions.
-  unsafe { libc::geteuid() }
 }
 
 #[cfg(windows)]

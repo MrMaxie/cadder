@@ -61,8 +61,8 @@ pub use runtime_guard::{RuntimeGuardHiddenOptions, run_runtime_guard};
 pub use runtime_guard_protocol::{
   RUNTIME_GUARD_PROTOCOL_REVISION, RuntimeGuardBootstrapAuthenticatedResponse,
   RuntimeGuardBootstrapRequest, RuntimeGuardCommandRequest, RuntimeGuardFinalizedResponse,
-  RuntimeGuardProtocol, RuntimeGuardProtocolError, RuntimeGuardReadyResponse, RuntimeGuardRequest,
-  RuntimeGuardResponse, RuntimeGuardStartRequest, RuntimeGuardStartedResponse,
+  RuntimeGuardLogFrame, RuntimeGuardProtocol, RuntimeGuardProtocolError, RuntimeGuardReadyResponse,
+  RuntimeGuardRequest, RuntimeGuardResponse, RuntimeGuardStartRequest, RuntimeGuardStartedResponse,
   RuntimeGuardStatusResponse, RuntimeGuardTerminatedResponse,
 };
 pub use runtime_guard_record::{
@@ -76,10 +76,12 @@ pub use storage::RuntimeStore;
 
 use anyhow::{Context, Result, bail};
 use cadder_protocol::{LogAttributionKind, LogSeverity, LogStreamIdentity};
-use runtime_guard_record::RuntimeGuardGenerationLock;
-use runtime_lock::DaemonLockCandidate;
-use std::path::PathBuf;
-use tokio::sync::watch;
+use runtime_guard_record::{
+  RuntimeGuardGenerationBinding, RuntimeGuardGenerationLock, RuntimeGuardReplacementBinding,
+};
+use runtime_lock::{DaemonLockCandidate, RuntimeContainmentMetadata};
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::{Mutex, watch};
 use tokio::time::{Duration, sleep};
 
 #[cfg(test)]
@@ -105,12 +107,43 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
   };
   let containment_lock = acquire_containment_lock(&paths).await?;
   let replacement_proof = containment_lock.prove_replacement(candidate.expected_containment())?;
-  let mut lock = candidate.publish_after_proof(&paths, replacement_proof)?;
-  let lock_recovery = lock.recovery().cloned();
+  let mut lock = Some(candidate.publish_after_proof(&paths, replacement_proof)?);
+  let lock_recovery = lock.as_ref().and_then(|lock| lock.recovery()).cloned();
+  let caddy_backend = options
+    .caddy_backend
+    .map_or_else(CaddyBackendMode::from_env, Ok)?;
+  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_override.is_some() {
+    bail!("--real-caddy cannot be combined with --caddy-backend mock");
+  }
+  let (real_caddy, pinned_caddy) = match caddy_backend {
+    CaddyBackendMode::Real => {
+      #[cfg(debug_assertions)]
+      let resolver = if std::env::var_os("CADDER_TEST_ALLOW_UNTRUSTED_CADDY").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+      {
+        RealCaddyResolver::for_test_fixture(
+          options
+            .real_caddy_override
+            .context("test Caddy trust bypass requires --real-caddy")?,
+        )
+      } else {
+        RealCaddyResolver::for_daemon(options.real_caddy_override, paths.runtime_profile())
+      };
+      #[cfg(not(debug_assertions))]
+      let resolver =
+        RealCaddyResolver::for_daemon(options.real_caddy_override, paths.runtime_profile());
+      let claim = resolver.pin().await?.runtime_guard_identity();
+      (Some(resolver), Some(claim))
+    }
+    CaddyBackendMode::Mock => (None, None),
+  };
   let endpoint =
     IpcEndpointMetadata::new(&paths).context("create the daemon generation identity")?;
+  let containment_metadata;
   let guard = if let Some(executable) = options.runtime_guard_executable.as_deref() {
     let owner_generation = lock
+      .as_ref()
+      .expect("daemon lock is available before guard handoff")
       .owner_generation()
       .context("daemon lock did not retain its owner generation")?;
     let generation = runtime_guard_record::RuntimeGuardGeneration::random()?;
@@ -126,33 +159,48 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
       &paths,
       context.clone(),
       &generation,
+      pinned_caddy,
     )
     .await?;
     containment_lock.publish(&runtime_guard_record::RuntimeGuardRecord::preparing(
-      context,
+      context.clone(),
     ))?;
     drop(containment_lock);
-    let binding = guard.wait_until_ready().await?;
-    lock.attach_containment(binding)?;
-    Some(guard)
+    let guard_identity = guard.wait_until_ready().await?;
+    containment_metadata = Some(RuntimeContainmentMetadata::new(
+      lock
+        .take()
+        .expect("daemon lock is available before guard handoff"),
+      RuntimeGuardReplacementBinding {
+        generation: RuntimeGuardGenerationBinding {
+          context,
+          guard: guard_identity,
+        },
+        last_child: None,
+      },
+    )?);
+    Some(Arc::new(Mutex::new(guard)))
   } else {
     drop(containment_lock);
+    containment_metadata = None;
     None
   };
 
-  let caddy_backend = options
-    .caddy_backend
-    .map_or_else(CaddyBackendMode::from_env, Ok)?;
-  if caddy_backend == CaddyBackendMode::Mock && options.real_caddy_override.is_some() {
-    bail!("--real-caddy cannot be combined with --caddy-backend mock");
-  }
   let coordinator = match caddy_backend {
     CaddyBackendMode::Real => {
-      let real_caddy =
-        RealCaddyResolver::for_daemon(options.real_caddy_override, paths.runtime_profile());
-      real_caddy.pin().await?;
+      let real_caddy = real_caddy.expect("real backend pins its Caddy resolver");
       let adapter = CaddyConfigAdapter::new(real_caddy.clone());
-      let runtime = ProcessRuntime::new(real_caddy, paths.clone());
+      let runtime = match &guard {
+        Some(guard) => ProcessRuntime::guarded(
+          real_caddy,
+          paths.clone(),
+          Arc::clone(guard),
+          containment_metadata
+            .clone()
+            .expect("runtime guard has containment metadata"),
+        ),
+        None => ProcessRuntime::new(real_caddy, paths.clone()),
+      };
       CaddyConfigCoordinator::new(adapter, runtime)
     }
     CaddyBackendMode::Mock => CaddyConfigCoordinator::new_mock(paths.clone()),
@@ -169,13 +217,60 @@ pub async fn run_daemon(options: DaemonOptions, shutdown: watch::Receiver<bool>)
   }
 
   let server = DaemonServer::new(paths, state).with_endpoint(endpoint);
-  let result = server.run_until(shutdown).await;
+  let (result, guard_failure) = match &guard {
+    Some(guard) => run_server_with_guard_supervision(server, shutdown, Arc::clone(guard)).await,
+    None => (server.run_until(shutdown).await, Ok(())),
+  };
   let guard_result = match guard {
-    Some(guard) => guard.finalize().await,
+    Some(guard) if guard_failure.is_ok() => guard.lock().await.finalize().await,
+    Some(_) => guard_failure,
     None => Ok(()),
   };
+  drop(containment_metadata);
   drop(lock);
   result.and(guard_result)
+}
+
+async fn run_server_with_guard_supervision(
+  server: DaemonServer,
+  mut shutdown: watch::Receiver<bool>,
+  guard: Arc<Mutex<runtime_guard::RuntimeGuardClient>>,
+) -> (Result<()>, Result<()>) {
+  let (local_shutdown, local_shutdown_rx) = watch::channel(false);
+  let external_shutdown = local_shutdown.clone();
+  let forward_shutdown = tokio::spawn(async move {
+    if !*shutdown.borrow() {
+      while shutdown.changed().await.is_ok() && !*shutdown.borrow() {}
+    }
+    let _ = external_shutdown.send(true);
+  });
+  let guard_shutdown = local_shutdown;
+  let monitor = tokio::spawn(async move {
+    loop {
+      sleep(Duration::from_millis(20)).await;
+      let Ok(mut guard) = guard.try_lock() else {
+        continue;
+      };
+      if let Some(status) = guard.try_wait()? {
+        let _ = guard_shutdown.send(true);
+        bail!("runtime guard exited unexpectedly with status {status}");
+      }
+    }
+  });
+
+  let result = server.run_until(local_shutdown_rx).await;
+  forward_shutdown.abort();
+  let guard_failure = if monitor.is_finished() {
+    match monitor.await {
+      Ok(result) => result,
+      Err(error) => Err(error).context("join runtime guard supervisor"),
+    }
+  } else {
+    monitor.abort();
+    let _ = monitor.await;
+    Ok(())
+  };
+  (result, guard_failure)
 }
 
 pub async fn wait_for_daemon_runtime_released(paths: &RuntimePaths) -> Result<()> {

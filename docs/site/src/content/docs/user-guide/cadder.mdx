@@ -57,7 +57,9 @@ Run:
 cadder tui
 ```
 
-The TUI uses the same local daemon contracts and operator view models as the CLI. It covers daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, and settings.
+The TUI uses the same local daemon contracts and operator view models as the CLI. Its current tabs show runtime status, entrypoints and domains, and retained logs. Entry-point and domain toggles are sent through the operator API. When the daemon is unavailable, the TUI shows the connection state and offers an explicit start action instead of starting it implicitly.
+
+Diagnostics, history, IIS handoff, autostart, and settings remain CLI-only until their dedicated TUI views are implemented.
 
 Remote pairing, authentication, and multi-host control are not part of v1.0.
 
