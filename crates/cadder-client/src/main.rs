@@ -4,11 +4,10 @@ mod logs;
 mod widgets;
 
 use std::io;
-use std::process::ExitCode;
 use std::time::Duration;
 
 use app::App;
-use cadder_api::{OperatorContext, OperatorError};
+use cadder_api::{AppExit, OperatorContext, OperatorError};
 use cadder_daemon::DaemonLaunchOptions;
 use clap::{Parser, Subcommand, error::ErrorKind};
 use color_eyre::Result;
@@ -41,35 +40,35 @@ enum Command {
   Tui,
 }
 
-fn main() -> ExitCode {
+fn main() -> AppExit {
   if let Err(error) = color_eyre::install() {
     eprintln!("Could not initialize Cadder error reporting: {error}");
-    return ExitCode::from(9);
+    return AppExit::IpcFailure;
   }
 
   match Cli::try_parse() {
     Ok(Cli {
       command: Command::Tui,
     }) => match run_tui() {
-      Ok(()) => ExitCode::SUCCESS,
+      Ok(()) => AppExit::Success,
       Err(error) => {
         eprintln!("Could not run the Cadder TUI: {error}");
-        ExitCode::from(9)
+        AppExit::IpcFailure
       }
     },
     Err(error) => {
-      let exit_code = cli_error_exit_code(&error);
+      let exit = cli_exit(&error);
       let _ = error.print();
-      exit_code
+      exit
     }
   }
 }
 
-fn cli_error_exit_code(error: &clap::Error) -> ExitCode {
-  if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
-    ExitCode::SUCCESS
+fn cli_exit(error: &clap::Error) -> AppExit {
+  if error.exit_code() == 0 || error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+    AppExit::Success
   } else {
-    ExitCode::from(error.exit_code() as u8)
+    AppExit::InvalidUsage
   }
 }
 
@@ -328,7 +327,23 @@ mod tests {
       error.kind(),
       ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
-    assert_eq!(cli_error_exit_code(&error), ExitCode::SUCCESS);
+    assert_eq!(cli_exit(&error), AppExit::Success);
+  }
+
+  #[test]
+  fn explicit_help_returns_success() {
+    let error = Cli::try_parse_from(["cadder", "--help"])
+      .expect_err("help should stop parsing before starting the TUI");
+
+    assert_eq!(cli_exit(&error), AppExit::Success);
+  }
+
+  #[test]
+  fn version_returns_success() {
+    let error = Cli::try_parse_from(["cadder", "--version"])
+      .expect_err("version should stop parsing before starting the TUI");
+
+    assert_eq!(cli_exit(&error), AppExit::Success);
   }
 
   #[test]

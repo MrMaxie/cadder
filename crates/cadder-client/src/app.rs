@@ -682,7 +682,7 @@ mod tests {
     app
       .complete_daemon_start(Err(OperatorError::new(
         "tui",
-        cadder_api::OperatorErrorKind::DaemonStartFailure,
+        cadder_api::AppExit::DaemonStartFailure,
         "cadderd exited before it became ready.",
         Some("Configure the real Caddy executable, then retry.".to_string()),
       )))

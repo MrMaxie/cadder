@@ -3,73 +3,35 @@ use cadder_daemon::{IpcClientError, IpcClientPhase, LocalIpcErrorCode, LocalIpcE
 use cadder_ipc::{ProtocolError, ProtocolErrorKind, RequestId};
 use serde::Serialize;
 use std::{
-  error::Error as StdError,
-  fmt::{self, Display},
   path::Path,
-  sync::Arc,
+  process::{ExitCode, Termination},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(u8)]
 #[serde(rename_all = "camelCase")]
-pub enum OperatorExitCode {
-  Success,
-  InvalidUsage,
-  DaemonUnavailable,
-  DaemonStartFailure,
-  TargetNotFound,
-  ConflictOrRejected,
-  PermissionOrElevation,
-  UnsupportedOperation,
-  IpcFailure,
+pub enum AppExit {
+  Success = 0,
+  InvalidUsage = 2,
+  DaemonUnavailable = 3,
+  DaemonStartFailure = 4,
+  TargetNotFound = 5,
+  ConflictOrRejected = 6,
+  PermissionOrElevation = 7,
+  UnsupportedOperation = 8,
+  IpcFailure = 9,
 }
 
-impl OperatorExitCode {
-  pub fn code(self) -> u8 {
-    match self {
-      Self::Success => 0,
-      Self::InvalidUsage => 2,
-      Self::DaemonUnavailable => 3,
-      Self::DaemonStartFailure => 4,
-      Self::TargetNotFound => 5,
-      Self::ConflictOrRejected => 6,
-      Self::PermissionOrElevation => 7,
-      Self::UnsupportedOperation => 8,
-      Self::IpcFailure => 9,
-    }
+impl Termination for AppExit {
+  fn report(self) -> ExitCode {
+    ExitCode::from(self as u8)
   }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum OperatorErrorKind {
-  InvalidUsage,
-  DaemonUnavailable,
-  DaemonStartFailure,
-  TargetNotFound,
-  ConflictOrRejected,
-  PermissionOrElevation,
-  UnsupportedOperation,
-  IpcFailure,
-}
-
-impl OperatorErrorKind {
-  pub fn exit_code(self) -> OperatorExitCode {
-    match self {
-      Self::InvalidUsage => OperatorExitCode::InvalidUsage,
-      Self::DaemonUnavailable => OperatorExitCode::DaemonUnavailable,
-      Self::DaemonStartFailure => OperatorExitCode::DaemonStartFailure,
-      Self::TargetNotFound => OperatorExitCode::TargetNotFound,
-      Self::ConflictOrRejected => OperatorExitCode::ConflictOrRejected,
-      Self::PermissionOrElevation => OperatorExitCode::PermissionOrElevation,
-      Self::UnsupportedOperation => OperatorExitCode::UnsupportedOperation,
-      Self::IpcFailure => OperatorExitCode::IpcFailure,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize, thiserror::Error)]
+#[error("{message}")]
 pub struct OperatorError {
-  pub kind: OperatorErrorKind,
+  pub kind: AppExit,
   pub message: String,
   pub guidance: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +41,8 @@ pub struct OperatorError {
   #[serde(skip)]
   pub command: &'static str,
   #[serde(skip)]
-  ipc_error: Option<Arc<IpcClientError>>,
+  #[source]
+  ipc_error: Option<Box<IpcClientError>>,
 }
 
 impl PartialEq for OperatorError {
@@ -111,7 +74,7 @@ pub struct OperatorLocalIpcError {
 impl OperatorError {
   pub fn new(
     command: &'static str,
-    kind: OperatorErrorKind,
+    kind: AppExit,
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
@@ -126,16 +89,12 @@ impl OperatorError {
     }
   }
 
-  pub fn exit_code(&self) -> OperatorExitCode {
-    self.kind.exit_code()
-  }
-
   pub fn invalid_usage(
     command: &'static str,
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
-    Self::new(command, OperatorErrorKind::InvalidUsage, message, guidance)
+    Self::new(command, AppExit::InvalidUsage, message, guidance)
   }
 
   pub fn target_not_found(
@@ -143,12 +102,7 @@ impl OperatorError {
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
-    Self::new(
-      command,
-      OperatorErrorKind::TargetNotFound,
-      message,
-      guidance,
-    )
+    Self::new(command, AppExit::TargetNotFound, message, guidance)
   }
 
   pub fn conflict_or_rejected(
@@ -156,12 +110,7 @@ impl OperatorError {
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
-    Self::new(
-      command,
-      OperatorErrorKind::ConflictOrRejected,
-      message,
-      guidance,
-    )
+    Self::new(command, AppExit::ConflictOrRejected, message, guidance)
   }
 
   pub fn unsupported(
@@ -169,12 +118,7 @@ impl OperatorError {
     message: impl Into<String>,
     guidance: Option<String>,
   ) -> Self {
-    Self::new(
-      command,
-      OperatorErrorKind::UnsupportedOperation,
-      message,
-      guidance,
-    )
+    Self::new(command, AppExit::UnsupportedOperation, message, guidance)
   }
 
   pub fn daemon_request(
@@ -183,8 +127,8 @@ impl OperatorError {
     action: &str,
     error: IpcClientError,
   ) -> Self {
-    let kind = operator_kind_for_ipc(&error);
-    let message = if kind == OperatorErrorKind::DaemonUnavailable {
+    let kind = app_exit_for_ipc(&error);
+    let message = if kind == AppExit::DaemonUnavailable {
       format!(
         "Cadder daemon is unavailable for runtime `{}`.",
         paths.display()
@@ -192,11 +136,11 @@ impl OperatorError {
     } else {
       format!("Could not {action}: {}", sentence(error.message()))
     };
-    let guidance = if kind == OperatorErrorKind::DaemonUnavailable {
+    let guidance = if kind == AppExit::DaemonUnavailable {
       Some(start_guidance(paths))
     } else {
       error.guidance().map(ToOwned::to_owned).or_else(|| {
-        if kind == OperatorErrorKind::IpcFailure {
+        if kind == AppExit::IpcFailure {
           Some(format!(
             "Inspect cadderd diagnostics for runtime `{}`, correct the reported protocol or transport error, then retry.",
             paths.display()
@@ -212,9 +156,9 @@ impl OperatorError {
   pub fn daemon_start(command: &'static str, _paths: &Path, error: IpcClientError) -> Self {
     let permission_denied = error.is_permission_denied();
     let kind = if permission_denied {
-      OperatorErrorKind::PermissionOrElevation
+      AppExit::PermissionOrElevation
     } else {
-      OperatorErrorKind::DaemonStartFailure
+      AppExit::DaemonStartFailure
     };
     let guidance = error.guidance().map(ToOwned::to_owned).or_else(|| {
       Some(if permission_denied {
@@ -249,7 +193,7 @@ impl OperatorError {
         operation: local.operation().map(ToOwned::to_owned),
       })
     });
-    self.ipc_error = Some(Arc::new(error));
+    self.ipc_error = Some(Box::new(error));
     self
   }
 }
@@ -263,37 +207,22 @@ pub(crate) fn sentence(message: &str) -> String {
   }
 }
 
-fn operator_kind_for_ipc(error: &IpcClientError) -> OperatorErrorKind {
+fn app_exit_for_ipc(error: &IpcClientError) -> AppExit {
   if error.is_permission_denied() {
-    return OperatorErrorKind::PermissionOrElevation;
+    return AppExit::PermissionOrElevation;
   }
   if daemon_error_indicates_unavailable(error) {
-    return OperatorErrorKind::DaemonUnavailable;
+    return AppExit::DaemonUnavailable;
   }
   if error.is_protocol_incompatible() {
-    return OperatorErrorKind::UnsupportedOperation;
+    return AppExit::UnsupportedOperation;
   }
   match error.daemon_error().map(|error| &error.kind) {
-    Some(ProtocolErrorKind::Conflict) => OperatorErrorKind::ConflictOrRejected,
+    Some(ProtocolErrorKind::Conflict) => AppExit::ConflictOrRejected,
     Some(
       ProtocolErrorKind::IncompatibleProtocolVersion | ProtocolErrorKind::UnsupportedCapability,
-    ) => OperatorErrorKind::UnsupportedOperation,
-    _ => OperatorErrorKind::IpcFailure,
-  }
-}
-
-impl Display for OperatorError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{}", self.message)
-  }
-}
-
-impl std::error::Error for OperatorError {
-  fn source(&self) -> Option<&(dyn StdError + 'static)> {
-    self
-      .ipc_error
-      .as_deref()
-      .map(|error| error as &(dyn StdError + 'static))
+    ) => AppExit::UnsupportedOperation,
+    _ => AppExit::IpcFailure,
   }
 }
 
@@ -308,16 +237,16 @@ pub fn daemon_error_indicates_unavailable(error: &IpcClientError) -> bool {
 }
 
 pub fn error_indicates_permission(error: &Error) -> bool {
-  error.chain().any(|cause| {
+  if error.chain().any(|cause| {
     cause
       .downcast_ref::<std::io::Error>()
       .is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::PermissionDenied))
-  }) || format_error_chain(error)
-    .to_ascii_lowercase()
-    .contains("permission denied")
-    || format_error_chain(error)
-      .to_ascii_lowercase()
-      .contains("access is denied")
+  }) {
+    return true;
+  }
+
+  let error_chain = format_error_chain(error).to_ascii_lowercase();
+  error_chain.contains("permission denied") || error_chain.contains("access is denied")
 }
 
 pub fn start_guidance(_paths: &Path) -> String {
@@ -332,16 +261,18 @@ mod tests {
   use cadder_ipc::ProtocolErrorCode;
 
   #[test]
-  fn exit_codes_remain_stable_for_all_error_kinds() {
-    assert_eq!(OperatorExitCode::Success.code(), 0);
-    assert_eq!(OperatorExitCode::InvalidUsage.code(), 2);
-    assert_eq!(OperatorExitCode::DaemonUnavailable.code(), 3);
-    assert_eq!(OperatorExitCode::DaemonStartFailure.code(), 4);
-    assert_eq!(OperatorExitCode::TargetNotFound.code(), 5);
-    assert_eq!(OperatorExitCode::ConflictOrRejected.code(), 6);
-    assert_eq!(OperatorExitCode::PermissionOrElevation.code(), 7);
-    assert_eq!(OperatorExitCode::UnsupportedOperation.code(), 8);
-    assert_eq!(OperatorExitCode::IpcFailure.code(), 9);
+  fn app_exit_values_remain_stable() {
+    assert_eq!(AppExit::Success as u8, 0);
+    assert_eq!(AppExit::InvalidUsage as u8, 2);
+    assert_eq!(AppExit::DaemonUnavailable as u8, 3);
+    assert_eq!(AppExit::DaemonStartFailure as u8, 4);
+    assert_eq!(AppExit::TargetNotFound as u8, 5);
+    assert_eq!(AppExit::ConflictOrRejected as u8, 6);
+    assert_eq!(AppExit::PermissionOrElevation as u8, 7);
+    assert_eq!(AppExit::UnsupportedOperation as u8, 8);
+    assert_eq!(AppExit::IpcFailure as u8, 9);
+    assert_eq!(AppExit::Success.report(), ExitCode::SUCCESS);
+    assert_eq!(AppExit::IpcFailure.report(), ExitCode::from(9));
   }
 
   #[tokio::test]
@@ -353,8 +284,7 @@ mod tests {
     let mapped =
       OperatorError::daemon_request("domains list", Path::new("runtime"), "query domains", error);
 
-    assert_eq!(mapped.kind, OperatorErrorKind::DaemonUnavailable);
-    assert_eq!(mapped.exit_code().code(), 3);
+    assert_eq!(mapped.kind, AppExit::DaemonUnavailable);
     assert_eq!(
       mapped.guidance.as_deref(),
       Some("Open Cadder and start it from Status, then retry.")
@@ -371,8 +301,7 @@ mod tests {
 
     let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), error);
 
-    assert_eq!(mapped.kind, OperatorErrorKind::PermissionOrElevation);
-    assert_eq!(mapped.exit_code().code(), 7);
+    assert_eq!(mapped.kind, AppExit::PermissionOrElevation);
   }
 
   #[test]
@@ -390,7 +319,7 @@ mod tests {
       error,
     );
 
-    assert_eq!(mapped.kind, OperatorErrorKind::IpcFailure);
+    assert_eq!(mapped.kind, AppExit::IpcFailure);
     assert!(mapped.message.contains("Unexpected daemon envelope"));
     assert!(
       mapped
@@ -407,8 +336,7 @@ mod tests {
     let mapped =
       OperatorError::daemon_request("status", Path::new("runtime"), "query state", error);
 
-    assert_eq!(mapped.kind, OperatorErrorKind::UnsupportedOperation);
-    assert_eq!(mapped.exit_code().code(), 8);
+    assert_eq!(mapped.kind, AppExit::UnsupportedOperation);
     assert!(mapped.daemon_error.is_some());
   }
 
@@ -422,64 +350,26 @@ mod tests {
 
     let mapped = OperatorError::daemon_start("daemon start", Path::new("runtime"), error);
 
-    assert_eq!(mapped.kind, OperatorErrorKind::DaemonStartFailure);
-    assert_eq!(mapped.exit_code().code(), 4);
+    assert_eq!(mapped.kind, AppExit::DaemonStartFailure);
     assert!(mapped.message.contains("Spawn failed."));
     assert!(!mapped.message.ends_with(".."));
   }
 
   #[test]
-  fn operator_error_kinds_and_constructors_keep_stable_contracts() {
-    let cases = [
-      (
-        OperatorErrorKind::InvalidUsage,
-        OperatorExitCode::InvalidUsage,
-      ),
-      (
-        OperatorErrorKind::DaemonUnavailable,
-        OperatorExitCode::DaemonUnavailable,
-      ),
-      (
-        OperatorErrorKind::DaemonStartFailure,
-        OperatorExitCode::DaemonStartFailure,
-      ),
-      (
-        OperatorErrorKind::TargetNotFound,
-        OperatorExitCode::TargetNotFound,
-      ),
-      (
-        OperatorErrorKind::ConflictOrRejected,
-        OperatorExitCode::ConflictOrRejected,
-      ),
-      (
-        OperatorErrorKind::PermissionOrElevation,
-        OperatorExitCode::PermissionOrElevation,
-      ),
-      (
-        OperatorErrorKind::UnsupportedOperation,
-        OperatorExitCode::UnsupportedOperation,
-      ),
-      (OperatorErrorKind::IpcFailure, OperatorExitCode::IpcFailure),
-    ];
-
-    for (kind, exit_code) in cases {
-      assert_eq!(kind.exit_code(), exit_code);
-    }
-
+  fn operator_error_constructors_keep_stable_contracts() {
     let unsupported = OperatorError::unsupported(
       "iis handoff",
       "not supported",
       Some("retry elsewhere".to_string()),
     );
-    assert_eq!(unsupported.kind, OperatorErrorKind::UnsupportedOperation);
+    assert_eq!(unsupported.kind, AppExit::UnsupportedOperation);
     assert_eq!(unsupported.to_string(), "not supported");
-    assert_eq!(unsupported.exit_code().code(), 8);
 
     let target = OperatorError::target_not_found("domains enable", "missing", None);
-    assert_eq!(target.kind, OperatorErrorKind::TargetNotFound);
+    assert_eq!(target.kind, AppExit::TargetNotFound);
 
     let conflict = OperatorError::conflict_or_rejected("domains enable", "busy", None);
-    assert_eq!(conflict.kind, OperatorErrorKind::ConflictOrRejected);
+    assert_eq!(conflict.kind, AppExit::ConflictOrRejected);
   }
 
   #[test]
@@ -499,7 +389,7 @@ mod tests {
       "query history",
       permission_error,
     );
-    assert_eq!(mapped.kind, OperatorErrorKind::PermissionOrElevation);
+    assert_eq!(mapped.kind, AppExit::PermissionOrElevation);
     assert!(error_indicates_permission(&permission));
 
     let unavailable = daemon_ipc_error(

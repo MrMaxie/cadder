@@ -96,7 +96,7 @@ impl OperatorContext {
     response.snapshot.ok_or_else(|| {
       OperatorError::new(
         command,
-        crate::OperatorErrorKind::IpcFailure,
+        crate::AppExit::IpcFailure,
         "Cadder daemon returned no state snapshot.".to_string(),
         Some(
           "Retry the command after the daemon finishes its current state transition.".to_string(),
@@ -479,7 +479,8 @@ mod tests {
       .unwrap_err();
 
     let ipc_error = std::error::Error::source(&error)
-      .and_then(|source| source.downcast_ref::<IpcClientError>())
+      .and_then(|source| source.downcast_ref::<Box<IpcClientError>>())
+      .map(Box::as_ref)
       .expect("operator error should retain the typed IPC error");
     let local = ipc_error
       .local_error()
@@ -530,7 +531,7 @@ mod tests {
         },
       )
       .unwrap_err();
-    assert_eq!(missing.kind, crate::OperatorErrorKind::TargetNotFound);
+    assert_eq!(missing.kind, crate::AppExit::TargetNotFound);
     assert!(missing.message.contains("shim-1"));
 
     let missing_any_entrypoint = context
@@ -543,10 +544,7 @@ mod tests {
         },
       )
       .unwrap_err();
-    assert_eq!(
-      missing_any_entrypoint.kind,
-      crate::OperatorErrorKind::TargetNotFound
-    );
+    assert_eq!(missing_any_entrypoint.kind, crate::AppExit::TargetNotFound);
     assert_eq!(
       missing_any_entrypoint.message,
       "Domain `missing.localhost` was not found."
@@ -562,7 +560,7 @@ mod tests {
         },
       )
       .unwrap_err();
-    assert_eq!(ambiguous.kind, crate::OperatorErrorKind::ConflictOrRejected);
+    assert_eq!(ambiguous.kind, crate::AppExit::ConflictOrRejected);
     assert!(ambiguous.message.contains("shim-1, shim-2"));
   }
 
