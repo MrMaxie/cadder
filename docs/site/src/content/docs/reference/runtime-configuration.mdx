@@ -10,7 +10,7 @@ Cadder is portable: its runtime directory is the directory containing the execut
 The installation directory contains daemon coordination and persistent Cadder data:
 
 - `cadder.lock`, the daemon ownership lock;
-- `daemon.json`, daemon metadata used by clients;
+- `cadder-ipc.json`, the daemon endpoint metadata used by clients;
 - `effective-caddy.json`, the generated Caddy configuration;
 - `data/`, durable manifests, generations, plans, secrets, recovery data, and `storage.lock`.
 

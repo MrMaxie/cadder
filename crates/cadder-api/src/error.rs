@@ -358,7 +358,7 @@ mod tests {
   #[test]
   fn operator_error_constructors_keep_stable_contracts() {
     let unsupported = OperatorError::unsupported(
-      "iis handoff",
+      "unsupported operation",
       "not supported",
       Some("retry elsewhere".to_string()),
     );

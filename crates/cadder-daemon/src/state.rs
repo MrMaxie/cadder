@@ -1,11 +1,7 @@
 use crate::{
   CaddyConfigCoordinator,
   autostart::AutostartManager,
-  caddy::{CaddyApplyAction, IisProxyBackendProtocol},
-  iis::{
-    IisBindingRecord, IisMetadataStore, IisProvider, IisRestoreRecord, binding_to_view,
-    unsupported_binding_issue,
-  },
+  caddy::CaddyApplyAction,
   logs::{CaddyLogStore, LogQuery},
   operation_fence::{CommitRejection, OperationFence, OperationFenceAuthority},
   paths::RuntimePaths,
@@ -13,17 +9,15 @@ use crate::{
 };
 use anyhow::Result;
 use cadder_ipc::{
-  ActivationState, BasicResponse, ConfigState, EntrypointRegistration, GuiStateSnapshot,
-  HeartbeatEntrypointRequest, HistoryKind, IisBinding, IisFollowUpAction, IisHandoffState,
-  IisIssue, IisIssueKind, IisOperationStep, LogAttributionKind, LogSeverity, LogStreamIdentity,
-  QueryAutostartResponse, QueryHistoryResponse, QueryIisBindingsResponse, QueryLogsResponse,
-  QueryStateResponse, RegisterEntrypointResponse, SetAutostartRequest, SetAutostartResponse,
-  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  SetIisHandoffResponse, StateChangeKind, StateChangedEvent, canonicalize_domain,
+  ActivationState, BasicResponse, EntrypointRegistration, GuiStateSnapshot,
+  HeartbeatEntrypointRequest, HistoryKind, LogAttributionKind, LogSeverity, LogStreamIdentity,
+  QueryAutostartResponse, QueryHistoryResponse, QueryLogsResponse, QueryStateResponse,
+  RegisterEntrypointResponse, SetAutostartRequest, SetAutostartResponse, SetDomainEnabledRequest,
+  SetEntrypointEnabledRequest, StateChangeKind, StateChangedEvent,
 };
 use chrono::Utc;
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::BTreeMap,
   sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -32,14 +26,10 @@ use std::{
 use tokio::sync::{Mutex, Notify, Semaphore, broadcast};
 
 #[cfg(test)]
-use crate::iis::IisMutation;
-#[cfg(test)]
-use cadder_ipc::{ConfigApplyStatus, IisElevationApproval, IisOperationStepStatus};
+use cadder_ipc::ConfigApplyStatus;
 
 mod autostart_control;
-mod config_apply;
 mod history;
-mod iis_handoff;
 mod lifecycle;
 mod log_queries;
 mod registrations;
@@ -59,10 +49,6 @@ pub struct DaemonState {
   logs: CaddyLogStore,
   store: RuntimeStore,
   autostart: AutostartManager,
-  iis_provider: IisProvider,
-  iis_store: IisMetadataStore,
-  #[cfg(test)]
-  iis_operation: Arc<Mutex<()>>,
   shutdown_signal: ShutdownSignal,
   operation_fences: OperationFenceAuthority,
   #[cfg(test)]

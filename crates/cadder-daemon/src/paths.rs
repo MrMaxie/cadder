@@ -159,10 +159,6 @@ impl RuntimePaths {
     self.runtime_dir.join("cadder-ipc.lock")
   }
 
-  pub fn metadata_path(&self) -> PathBuf {
-    self.runtime_dir.join("daemon.json")
-  }
-
   pub fn effective_config_path(&self) -> PathBuf {
     self.runtime_dir.join("effective-caddy.json")
   }
@@ -234,7 +230,6 @@ mod tests {
       first.ipc_endpoint_path(),
       dir.path().join("cadder-ipc.json")
     );
-    assert_eq!(first.metadata_path(), dir.path().join("daemon.json"));
     assert_eq!(
       first.effective_config_path(),
       dir.path().join("effective-caddy.json")

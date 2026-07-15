@@ -3,7 +3,7 @@ title: cadder
 description: Use the Cadder operator executable for CLI automation and TUI operation.
 ---
 
-`cadder` is the v1 operator executable. It is designed for shell scripts, CI checks, agents, and operators who need daemon state, diagnostics, logs, IIS handoff, autostart, toggles, and interactive TUI operation.
+`cadder` is the v1 operator executable. It is designed for shell scripts, CI checks, agents, and operators who need daemon state, diagnostics, logs, autostart, toggles, and interactive TUI operation.
 
 ## Command Groups
 
@@ -20,16 +20,13 @@ cadder logs show --limit 20 domain <domain> --registration <registration-id>
 cadder logs tail --limit 20 --poll-interval-ms 750 domain <domain> --registration <registration-id>
 cadder logs export --limit 100 runtime --output-path runtime.log
 cadder history show --limit 50
-cadder iis bindings
-cadder iis handoff <binding-id> --route-host app.localhost
-cadder iis restore <binding-id>
 cadder autostart status
 cadder autostart set daemon
 cadder watch status
 cadder tui
 ```
 
-`cadder` stays attach-only by default. Read-only commands, toggles, `watch`, `logs tail`, history, IIS, and autostart queries connect to an already running daemon. `cadder daemon start` is the explicit launch path.
+`cadder` stays attach-only by default. Read-only commands, toggles, `watch`, `logs tail`, history, and autostart queries connect to an already running daemon. `cadder daemon start` is the explicit launch path.
 
 ## Output Modes
 
@@ -59,7 +56,7 @@ cadder tui
 
 The TUI uses the same local daemon contracts and operator view models as the CLI. Its current tabs show runtime status, entrypoints and domains, and retained logs. Entry-point and domain toggles are sent through the operator API. When the daemon is unavailable, the TUI shows the connection state and offers an explicit start action instead of starting it implicitly.
 
-Diagnostics, history, IIS handoff, autostart, and settings remain CLI-only until their dedicated TUI views are implemented.
+Diagnostics, history, autostart, and settings remain CLI-only until their dedicated TUI views are implemented.
 
 Remote pairing, authentication, and multi-host control are not part of v1.0.
 

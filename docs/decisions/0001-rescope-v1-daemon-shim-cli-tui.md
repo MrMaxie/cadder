@@ -34,7 +34,7 @@ people, scripts, and agents uses the `cadder` CLI and daemon protocol model.
 
 Windows remains the primary platform target for now, especially least-privilege
 operation, named-pipe security, autostart behavior, shim PATH behavior, Windows
-Sandbox smoke tests, and optional IIS handoff. Cross-platform primitives remain
+Sandbox smoke tests. Cross-platform primitives remain
 preferred where they do not hide platform security or lifecycle differences.
 
 ## Consequences

@@ -28,7 +28,7 @@ Content for end users, operators, automation authors, contributors, and release 
 - **THEN** Getting Started provides the shortest supported path from installation through a managed project and successful CLI or TUI inspection
 
 #### Scenario: Operator recovery
-- **WHEN** an operator encounters a known daemon, shim, Caddy, permission, or IIS failure
+- **WHEN** an operator encounters a known daemon, shim, Caddy, or permission failure
 - **THEN** Troubleshooting provides symptom-based diagnosis and safe recovery steps without requiring repository knowledge
 
 #### Scenario: Contributor guidance
@@ -54,7 +54,7 @@ End-user pages SHALL use portable placeholders and product-level concepts. They 
 - **AND** it does not require `.local`, a private backend, or a maintainer-specific path
 
 ### Requirement: DOC-004: Complete user journeys
-The public documentation SHALL cover installation, real-Caddy prerequisites, explicit shim alias setup and removal, first project registration, CLI and TUI operation, upgrades, uninstall, diagnostics, recovery, and Windows IIS handoff where supported.
+The public documentation SHALL cover installation, real-Caddy prerequisites, explicit shim alias setup and removal, first project registration, CLI and TUI operation, upgrades, uninstall, diagnostics, and recovery.
 
 Each journey MUST state prerequisites, the expected successful result, relevant safety constraints, and a link to troubleshooting or reference material when the operation can fail.
 

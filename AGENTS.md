@@ -52,7 +52,7 @@ cargo xtask check
 - IPC is versioned newline-delimited JSON over a per-user local socket via `interprocess`.
 - The `caddy` shim must never recursively execute itself when Cadder needs real Caddy. Real Caddy comes only from an explicit daemon override, trusted per-user or system configuration, or a safe PATH that excludes the shim by file identity.
 - The daemon owns only the real Caddy process it starts. It must not enumerate or kill unrelated Caddy processes.
-- Normal operation must work at user privilege. Elevated behavior is limited to explicit IIS handoff or an explicitly elevated daemon, and user-level clients must retain controlled access to that daemon through documented local IPC policy.
+- Normal operation must work at user privilege across supported operating systems.
 
 ## Skill Routing
 

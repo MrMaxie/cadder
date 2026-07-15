@@ -1,4 +1,3 @@
-use super::iis_handoff::{backend_dial, legacy_backend_binding};
 use super::*;
 
 impl DaemonState {
@@ -16,10 +15,6 @@ impl DaemonState {
       logs: CaddyLogStore::default(),
       store: RuntimeStore::memory(),
       autostart: AutostartManager::disabled(),
-      iis_provider: IisProvider::system(),
-      iis_store: IisMetadataStore::memory(),
-      #[cfg(test)]
-      iis_operation: Arc::new(Mutex::new(())),
       shutdown_signal: ShutdownSignal::default(),
       operation_fences: OperationFenceAuthority::default(),
       #[cfg(test)]
@@ -28,46 +23,15 @@ impl DaemonState {
   }
 
   pub async fn with_runtime_paths(
-    mut coordinator: CaddyConfigCoordinator,
+    coordinator: CaddyConfigCoordinator,
     paths: RuntimePaths,
   ) -> Result<Self> {
     crate::runtime_file::cleanup_stale_config_candidates(&paths)?;
-    let iis_store = IisMetadataStore::load(paths.metadata_path()).await?;
     let store = RuntimeStore::try_open(paths.storage_paths())?;
-    let handoffs = iis_store.snapshot().await;
-    for (binding_id, restore) in &handoffs {
-      let backend_binding = legacy_backend_binding(restore);
-      coordinator.set_iis_proxy_route(
-        binding_id.clone(),
-        restore.domain_key.clone(),
-        backend_dial(&backend_binding),
-        IisProxyBackendProtocol::from_iis_protocol(&backend_binding.protocol),
-      );
-    }
     let mut state = Self::new(coordinator);
     state.store = store;
     state.autostart = AutostartManager::new(&paths);
-    state.iis_store = iis_store;
-    if !handoffs.is_empty() {
-      let _operation = state
-        .config_operation
-        .acquire()
-        .await
-        .expect("config operation semaphore closed");
-      let fence = state.issue_operation_fence()?;
-      state.apply_registrations_fenced(Vec::new(), &fence).await?;
-    }
     Ok(state)
-  }
-
-  #[cfg(test)]
-  pub(crate) fn with_iis_provider(
-    coordinator: CaddyConfigCoordinator,
-    iis_provider: IisProvider,
-  ) -> Self {
-    let mut state = Self::new(coordinator);
-    state.iis_provider = iis_provider;
-    state
   }
 
   pub fn subscribe(&self) -> broadcast::Receiver<StateChangedEvent> {

@@ -1,10 +1,9 @@
 use crate::{
   BasicResponse, HeartbeatEntrypointRequest, IdentifierError, QueryAutostartRequest,
-  QueryAutostartResponse, QueryHistoryRequest, QueryHistoryResponse, QueryIisBindingsRequest,
-  QueryIisBindingsResponse, QueryLogsRequest, QueryLogsResponse, QueryStateRequest,
-  QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse, RequestId,
-  SetAutostartRequest, SetAutostartResponse, SetDomainEnabledRequest, SetEntrypointEnabledRequest,
-  SetIisHandoffRequest, SetIisHandoffResponse, ShutdownDaemonRequest, StateChangedEvent,
+  QueryAutostartResponse, QueryHistoryRequest, QueryHistoryResponse, QueryLogsRequest,
+  QueryLogsResponse, QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest,
+  RegisterEntrypointResponse, RequestId, SetAutostartRequest, SetAutostartResponse,
+  SetDomainEnabledRequest, SetEntrypointEnabledRequest, ShutdownDaemonRequest, StateChangedEvent,
   SubscribeStateRequest, UnregisterEntrypointRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -120,18 +119,6 @@ correlated_legacy_requests!(
     QueryLogsResponse,
     crate::message_types::QUERY_LOGS_REQUEST,
     crate::message_types::QUERY_LOGS_RESPONSE
-  ),
-  (
-    QueryIisBindingsRequest,
-    QueryIisBindingsResponse,
-    crate::message_types::QUERY_IIS_BINDINGS_REQUEST,
-    crate::message_types::QUERY_IIS_BINDINGS_RESPONSE
-  ),
-  (
-    SetIisHandoffRequest,
-    SetIisHandoffResponse,
-    crate::message_types::SET_IIS_HANDOFF_REQUEST,
-    crate::message_types::SET_IIS_HANDOFF_RESPONSE
   ),
 );
 
@@ -251,18 +238,6 @@ mod tests {
       QueryLogsResponse,
       crate::message_types::QUERY_LOGS_REQUEST,
       crate::message_types::QUERY_LOGS_RESPONSE
-    );
-    assert_contract!(
-      QueryIisBindingsRequest,
-      QueryIisBindingsResponse,
-      crate::message_types::QUERY_IIS_BINDINGS_REQUEST,
-      crate::message_types::QUERY_IIS_BINDINGS_RESPONSE
-    );
-    assert_contract!(
-      SetIisHandoffRequest,
-      SetIisHandoffResponse,
-      crate::message_types::SET_IIS_HANDOFF_REQUEST,
-      crate::message_types::SET_IIS_HANDOFF_RESPONSE
     );
   }
 }

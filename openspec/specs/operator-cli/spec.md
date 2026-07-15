@@ -31,15 +31,10 @@ cadder logs tail domain <domain> [--registration <registration-id>] [log-read-op
 cadder logs export runtime [log-read-options] [--output-path <path>]
 cadder logs export entrypoint <registration-id> [log-read-options] [--output-path <path>]
 cadder logs export domain <domain> [--registration <registration-id>] [log-read-options] [--output-path <path>]
-cadder history show [--kind <registration|runtime|config|iis|autostart|log>] [--registration <registration-id>] [--limit <count>] [--after-cursor <cursor>] [--since <timestamp>] [--until <timestamp>]
+cadder history show [--kind <registration|runtime|config|autostart|log>] [--registration <registration-id>] [--limit <count>] [--after-cursor <cursor>] [--since <timestamp>] [--until <timestamp>]
 cadder autostart status
 cadder autostart enable
 cadder autostart disable
-cadder iis status
-cadder iis preview handoff <binding-id> [--route-host <host>]
-cadder iis preview restore <binding-id> [--route-host <host>]
-cadder iis apply <plan-id>
-cadder iis restore <plan-id>
 cadder setup shim [--dir <path>]
 cadder setup shim --remove [--dir <path>]
 ```
@@ -93,7 +88,7 @@ Entrypoint mutations SHALL select an exact live or durable registration ID. Doma
 - **THEN** the CLI exits with the conflict-or-precondition code, lists the matching registration IDs, and instructs the operator to retry with `--registration`
 
 #### Scenario: Target is absent
-- **WHEN** an entrypoint ID, domain, log stream, IIS binding, or plan ID exists in neither the authoritative snapshot nor its permitted historical index
+- **WHEN** an entrypoint ID, domain, or log stream exists in neither the authoritative snapshot nor its permitted historical index
 - **THEN** the CLI exits with the conflict-or-precondition code and does not mutate another target
 
 #### Scenario: Forgotten entrypoint has retained logs
@@ -189,20 +184,8 @@ One-shot log reads and exports SHALL default to at most `50` entries, history re
 - **WHEN** the complete log export cannot be atomically written to the requested path
 - **THEN** the original destination remains unchanged and the command returns the invalid-input or permission classification appropriate to the failure
 
-### Requirement: CLI-010: Platform-specific IIS and shim setup behavior
-On Windows, IIS mutation SHALL require a current immutable preview plan: `iis preview handoff` or `iis preview restore` returns a single-use plan ID valid for five minutes, and `iis apply` or `iis restore` accepts only the matching unexpired plan ID. On non-Windows platforms, `iis status` SHALL succeed with an explicit unsupported status, while preview and mutation commands SHALL fail as unsupported preconditions. `setup shim` SHALL invoke the ownership and collision policy defined by `REG-007`; a missing or non-PATH destination returns code `2`, unsafe ownership or filesystem permission returns code `4`, a collision or provenance mismatch returns code `5`, and success returns code `0`.
-
-#### Scenario: IIS plan is applied on Windows
-- **WHEN** an operator previews a handoff, reviews the returned plan, and invokes `cadder iis apply <plan-id>` before the plan expires
-- **THEN** the CLI submits exactly that plan for scoped elevation and reports the authenticated apply result
-
-#### Scenario: Stale IIS plan is rejected
-- **WHEN** an operator supplies a stale, changed, or unknown plan ID to `iis apply` or `iis restore`
-- **THEN** the command exits with code `5` and no privileged mutation runs
-
-#### Scenario: IIS mutation is requested on another platform
-- **WHEN** an operator invokes IIS preview, apply, or restore on Linux or macOS
-- **THEN** the command exits with code `5`, identifies IIS as Windows-only, and leaves the runtime unchanged
+### Requirement: CLI-010: Shim setup behavior
+`setup shim` SHALL invoke the ownership and collision policy defined by `REG-007`; a missing or non-PATH destination returns code `2`, unsafe ownership or filesystem permission returns code `4`, a collision or provenance mismatch returns code `5`, and success returns code `0`.
 
 #### Scenario: Shim alias collides with an existing executable
 - **WHEN** `cadder setup shim` finds a `caddy` command that is not a verified Cadder-owned alias

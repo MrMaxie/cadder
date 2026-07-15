@@ -19,7 +19,6 @@ pub enum HistoryKind {
   Registration,
   Runtime,
   Config,
-  Iis,
   Autostart,
   Log,
 }

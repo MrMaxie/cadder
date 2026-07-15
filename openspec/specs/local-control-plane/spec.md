@@ -35,18 +35,6 @@ Each runtime profile MUST expose one owner-only local endpoint and MUST authenti
 - **THEN** the daemon terminates before the executor thread can process protocol input or unrelated work under the client token
 - **AND** runtime containment and restart recovery handle the daemon loss
 
-### Requirement: IPC-002: Elevated helpers cannot inherit the control plane
-Only the ordinary user daemon defined by `IIS-003` SHALL expose the normal control-plane endpoint. An elevated IIS helper MUST NOT inherit, publish, or reuse that endpoint and MUST NOT accept general protocol requests.
-
-#### Scenario: IIS helper runs
-- **WHEN** the one-shot IIS helper starts with elevation
-- **THEN** it accepts only the authenticated immutable IIS plan channel
-- **AND** it does not publish `cadder-ipc.json` or a general Cadder endpoint
-
-#### Scenario: Control-plane handles exist during helper launch
-- **WHEN** the normal daemon launches the one-shot IIS helper
-- **THEN** control-plane listener and client handles are not inherited by the elevated process
-
 ### Requirement: IPC-003: Discovery is authoritative but not an authentication secret
 The daemon SHALL atomically publish an owner-only `cadder-ipc.json` containing its metadata schema version, profile, runtime identifier, instance identifier, endpoint, supported protocol range, capabilities, and diagnostic PID. Every client MUST validate and consume this record before connecting, then confirm the instance identifier during the protocol handshake. Possession of the file MUST NOT authorize a client.
 
@@ -142,7 +130,7 @@ Each request SHALL carry its protocol version, operation, `RequestId`, and typed
 - **THEN** clients retain its code and request ID while applying only the bounded retry policy for that operation
 
 ### Requirement: IPC-008: Shared DTOs have controlled schemas
-The protocol SHALL publish versioned schemas for `RuntimeSnapshot`, `PageEnvelope`, `EntrypointSnapshot`, `DomainSnapshot`, `CaddyConfigStatus`, `LogEvent`, `HistoryEvent`, `IisChangePlan`, and `IisApplyResult`. CLI and TUI MUST consume these shared contracts rather than infer daemon state from storage or process inspection. The published schemas and capability metadata SHALL remain available to additional local clients without installing another runtime service.
+The protocol SHALL publish versioned schemas for `RuntimeSnapshot`, `PageEnvelope`, `EntrypointSnapshot`, `DomainSnapshot`, `CaddyConfigStatus`, `LogEvent`, and `HistoryEvent`. CLI and TUI MUST consume these shared contracts rather than infer daemon state from storage or process inspection. The published schemas and capability metadata SHALL remain available to additional local clients without installing another runtime service.
 
 #### Scenario: Schema-compatible client
 - **WHEN** a local client decodes a snapshot that uses its supported schema version and contains additional declared-compatible fields

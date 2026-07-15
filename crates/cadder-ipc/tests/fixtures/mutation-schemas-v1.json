@@ -188,19 +188,6 @@
     "title": "SetEntrypointEnabledPayload",
     "type": "object"
   },
-  "set-iis-handoff-request": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Applies or restores one IIS binding handoff.",
-    "properties": {
-      "bindingId": { "type": "string" },
-      "enabled": { "type": "boolean" },
-      "routeHost": { "type": ["string", "null"] }
-    },
-    "required": ["bindingId", "enabled"],
-    "title": "SetIisHandoffPayload",
-    "type": "object"
-  },
   "shutdown-daemon-request": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,

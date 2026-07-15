@@ -88,8 +88,8 @@ The compatibility shim SHALL manage only `caddy run`. It SHALL delegate the read
 - **WHEN** a project invokes an unknown command through the shim
 - **THEN** the shim fails closed without executing the real Caddy binary
 
-### Requirement: REG-006: Project inputs cannot select executable or privileged behavior
-Project-controlled files, working directories, command arguments, and environment variables MUST NOT select the real Caddy executable, alter the daemon's trusted executable sources, start an elevated daemon, or invoke the IIS helper. Executable selection and privileged plans SHALL come only from the trusted control paths defined by the Caddy runtime and IIS contracts.
+### Requirement: REG-006: Project inputs cannot select the real Caddy executable
+Project-controlled files, working directories, command arguments, and environment variables MUST NOT select the real Caddy executable or alter the daemon's trusted executable sources. Executable selection SHALL come only from the trusted control paths defined by the Caddy runtime contract.
 
 #### Scenario: Project-local executable override
 - **WHEN** a project `cadder.toml`, Caddyfile, or shim argument attempts to name a real-Caddy command
@@ -99,10 +99,6 @@ Project-controlled files, working directories, command arguments, and environmen
 #### Scenario: Inherited command override
 - **WHEN** the shim process inherits a project-provided variable that names a Caddy executable
 - **THEN** managed registration and read-only delegation ignore that variable as an executable source
-
-#### Scenario: Project requests elevation
-- **WHEN** a project input attempts to request elevation or an IIS helper operation
-- **THEN** the daemon rejects the request before launching another process
 
 ### Requirement: REG-007: Shim alias setup preserves existing Caddy installations
 Cadder SHALL distribute the compatibility shim as `cadder-caddy` and SHALL create a PATH-facing `caddy` alias only through explicit `cadder setup shim`. Without `--dir`, setup SHALL use the documented per-user command directory. An explicit directory MUST already exist, be owner-writable, belong to the current user's PATH, and not be administrator-owned or shared with another user. Setup MUST verify an empty destination or Cadder-owned provenance; removal MUST delete only an alias whose recorded provenance and current target both identify the installed `cadder-caddy`.

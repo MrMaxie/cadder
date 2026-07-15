@@ -9,11 +9,10 @@ use cadder_ipc::{
   EntrypointRegistration, HeartbeatEntrypointRequest, IpcEnvelope, LogAttributionKind, LogSeverity,
   LogStreamIdentity, LogStreamStatus, OPERATION_REGISTRY, OwnerProcessIdentity, PROTOCOL_VERSION,
   ProtocolCapabilities, ProtocolErrorKind, ProtocolErrorResponse, QueryAutostartRequest,
-  QueryAutostartResponse, QueryIisBindingsRequest, QueryIisBindingsResponse, QueryLogsRequest,
-  QueryLogsResponse, QueryStateRequest, QueryStateResponse, RegisterEntrypointRequest,
-  RegisterEntrypointResponse, RequestId, RuntimeStatus, SUPPORTED_PROTOCOL_VERSIONS,
-  ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
-  SetEntrypointEnabledRequest, SetIisHandoffRequest, SetIisHandoffResponse, ShimRunMetadata,
+  QueryAutostartResponse, QueryLogsRequest, QueryLogsResponse, QueryStateRequest,
+  QueryStateResponse, RegisterEntrypointRequest, RegisterEntrypointResponse, RequestId,
+  RuntimeStatus, SUPPORTED_PROTOCOL_VERSIONS, ServerHandshakeFrame, ServerHello,
+  SetAutostartRequest, SetDomainEnabledRequest, SetEntrypointEnabledRequest, ShimRunMetadata,
   SourcePath, StateChangeKind, UnregisterEntrypointRequest, message_types, new_request_id,
 };
 use chrono::Utc;
@@ -256,51 +255,6 @@ async fn ipc_set_autostart_request_fails_closed_without_history() {
   assert!(history.records.is_empty());
   harness.shutdown().await;
 }
-
-#[tokio::test]
-async fn ipc_iis_operator_requests_return_typed_responses() {
-  let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
-  let harness = Harness::start(FakeCaddy::new(fixture)).await;
-
-  let bindings: QueryIisBindingsResponse = harness
-    .client
-    .request(
-      message_types::QUERY_IIS_BINDINGS_REQUEST,
-      message_types::QUERY_IIS_BINDINGS_RESPONSE,
-      &QueryIisBindingsRequest {
-        request_id: new_request_id("test-query-iis"),
-      },
-    )
-    .await
-    .unwrap();
-  let handoff: SetIisHandoffResponse = harness
-    .client
-    .request(
-      message_types::SET_IIS_HANDOFF_REQUEST,
-      message_types::SET_IIS_HANDOFF_RESPONSE,
-      &SetIisHandoffRequest {
-        request_id: new_request_id("test-set-iis"),
-        binding_id: "missing|http|127.0.0.1:1:missing.localhost".to_string(),
-        enabled: true,
-        route_host: None,
-      },
-    )
-    .await
-    .unwrap();
-
-  assert!(bindings.request_id.starts_with("test-query-iis-"));
-  assert!(handoff.request_id.starts_with("test-set-iis-"));
-  assert!(!handoff.accepted);
-  assert_eq!(
-    handoff.issue.as_ref().map(|issue| issue.kind),
-    Some(cadder_ipc::IisIssueKind::HandoffUnavailable)
-  );
-  assert!(handoff.message.contains("Upgrade Cadder"));
-  assert!(handoff.binding.is_none());
-  assert!(handoff.steps.is_empty());
-  harness.shutdown().await;
-}
-
 #[tokio::test]
 async fn shutdown_coordinator_ipc_request_stops_server_and_rejects_new_clients() {
   let fixture = include_str!("fixtures/SmarketingReverseProxy.Caddyfile");
@@ -1557,8 +1511,6 @@ async fn ipc_rejects_invalid_payload_shapes_for_supported_messages() {
     message_types::QUERY_STATE_REQUEST,
     message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
     message_types::SET_DOMAIN_ENABLED_REQUEST,
-    message_types::QUERY_IIS_BINDINGS_REQUEST,
-    message_types::SET_IIS_HANDOFF_REQUEST,
     message_types::QUERY_LOGS_REQUEST,
     message_types::QUERY_HISTORY_REQUEST,
     message_types::QUERY_AUTOSTART_REQUEST,

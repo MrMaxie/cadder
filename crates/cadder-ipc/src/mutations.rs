@@ -289,16 +289,6 @@ pub struct SetDomainEnabledPayload {
   pub enabled: bool,
 }
 
-/// Applies or restores one IIS binding handoff.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-#[schemars(deny_unknown_fields)]
-pub struct SetIisHandoffPayload {
-  pub binding_id: String,
-  pub enabled: bool,
-  pub route_host: Option<String>,
-}
-
 /// Selects the desired per-user daemon autostart mode.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -377,7 +367,6 @@ operation_payload!(
   SetDomainEnabledPayload,
   message_types::SET_DOMAIN_ENABLED_REQUEST
 );
-operation_payload!(SetIisHandoffPayload, message_types::SET_IIS_HANDOFF_REQUEST);
 operation_payload!(
   ShutdownDaemonPayload,
   message_types::SHUTDOWN_DAEMON_REQUEST

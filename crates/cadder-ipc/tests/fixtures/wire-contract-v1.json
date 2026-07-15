@@ -10,7 +10,6 @@
     "daemon-lifecycle",
     "entrypoint-registration",
     "history",
-    "iis-handoff",
     "logs",
     "runtime-state",
     "state-subscription"
@@ -56,96 +55,6 @@
     }
   },
   "operations": [
-    {
-      "access": "mutation",
-      "deadline": "reload",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "register-entrypoint-request",
-      "payloadExtensions": [],
-      "requiredCapability": "entrypoint-registration",
-      "shape": "unary",
-      "timeoutRetryable": false
-    },
-    {
-      "access": "mutation",
-      "deadline": "reload",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "unregister-entrypoint-request",
-      "payloadExtensions": [],
-      "requiredCapability": "entrypoint-registration",
-      "shape": "unary",
-      "timeoutRetryable": false
-    },
-    {
-      "access": "mutation",
-      "deadline": "ordinary",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "heartbeat-entrypoint-request",
-      "payloadExtensions": [],
-      "requiredCapability": "entrypoint-registration",
-      "shape": "unary",
-      "timeoutRetryable": true
-    },
-    {
-      "access": "readOnly",
-      "deadline": "ordinary",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "query-state-request",
-      "payloadExtensions": [],
-      "requiredCapability": "runtime-state",
-      "shape": "unary",
-      "timeoutRetryable": true
-    },
-    {
-      "access": "readOnly",
-      "deadline": "stream",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "subscribe-state-request",
-      "payloadExtensions": [],
-      "requiredCapability": "state-subscription",
-      "shape": "serverStream",
-      "timeoutRetryable": true
-    },
-    {
-      "access": "mutation",
-      "deadline": "reload",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "set-entrypoint-enabled-request",
-      "payloadExtensions": [],
-      "requiredCapability": "activation-control",
-      "shape": "unary",
-      "timeoutRetryable": false
-    },
-    {
-      "access": "mutation",
-      "deadline": "reload",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "set-domain-enabled-request",
-      "payloadExtensions": [],
-      "requiredCapability": "activation-control",
-      "shape": "unary",
-      "timeoutRetryable": false
-    },
-    {
-      "access": "readOnly",
-      "deadline": "ordinary",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "query-iis-bindings-request",
-      "payloadExtensions": [],
-      "requiredCapability": "iis-handoff",
-      "shape": "unary",
-      "timeoutRetryable": true
-    },
-    {
-      "access": "mutation",
-      "deadline": "reload",
-      "minimumVersion": { "major": 1, "minor": 0 },
-      "name": "set-iis-handoff-request",
-      "payloadExtensions": [],
-      "requiredCapability": "iis-handoff",
-      "shape": "unary",
-      "timeoutRetryable": false
-    },
     {
       "access": "readOnly",
       "deadline": "ordinary",
@@ -216,59 +125,7 @@
       "misconfigured"
     ],
     "configApplyStatus": ["unknown", "notApplied", "applied", "failed", "idle"],
-    "historyKind": ["registration", "runtime", "config", "iis", "autostart", "log"],
-    "iisElevationApproval": [
-      "notRequired",
-      "required",
-      "approved",
-      "denied",
-      "unsupported"
-    ],
-    "iisFollowUpAction": [
-      "retryElevation",
-      "rollbackHandoff",
-      "retryRestore",
-      "removeLoopbackBinding",
-      "clearRestoreMetadata"
-    ],
-    "iisHandoffState": [
-      "available",
-      "handedOff",
-      "unsupported",
-      "conflict",
-      "missingRoute",
-      "unavailable",
-      "busy"
-    ],
-    "iisIssueKind": [
-      "iisUnavailable",
-      "handoffUnavailable",
-      "insufficientPrivileges",
-      "elevationRequired",
-      "elevationDenied",
-      "elevationUnsupported",
-      "unsupportedBindingShape",
-      "missingTlsCertificate",
-      "conflict",
-      "missingBinding",
-      "missingRoute",
-      "rollbackSucceeded",
-      "rollbackFailed",
-      "restoreFailed",
-      "busy",
-      "providerError"
-    ],
-    "iisOperationStepStatus": [
-      "pending",
-      "succeeded",
-      "requiresElevation",
-      "approved",
-      "denied",
-      "failed",
-      "skipped",
-      "unsupported"
-    ],
-    "iisPrivilegeLevel": ["user", "administrator", "unsupported"],
+    "historyKind": ["registration", "runtime", "config", "autostart", "log"],
     "logAttributionKind": ["unknown", "runtime", "runtimeControl", "entrypoint", "domain"],
     "logEntryKind": ["normal", "lifecycle", "ingestionOverflow", "retentionGap"],
     "logSeverity": ["unknown", "trace", "debug", "info", "warn", "error", "fatal"],

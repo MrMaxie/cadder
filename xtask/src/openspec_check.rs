@@ -5,7 +5,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
-const CAPABILITY_PREFIXES: [(&str, &str); 12] = [
+const CAPABILITY_PREFIXES: [(&str, &str); 11] = [
   ("product-topology", "TOP-"),
   ("daemon-lifecycle", "RUN-"),
   ("project-registration", "REG-"),
@@ -15,7 +15,6 @@ const CAPABILITY_PREFIXES: [(&str, &str); 12] = [
   ("operator-cli", "CLI-"),
   ("operator-tui", "TUI-"),
   ("observability", "OBS-"),
-  ("windows-iis-handoff", "IIS-"),
   ("distribution-and-upgrades", "DST-"),
   ("documentation-experience", "DOC-"),
 ];

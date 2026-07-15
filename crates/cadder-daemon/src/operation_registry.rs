@@ -158,22 +158,6 @@ mod tests {
         false,
       ),
       (
-        message_types::QUERY_IIS_BINDINGS_REQUEST,
-        capabilities::IIS_HANDOFF,
-        OperationAccess::ReadOnly,
-        unary,
-        ordinary,
-        true,
-      ),
-      (
-        message_types::SET_IIS_HANDOFF_REQUEST,
-        capabilities::IIS_HANDOFF,
-        OperationAccess::Mutation,
-        unary,
-        reload,
-        false,
-      ),
-      (
         message_types::QUERY_LOGS_REQUEST,
         capabilities::LOGS,
         OperationAccess::ReadOnly,

@@ -45,7 +45,7 @@ pub fn elevated_management_surface_diagnostic(surface_label: &str) -> PrivilegeD
     message: format!(
       "{surface_label} is running with elevated privileges. Cadder management surfaces are designed to run as the normal user."
     ),
-    guidance: "Close this process and reopen it from a normal user shell when possible. Cadder will request administrator approval only for the specific IIS mutation batch that needs it."
+    guidance: "Close this process and reopen it from a normal user shell when possible."
       .to_string(),
   }
 }
@@ -56,8 +56,9 @@ pub fn elevated_shim_diagnostic(surface_label: &str) -> PrivilegeDiagnostic {
     message: format!(
       "{surface_label} is running with elevated privileges. Normal Cadder shim registrations should run as the user that owns the Cadder runtime."
     ),
-    guidance: "Restart from a normal user shell unless the hosted project itself requires elevation. IIS handoff will request administrator approval only for the IIS mutation batch that needs it."
-      .to_string(),
+    guidance:
+      "Restart from a normal user shell unless the hosted project itself requires elevation."
+        .to_string(),
   }
 }
 
@@ -118,7 +119,6 @@ mod tests {
     assert_eq!(diagnostic.code, "least-privilege-elevated-context");
     assert!(diagnostic.message.contains("cadder"));
     assert!(diagnostic.guidance.contains("normal user shell"));
-    assert!(diagnostic.guidance.contains("IIS mutation batch"));
   }
 
   #[test]

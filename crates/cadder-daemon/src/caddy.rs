@@ -837,7 +837,6 @@ pub struct CaddyConfigCoordinator {
   adapter: CaddyRegistrationAdapter,
   runtime: CaddyRuntime,
   routes: BTreeMap<String, Vec<Value>>,
-  iis_routes: BTreeMap<String, IisProxyRoute>,
   registration_diagnostics: BTreeMap<String, Vec<ConfigDiagnostic>>,
   current: ConfigState,
 }
@@ -854,28 +853,6 @@ pub enum CaddyApplyAction {
     hash: String,
     source_config_paths: Vec<String>,
   },
-}
-
-#[derive(Debug, Clone)]
-struct IisProxyRoute {
-  domain_key: String,
-  route: Value,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IisProxyBackendProtocol {
-  Http,
-  Https,
-}
-
-impl IisProxyBackendProtocol {
-  pub fn from_iis_protocol(protocol: &str) -> Self {
-    if protocol.eq_ignore_ascii_case("https") {
-      Self::Https
-    } else {
-      Self::Http
-    }
-  }
 }
 
 impl CaddyConfigCoordinator {
@@ -895,7 +872,6 @@ impl CaddyConfigCoordinator {
       adapter,
       runtime,
       routes: BTreeMap::new(),
-      iis_routes: BTreeMap::new(),
       registration_diagnostics: BTreeMap::new(),
       current: ConfigState::idle(),
     }
@@ -915,33 +891,6 @@ impl CaddyConfigCoordinator {
 
   pub async fn runtime_state(&self) -> cadder_ipc::RuntimeState {
     self.runtime.inspect().await
-  }
-
-  pub fn set_iis_proxy_route(
-    &mut self,
-    binding_id: impl Into<String>,
-    domain_key: impl Into<String>,
-    backend_dial: impl Into<String>,
-    backend_protocol: IisProxyBackendProtocol,
-  ) {
-    let binding_id = binding_id.into();
-    let domain_key = domain_key.into();
-    let backend_dial = backend_dial.into();
-    let route = iis_proxy_route(&binding_id, &domain_key, &backend_dial, backend_protocol);
-    self
-      .iis_routes
-      .insert(domain_key.clone(), IisProxyRoute { domain_key, route });
-  }
-
-  pub fn remove_iis_proxy_route(&mut self, domain_key: &str) {
-    self.iis_routes.remove(domain_key);
-  }
-
-  pub fn has_iis_proxy_routes_except(&self, domain_key: &str) -> bool {
-    self
-      .iis_routes
-      .values()
-      .any(|route| !route.domain_key.eq_ignore_ascii_case(domain_key))
   }
 
   pub async fn prepare_registration(
@@ -1017,7 +966,6 @@ impl CaddyConfigCoordinator {
       .flat_map(|(_, diagnostics)| diagnostics.iter().cloned())
       .collect::<Vec<_>>();
     diagnostics.extend(detect_conflicts(registrations));
-    diagnostics.extend(detect_iis_route_conflicts(registrations, &self.iis_routes));
     let attempted = Utc::now();
     if !diagnostics.is_empty() {
       self.current = ConfigState {
@@ -1035,15 +983,14 @@ impl CaddyConfigCoordinator {
       .filter(|registration| registration.activation_state.is_enabled())
       .cloned()
       .collect();
-    if self.iis_routes.is_empty()
-      && active
-        .iter()
-        .all(|registration| active_domains(registration).is_empty())
+    if active
+      .iter()
+      .all(|registration| active_domains(registration).is_empty())
     {
       return CaddyApplyAction::Stop { attempted };
     }
 
-    let config = compose_config(&active, &self.routes, &self.iis_routes);
+    let config = compose_config(&active, &self.routes);
     let rendered = serde_json::to_vec_pretty(&config).expect("config serialization");
     let hash = hex::encode(Sha256::digest(&rendered));
     let source_config_paths = active
@@ -1141,40 +1088,6 @@ impl CaddyConfigCoordinator {
   }
 }
 
-fn iis_proxy_route(
-  binding_id: &str,
-  domain_key: &str,
-  backend_dial: &str,
-  backend_protocol: IisProxyBackendProtocol,
-) -> Value {
-  let mut handler = json!({
-      "handler": "reverse_proxy",
-      "headers": {
-          "request": {
-              "set": {
-                  "Host": [domain_key]
-              }
-          }
-      },
-      "upstreams": [{ "dial": backend_dial }]
-  });
-  if backend_protocol == IisProxyBackendProtocol::Https {
-    handler["transport"] = json!({
-        "protocol": "http",
-        "tls": {
-            "server_name": domain_key,
-            "insecure_skip_verify": true
-        }
-    });
-  }
-  json!({
-      "@id": format!("iis_handoff_{}", route_id_fragment(binding_id)),
-      "match": [{ "host": [domain_key] }],
-      "handle": [handler],
-      "terminal": true
-  })
-}
-
 fn namespace_config_ids(value: &mut Value, namespace: &str) {
   match value {
     Value::Array(values) => {
@@ -1197,7 +1110,6 @@ fn namespace_config_ids(value: &mut Value, namespace: &str) {
 fn compose_config(
   registrations: &[EntrypointRegistration],
   routes_by_registration: &BTreeMap<String, Vec<Value>>,
-  iis_routes: &BTreeMap<String, IisProxyRoute>,
 ) -> Value {
   let mut routes = Vec::new();
   let mut tls_subjects = BTreeSet::new();
@@ -1224,8 +1136,6 @@ fn compose_config(
       }
     }
   }
-  tls_subjects.extend(iis_routes.keys().cloned());
-  routes.extend(iis_routes.values().map(|route| route.route.clone()));
   let tls_subjects = tls_subjects.into_iter().collect::<Vec<_>>();
   let mut http_routes = routes.clone();
   for route in &mut http_routes {
@@ -1314,19 +1224,6 @@ fn mock_host_from_site_token(token: &str) -> Option<String> {
   } else {
     None
   }
-}
-
-fn route_id_fragment(value: &str) -> String {
-  value
-    .chars()
-    .map(|ch| {
-      if ch.is_ascii_alphanumeric() {
-        ch.to_ascii_lowercase()
-      } else {
-        '_'
-      }
-    })
-    .collect()
 }
 
 fn active_domains(registration: &EntrypointRegistration) -> BTreeSet<String> {
@@ -1498,35 +1395,6 @@ fn detect_conflicts(registrations: &[EntrypointRegistration]) -> Vec<ConfigDiagn
           .map(|registration| registration.source_config_path.raw.clone())
           .collect(),
       })
-    })
-    .collect()
-}
-
-fn detect_iis_route_conflicts(
-  registrations: &[EntrypointRegistration],
-  iis_routes: &BTreeMap<String, IisProxyRoute>,
-) -> Vec<ConfigDiagnostic> {
-  registrations
-    .iter()
-    .filter(|registration| registration.activation_state.is_enabled())
-    .flat_map(|registration| {
-      registration
-        .registered_domains
-        .iter()
-        .filter(|domain| domain.activation_state.is_enabled())
-        .filter_map(|domain| {
-          iis_routes
-            .get(&domain.name.canonical)
-            .map(|iis_route| ConfigDiagnostic {
-              code: "iis-domain-conflict".to_string(),
-              message: format!(
-                "domain `{}` is already owned by an IIS handoff route",
-                iis_route.domain_key
-              ),
-              domain_key: Some(iis_route.domain_key.clone()),
-              source_config_paths: vec![registration.source_config_path.raw.clone()],
-            })
-        })
     })
     .collect()
 }
@@ -2357,48 +2225,6 @@ app.localhost, http://api.localhost:8080 {
     assert!(format!("{error:#}").contains("PATH is not set"));
   }
 
-  #[tokio::test]
-  async fn coordinator_accessors_iis_routes_and_idle_shutdown_are_stable() {
-    let mut coordinator = coordinator_for_test();
-
-    assert_eq!(coordinator.current_state().status, ConfigApplyStatus::Idle);
-    assert_eq!(
-      coordinator.runtime_state().await.status,
-      cadder_ipc::RuntimeStatus::Idle
-    );
-    assert!(!coordinator.has_iis_proxy_routes_except("app.localhost"));
-
-    coordinator.set_iis_proxy_route(
-      "Default Web Site|http|*:80:app.localhost",
-      "app.localhost",
-      "127.0.0.1:53000",
-      IisProxyBackendProtocol::Http,
-    );
-
-    assert!(!coordinator.has_iis_proxy_routes_except("app.localhost"));
-    assert!(coordinator.has_iis_proxy_routes_except("other.localhost"));
-    let CaddyApplyAction::Apply {
-      rendered,
-      source_config_paths,
-      ..
-    } = coordinator.begin_apply(&[])
-    else {
-      panic!("expected IIS route-only apply action");
-    };
-    let config: Value = serde_json::from_slice(&rendered).unwrap();
-    assert!(source_config_paths.is_empty());
-    assert_eq!(
-      config
-        .pointer("/apps/http/servers/cadder_https/routes/0/match/0/host/0")
-        .and_then(Value::as_str),
-      Some("app.localhost")
-    );
-
-    coordinator.remove_iis_proxy_route("app.localhost");
-    assert!(!coordinator.has_iis_proxy_routes_except("app.localhost"));
-    coordinator.shutdown().await.unwrap();
-  }
-
   #[test]
   fn trusted_caddy_source_rejects_explicit_shim_by_file_identity() {
     let dir = tempfile::tempdir().unwrap();
@@ -2757,7 +2583,7 @@ app.localhost, http://api.localhost:8080 {
   #[test]
   fn compose_config_uses_placeholder_route_when_adapted_routes_are_missing() {
     let registrations = vec![registration("shim", &["app.localhost"])];
-    let config = compose_config(&registrations, &BTreeMap::new(), &BTreeMap::new());
+    let config = compose_config(&registrations, &BTreeMap::new());
 
     assert_eq!(
       config
@@ -2786,7 +2612,7 @@ app.localhost, http://api.localhost:8080 {
       })],
     )]);
 
-    let config = compose_config(&[registration], &routes_by_registration, &BTreeMap::new());
+    let config = compose_config(&[registration], &routes_by_registration);
     let hosts = config
       .pointer("/apps/http/servers/cadder_https/routes/0/match/0/host")
       .and_then(Value::as_array)
@@ -2798,49 +2624,6 @@ app.localhost, http://api.localhost:8080 {
 
     assert_eq!(hosts, &[json!("app.localhost")]);
     assert_eq!(tls_subjects, &[json!("app.localhost")]);
-  }
-
-  #[test]
-  fn compose_config_drops_inactive_domain_routes_but_keeps_iis_subjects() {
-    let mut registration = registration("shim", &["app.localhost"]);
-    registration.registered_domains[0].activation_state = ActivationState::Inactive;
-    let routes_by_registration = BTreeMap::from([(
-      "shim".to_string(),
-      vec![json!({
-          "match": [{ "host": ["app.localhost"] }],
-          "handle": [{ "handler": "static_response", "body": "app" }],
-          "terminal": true
-      })],
-    )]);
-    let iis_routes = BTreeMap::from([(
-      "iis.localhost".to_string(),
-      IisProxyRoute {
-        domain_key: "iis.localhost".to_string(),
-        route: iis_proxy_route(
-          "Default Web Site|http|*:80:iis.localhost",
-          "iis.localhost",
-          "127.0.0.1:41080",
-          IisProxyBackendProtocol::Http,
-        ),
-      },
-    )]);
-
-    let config = compose_config(&[registration], &routes_by_registration, &iis_routes);
-    let routes = config
-      .pointer("/apps/http/servers/cadder_https/routes")
-      .and_then(Value::as_array)
-      .unwrap();
-    let tls_subjects = config
-      .pointer("/apps/tls/automation/policies/0/subjects")
-      .and_then(Value::as_array)
-      .unwrap();
-
-    assert_eq!(routes.len(), 1);
-    assert_eq!(
-      routes[0].pointer("/match/0/host/0").and_then(Value::as_str),
-      Some("iis.localhost")
-    );
-    assert_eq!(tls_subjects, &[json!("iis.localhost")]);
   }
 
   #[test]
@@ -2889,15 +2672,6 @@ app.localhost, http://api.localhost:8080 {
     };
     let stop_action = CaddyApplyAction::Stop { attempted };
     let current_action = CaddyApplyAction::Current(ConfigState::idle());
-    let proxy_route = IisProxyRoute {
-      domain_key: "app.localhost".to_string(),
-      route: iis_proxy_route(
-        "Default Web Site|http|*:80:app.localhost",
-        "app.localhost",
-        "127.0.0.1:41000",
-        IisProxyBackendProtocol::Http,
-      ),
-    };
     let prepared = PreparedRegistration {
       registration: registration("shim", &["app.localhost"]),
       routes: vec![json!({ "match": [{ "host": ["app.localhost"] }] })],
@@ -2910,7 +2684,6 @@ app.localhost, http://api.localhost:8080 {
     assert!(format!("{:?}", apply_action).contains("Apply"));
     assert!(format!("{:?}", stop_action).contains("Stop"));
     assert!(format!("{:?}", current_action).contains("Current"));
-    assert!(format!("{:?}", proxy_route.clone()).contains("IisProxyRoute"));
     assert_eq!(coordinator.current_state().status, ConfigApplyStatus::Idle);
     assert_eq!(
       coordinator.runtime_state().await.status,
@@ -2996,43 +2769,6 @@ app.localhost, http://api.localhost:8080 {
       entry.operation.as_deref() == Some("idle-stop")
         && entry.raw_message.contains("caddy stop timed out")
     }));
-  }
-
-  #[test]
-  fn iis_proxy_route_helpers_track_case_insensitive_exceptions() {
-    let mut coordinator = coordinator_for_test();
-    coordinator.set_iis_proxy_route(
-      "Default Web Site|http|*:80:app.localhost",
-      "app.localhost",
-      "127.0.0.1:41043",
-      IisProxyBackendProtocol::Http,
-    );
-    coordinator.set_iis_proxy_route(
-      "Default Web Site|http|*:80:api.localhost",
-      "api.localhost",
-      "127.0.0.1:41044",
-      IisProxyBackendProtocol::Http,
-    );
-
-    assert!(coordinator.has_iis_proxy_routes_except("APP.localhost"));
-    coordinator.remove_iis_proxy_route("api.localhost");
-    assert!(!coordinator.has_iis_proxy_routes_except("APP.localhost"));
-  }
-
-  #[test]
-  fn iis_protocol_and_route_id_helpers_are_stable() {
-    assert_eq!(
-      IisProxyBackendProtocol::from_iis_protocol("HTTPS"),
-      IisProxyBackendProtocol::Https
-    );
-    assert_eq!(
-      IisProxyBackendProtocol::from_iis_protocol("http"),
-      IisProxyBackendProtocol::Http
-    );
-    assert_eq!(
-      route_id_fragment("Default Web Site|HTTPS|*:443:App.Localhost"),
-      "default_web_site_https___443_app_localhost"
-    );
   }
 
   #[test]
@@ -3136,190 +2872,5 @@ app.localhost, http://api.localhost:8080 {
         .len(),
       1
     );
-  }
-
-  #[test]
-  fn compose_config_appends_iis_proxy_routes_after_registration_routes() {
-    let registrations = vec![registration("shim", &["app.localhost"])];
-    let routes_by_registration = BTreeMap::from([(
-      "shim".to_string(),
-      vec![json!({
-          "match": [{ "host": ["app.localhost"] }],
-          "handle": [{ "handler": "static_response", "body": "app" }],
-          "terminal": true
-      })],
-    )]);
-    let iis_routes = BTreeMap::from([(
-      "iis-app.localhost".to_string(),
-      IisProxyRoute {
-        domain_key: "iis-app.localhost".to_string(),
-        route: json!({
-            "match": [{ "host": ["iis-app.localhost"] }],
-            "handle": [{ "handler": "reverse_proxy", "upstreams": [{ "dial": "127.0.0.1:41043" }] }],
-            "terminal": true
-        }),
-      },
-    )]);
-
-    let config = compose_config(&registrations, &routes_by_registration, &iis_routes);
-    let routes = config
-      .pointer("/apps/http/servers/cadder_https/routes")
-      .and_then(Value::as_array)
-      .unwrap();
-    let http_listen = config
-      .pointer("/apps/http/servers/cadder_http/listen")
-      .and_then(Value::as_array)
-      .unwrap();
-    let https_listen = config
-      .pointer("/apps/http/servers/cadder_https/listen")
-      .and_then(Value::as_array)
-      .unwrap();
-    let tls_connection_policies = config
-      .pointer("/apps/http/servers/cadder_https/tls_connection_policies")
-      .and_then(Value::as_array)
-      .unwrap();
-    let tls_subjects = config
-      .pointer("/apps/tls/automation/policies/0/subjects")
-      .and_then(Value::as_array)
-      .unwrap();
-    let tls_issuer = config
-      .pointer("/apps/tls/automation/policies/0/issuers/0/module")
-      .and_then(Value::as_str);
-
-    assert_eq!(http_listen, &[json!(":80")]);
-    assert_eq!(https_listen, &[json!(":443")]);
-    assert_eq!(tls_connection_policies, &[json!({})]);
-    assert_eq!(
-      tls_subjects,
-      &[json!("app.localhost"), json!("iis-app.localhost")]
-    );
-    assert_eq!(tls_issuer, Some("internal"));
-    assert_eq!(routes.len(), 2);
-    assert_eq!(
-      routes[0].pointer("/match/0/host/0").and_then(Value::as_str),
-      Some("app.localhost")
-    );
-    assert_eq!(
-      routes[1].pointer("/match/0/host/0").and_then(Value::as_str),
-      Some("iis-app.localhost")
-    );
-  }
-
-  #[test]
-  fn compose_config_includes_iis_only_routes_in_http_and_https_servers() {
-    let iis_routes = BTreeMap::from([(
-      "secure.localhost".to_string(),
-      IisProxyRoute {
-        domain_key: "secure.localhost".to_string(),
-        route: iis_proxy_route(
-          "Default Web Site|https|*:443:secure.localhost",
-          "secure.localhost",
-          "127.0.0.1:41443",
-          IisProxyBackendProtocol::Https,
-        ),
-      },
-    )]);
-
-    let config = compose_config(&[], &BTreeMap::new(), &iis_routes);
-    let http_route = config
-      .pointer("/apps/http/servers/cadder_http/routes/0")
-      .unwrap();
-    let https_route = config
-      .pointer("/apps/http/servers/cadder_https/routes/0")
-      .unwrap();
-    let tls_subjects = config
-      .pointer("/apps/tls/automation/policies/0/subjects")
-      .and_then(Value::as_array)
-      .unwrap();
-
-    let http_id = http_route.get("@id").and_then(Value::as_str).unwrap();
-    let https_id = https_route.get("@id").and_then(Value::as_str).unwrap();
-    assert_eq!(http_id, format!("http_{https_id}"));
-    assert_ne!(http_id, https_id);
-    assert_eq!(http_route.get("match"), https_route.get("match"));
-    assert_eq!(http_route.get("handle"), https_route.get("handle"));
-    assert_eq!(
-      https_route
-        .pointer("/handle/0/transport/tls/server_name")
-        .and_then(Value::as_str),
-      Some("secure.localhost")
-    );
-    assert_eq!(tls_subjects, &[json!("secure.localhost")]);
-  }
-
-  #[test]
-  fn iis_proxy_route_leaves_http_backend_plaintext() {
-    let route = iis_proxy_route(
-      "Default Web Site|http|*:80:app.localhost",
-      "app.localhost",
-      "127.0.0.1:41043",
-      IisProxyBackendProtocol::Http,
-    );
-
-    assert_eq!(
-      route
-        .pointer("/handle/0/upstreams/0/dial")
-        .and_then(Value::as_str),
-      Some("127.0.0.1:41043")
-    );
-    assert!(route.pointer("/handle/0/transport").is_none());
-    assert_eq!(
-      route
-        .pointer("/handle/0/headers/request/set/Host/0")
-        .and_then(Value::as_str),
-      Some("app.localhost")
-    );
-  }
-
-  #[test]
-  fn iis_proxy_route_configures_tls_transport_for_https_backend() {
-    let route = iis_proxy_route(
-      "Default Web Site|https|*:443:secure.localhost",
-      "secure.localhost",
-      "127.0.0.1:41043",
-      IisProxyBackendProtocol::Https,
-    );
-
-    assert_eq!(
-      route
-        .pointer("/handle/0/upstreams/0/dial")
-        .and_then(Value::as_str),
-      Some("127.0.0.1:41043")
-    );
-    assert_eq!(
-      route
-        .pointer("/handle/0/transport/protocol")
-        .and_then(Value::as_str),
-      Some("http")
-    );
-    assert_eq!(
-      route
-        .pointer("/handle/0/transport/tls/server_name")
-        .and_then(Value::as_str),
-      Some("secure.localhost")
-    );
-    assert_eq!(
-      route
-        .pointer("/handle/0/transport/tls/insecure_skip_verify")
-        .and_then(Value::as_bool),
-      Some(true)
-    );
-  }
-
-  #[test]
-  fn detects_iis_proxy_route_conflicts_with_active_registration_domains() {
-    let registrations = vec![registration("shim", &["app.localhost"])];
-    let iis_routes = BTreeMap::from([(
-      "app.localhost".to_string(),
-      IisProxyRoute {
-        domain_key: "app.localhost".to_string(),
-        route: json!({ "match": [{ "host": ["app.localhost"] }] }),
-      },
-    )]);
-
-    let diagnostics = detect_iis_route_conflicts(&registrations, &iis_routes);
-
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code, "iis-domain-conflict");
   }
 }

@@ -10,7 +10,6 @@ pub mod events;
 pub mod handshake;
 pub mod history;
 pub mod identifiers;
-pub mod iis;
 pub mod logs;
 pub mod message_types;
 pub mod mutations;
@@ -29,7 +28,6 @@ pub use events::*;
 pub use handshake::*;
 pub use history::*;
 pub use identifiers::*;
-pub use iis::*;
 pub use logs::*;
 pub use message_types::*;
 pub use mutations::*;
@@ -369,17 +367,9 @@ mod tests {
         HistoryKind::Runtime,
         HistoryKind::Config,
         HistoryKind::Autostart,
-        HistoryKind::Iis,
         HistoryKind::Log,
       ],
-      &[
-        "registration",
-        "runtime",
-        "config",
-        "autostart",
-        "iis",
-        "log",
-      ],
+      &["registration", "runtime", "config", "autostart", "log"],
     );
     roundtrip(
       &[AutostartMode::Disabled, AutostartMode::Daemon],
@@ -409,125 +399,6 @@ mod tests {
       ],
       &["snapshot", "registrationsChanged", "runtimeChanged"],
     );
-    roundtrip(
-      &[
-        IisHandoffState::Available,
-        IisHandoffState::HandedOff,
-        IisHandoffState::Unsupported,
-        IisHandoffState::Conflict,
-        IisHandoffState::MissingRoute,
-        IisHandoffState::Unavailable,
-        IisHandoffState::Busy,
-      ],
-      &[
-        "available",
-        "handedOff",
-        "unsupported",
-        "conflict",
-        "missingRoute",
-        "unavailable",
-        "busy",
-      ],
-    );
-    roundtrip(
-      &[
-        IisIssueKind::IisUnavailable,
-        IisIssueKind::HandoffUnavailable,
-        IisIssueKind::InsufficientPrivileges,
-        IisIssueKind::ElevationRequired,
-        IisIssueKind::ElevationDenied,
-        IisIssueKind::ElevationUnsupported,
-        IisIssueKind::UnsupportedBindingShape,
-        IisIssueKind::MissingTlsCertificate,
-        IisIssueKind::Conflict,
-        IisIssueKind::MissingBinding,
-        IisIssueKind::MissingRoute,
-        IisIssueKind::RollbackSucceeded,
-        IisIssueKind::RollbackFailed,
-        IisIssueKind::RestoreFailed,
-        IisIssueKind::Busy,
-        IisIssueKind::ProviderError,
-      ],
-      &[
-        "iisUnavailable",
-        "insufficientPrivileges",
-        "elevationRequired",
-        "elevationDenied",
-        "elevationUnsupported",
-        "unsupportedBindingShape",
-        "missingTlsCertificate",
-        "conflict",
-        "missingBinding",
-        "missingRoute",
-        "rollbackSucceeded",
-        "rollbackFailed",
-        "restoreFailed",
-        "busy",
-        "providerError",
-      ],
-    );
-    roundtrip(
-      &[
-        IisPrivilegeLevel::User,
-        IisPrivilegeLevel::Administrator,
-        IisPrivilegeLevel::Unsupported,
-      ],
-      &["user", "administrator", "unsupported"],
-    );
-    roundtrip(
-      &[
-        IisOperationStepStatus::Pending,
-        IisOperationStepStatus::Succeeded,
-        IisOperationStepStatus::RequiresElevation,
-        IisOperationStepStatus::Approved,
-        IisOperationStepStatus::Denied,
-        IisOperationStepStatus::Failed,
-        IisOperationStepStatus::Skipped,
-        IisOperationStepStatus::Unsupported,
-      ],
-      &[
-        "pending",
-        "succeeded",
-        "requiresElevation",
-        "approved",
-        "denied",
-        "failed",
-        "skipped",
-        "unsupported",
-      ],
-    );
-    roundtrip(
-      &[
-        IisElevationApproval::NotRequired,
-        IisElevationApproval::Required,
-        IisElevationApproval::Approved,
-        IisElevationApproval::Denied,
-        IisElevationApproval::Unsupported,
-      ],
-      &[
-        "notRequired",
-        "required",
-        "approved",
-        "denied",
-        "unsupported",
-      ],
-    );
-    roundtrip(
-      &[
-        IisFollowUpAction::RetryElevation,
-        IisFollowUpAction::RollbackHandoff,
-        IisFollowUpAction::RemoveLoopbackBinding,
-        IisFollowUpAction::RetryRestore,
-        IisFollowUpAction::ClearRestoreMetadata,
-      ],
-      &[
-        "retryElevation",
-        "rollbackHandoff",
-        "removeLoopbackBinding",
-        "retryRestore",
-        "clearRestoreMetadata",
-      ],
-    );
   }
 
   #[test]
@@ -549,10 +420,6 @@ mod tests {
       message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
       message_types::SET_DOMAIN_ENABLED_REQUEST,
       message_types::SET_DOMAIN_ENABLED_RESPONSE,
-      message_types::QUERY_IIS_BINDINGS_REQUEST,
-      message_types::QUERY_IIS_BINDINGS_RESPONSE,
-      message_types::SET_IIS_HANDOFF_REQUEST,
-      message_types::SET_IIS_HANDOFF_RESPONSE,
       message_types::QUERY_LOGS_REQUEST,
       message_types::QUERY_LOGS_RESPONSE,
       message_types::QUERY_HISTORY_REQUEST,
@@ -673,7 +540,6 @@ mod tests {
       has_more_before: false,
       truncated_by_retention: false,
     };
-    let step = IisOperationStep::administrator("iis-restore", "Restore IIS binding");
     let response = RegisterEntrypointResponse {
       request_id: "register-1".to_string(),
       accepted: true,
@@ -692,115 +558,15 @@ mod tests {
         diagnostics: Vec::new(),
       }),
     };
-    let values = serde_json::json!({
-      "registerRequest": RegisterEntrypointRequest { request_id: "register-1".to_string(), registration: registration.clone() },
-      "registerResponse": response.clone(),
-      "unregister": UnregisterEntrypointRequest { request_id: "unregister-1".to_string(), registration_id: registration.registration_id.clone(), shim_session_nonce: identity.shim_session_nonce.clone() },
-      "logs": logs.clone(),
-      "snapshot": snapshot.clone(),
-      "step": step.clone(),
-      "basic": BasicResponse { request_id: "basic-1".to_string(), accepted: true, message: "ok".to_string() },
-    });
-    let rendered = serde_json::to_string(&values).unwrap();
-
     assert!(format!("{:?}", registration.clone()).contains("EntrypointRegistration"));
     assert!(format!("{:?}", runtime_state.clone()).contains("RuntimeState"));
     assert!(format!("{:?}", config_state.clone()).contains("ConfigState"));
     assert!(format!("{:?}", logs.clone()).contains("QueryLogsResponse"));
-    assert!(format!("{:?}", step.clone()).contains("IisOperationStep"));
-    assert!(rendered.contains("\"requiresElevation\""));
     assert_eq!(snapshot.registrations[0], registration);
     assert_eq!(
       response.registration_id.as_deref(),
       Some(identity.instance_id.as_str())
     );
-  }
-
-  #[test]
-  fn serializes_iis_handoff_contracts() {
-    let response = QueryIisBindingsResponse {
-      request_id: "iis-1".to_string(),
-      accepted: true,
-      message: "ok".to_string(),
-      bindings: vec![IisBinding {
-        identity: IisBindingIdentity {
-          binding_id: "Default Web Site|http|*:80:app.localhost".to_string(),
-          site_name: "Default Web Site".to_string(),
-          protocol: "http".to_string(),
-          binding_information: "*:80:app.localhost".to_string(),
-        },
-        ip_address: "*".to_string(),
-        port: 80,
-        host_header: "app.localhost".to_string(),
-        domain_key: Some("app.localhost".to_string()),
-        handoff_state: IisHandoffState::Available,
-        issue: Some(IisIssue::new(
-          IisIssueKind::MissingRoute,
-          "Cadder has no route.",
-        )),
-        restore_metadata: None,
-      }],
-      issue: None,
-    };
-
-    let envelope = IpcEnvelope::new(message_types::QUERY_IIS_BINDINGS_RESPONSE, &response).unwrap();
-    let json = serde_json::to_string(&envelope).unwrap();
-    let decoded: QueryIisBindingsResponse = envelope.decode().unwrap();
-
-    assert!(json.contains("\"query-iis-bindings-response\""));
-    assert!(json.contains("\"handoffState\":\"available\""));
-    assert!(json.contains("\"missingRoute\""));
-    assert_eq!(decoded, response);
-
-    let handoff_response = SetIisHandoffResponse {
-      request_id: "iis-on".to_string(),
-      accepted: false,
-      message: "Administrator approval was denied.".to_string(),
-      binding: None,
-      issue: Some(IisIssue::new(
-        IisIssueKind::ElevationDenied,
-        "Administrator approval was denied.",
-      )),
-      steps: vec![IisOperationStep {
-        step_id: "iis-remove-public-binding".to_string(),
-        label: "Remove IIS public binding.".to_string(),
-        privilege_level: IisPrivilegeLevel::Administrator,
-        status: IisOperationStepStatus::Denied,
-        approval: IisElevationApproval::Denied,
-        issue: None,
-      }],
-      follow_up_actions: vec![IisFollowUpAction::RetryElevation],
-    };
-    let envelope =
-      IpcEnvelope::new(message_types::SET_IIS_HANDOFF_RESPONSE, &handoff_response).unwrap();
-    let json = serde_json::to_string(&envelope).unwrap();
-    let decoded: SetIisHandoffResponse = envelope.decode().unwrap();
-
-    assert!(json.contains("\"privilegeLevel\":\"administrator\""));
-    assert!(json.contains("\"approval\":\"denied\""));
-    assert!(json.contains("\"retryElevation\""));
-    assert_eq!(decoded, handoff_response);
-
-    let missing_tls = IisIssue::new(
-      IisIssueKind::MissingTlsCertificate,
-      "Missing certificate metadata.",
-    );
-    let json = serde_json::to_string(&missing_tls).unwrap();
-    assert!(json.contains("\"kind\":\"missingTlsCertificate\""));
-
-    let request = SetIisHandoffRequest {
-      request_id: "iis-on".to_string(),
-      binding_id: "Default Web Site|https|*:443:".to_string(),
-      enabled: true,
-      route_host: Some("iis-app.localhost".to_string()),
-    };
-    let envelope = IpcEnvelope::new(message_types::SET_IIS_HANDOFF_REQUEST, &request).unwrap();
-    let json = serde_json::to_string(&envelope).unwrap();
-    let decoded: SetIisHandoffRequest = envelope.decode().unwrap();
-
-    assert!(json.contains("\"set-iis-handoff-request\""));
-    assert!(json.contains("\"routeHost\":\"iis-app.localhost\""));
-    assert_eq!(decoded, request);
   }
 
   #[test]
@@ -838,13 +604,6 @@ mod tests {
     );
     assert_eq!(RuntimeState::idle().status, RuntimeStatus::Idle);
     assert_eq!(ConfigState::idle().status, ConfigApplyStatus::Idle);
-
-    let user_step = IisOperationStep::user("discover", "Discover IIS bindings");
-    assert_eq!(user_step.privilege_level, IisPrivilegeLevel::User);
-    assert_eq!(user_step.approval, IisElevationApproval::NotRequired);
-    let admin_step = IisOperationStep::administrator("restore", "Restore IIS binding");
-    assert_eq!(admin_step.privilege_level, IisPrivilegeLevel::Administrator);
-    assert_eq!(admin_step.status, IisOperationStepStatus::RequiresElevation);
 
     let now = Utc::now();
     let identity = EntrypointInstanceIdentity::new(now);
@@ -998,9 +757,6 @@ mod tests {
         domain_key: "app.localhost".to_string(),
         enabled: true,
       },
-      QueryIisBindingsRequest {
-        request_id: "iis-bindings".to_string()
-      },
       QueryLogsRequest {
         request_id: "logs".to_string(),
         stream: LogStreamIdentity::domain("app.localhost"),
@@ -1044,12 +800,8 @@ mod tests {
     let variants = serde_json::json!({
       "runtime": [RuntimeStatus::Unknown, RuntimeStatus::NotResolved, RuntimeStatus::Resolved, RuntimeStatus::Running, RuntimeStatus::Unhealthy, RuntimeStatus::Idle],
       "config": [ConfigApplyStatus::Unknown, ConfigApplyStatus::NotApplied, ConfigApplyStatus::Applied, ConfigApplyStatus::Failed, ConfigApplyStatus::Idle],
-      "history": [HistoryKind::Registration, HistoryKind::Runtime, HistoryKind::Config, HistoryKind::Iis, HistoryKind::Autostart, HistoryKind::Log],
+      "history": [HistoryKind::Registration, HistoryKind::Runtime, HistoryKind::Config, HistoryKind::Autostart, HistoryKind::Log],
       "autostart": [AutostartStatus::Unknown, AutostartStatus::Disabled, AutostartStatus::Enabled, AutostartStatus::Unsupported, AutostartStatus::Misconfigured],
-      "iis": [IisHandoffState::Available, IisHandoffState::HandedOff, IisHandoffState::Unsupported, IisHandoffState::Conflict, IisHandoffState::MissingRoute, IisHandoffState::Unavailable, IisHandoffState::Busy],
-      "steps": [IisOperationStepStatus::Pending, IisOperationStepStatus::Succeeded, IisOperationStepStatus::RequiresElevation, IisOperationStepStatus::Approved, IisOperationStepStatus::Denied, IisOperationStepStatus::Failed, IisOperationStepStatus::Skipped, IisOperationStepStatus::Unsupported],
-      "approval": [IisElevationApproval::NotRequired, IisElevationApproval::Required, IisElevationApproval::Approved, IisElevationApproval::Denied, IisElevationApproval::Unsupported],
-      "followUp": [IisFollowUpAction::RetryElevation, IisFollowUpAction::RollbackHandoff, IisFollowUpAction::RetryRestore, IisFollowUpAction::RemoveLoopbackBinding, IisFollowUpAction::ClearRestoreMetadata],
     });
 
     assert_eq!(decoded, state_response);

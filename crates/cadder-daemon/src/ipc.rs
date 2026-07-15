@@ -17,12 +17,11 @@ use cadder_ipc::{
   IpcEnvelope, LegacyCorrelatedRequest, LogAttributionKind, LogSeverity, LogStreamIdentity,
   OPERATION_REGISTRY, OperationAccess, OperationDeadlineClass, OperationShape, PROTOCOL_VERSION,
   ProtocolCapabilities, ProtocolError, ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse,
-  ProtocolVersion, ProtocolVersionRange, QueryAutostartRequest, QueryIisBindingsRequest,
-  QueryLogsRequest, QueryStateRequest, RegisterEntrypointRequest, RequestId,
-  SUPPORTED_PROTOCOL_VERSIONS, ServerHandshakeFrame, ServerHello, SetAutostartRequest,
-  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  ShutdownDaemonRequest, StateChangedEvent, StateStreamGap, StateStreamHeartbeat,
-  StateStreamRecord, SubscribeStateRequest, UnregisterEntrypointRequest,
+  ProtocolVersion, ProtocolVersionRange, QueryAutostartRequest, QueryLogsRequest,
+  QueryStateRequest, RegisterEntrypointRequest, RequestId, SUPPORTED_PROTOCOL_VERSIONS,
+  ServerHandshakeFrame, ServerHello, SetAutostartRequest, SetDomainEnabledRequest,
+  SetEntrypointEnabledRequest, ShutdownDaemonRequest, StateChangedEvent, StateStreamGap,
+  StateStreamHeartbeat, StateStreamRecord, SubscribeStateRequest, UnregisterEntrypointRequest,
   ensure_compatible_protocol_version, message_types, new_request_id,
 };
 use fs4::{FileExt, TryLockError};
@@ -1341,7 +1340,6 @@ fn owned_mutation_uses_worker(message_type: &str) -> bool {
       | message_types::SET_ENTRYPOINT_ENABLED_REQUEST
       | message_types::SET_DOMAIN_ENABLED_REQUEST
       | message_types::SET_AUTOSTART_REQUEST
-      | message_types::SET_IIS_HANDOFF_REQUEST
   )
 }
 
@@ -1406,9 +1404,6 @@ where
     ),
     message_types::SET_AUTOSTART_REQUEST => {
       decode_owned_request!(SetAutostartRequest, OwnedMutationRequest::SetAutostart)
-    }
-    message_types::SET_IIS_HANDOFF_REQUEST => {
-      decode_owned_request!(SetIisHandoffRequest, OwnedMutationRequest::SetIisHandoff)
     }
     _ => unreachable!("owned mutation supervisor called for an untracked operation"),
   };
@@ -1695,7 +1690,6 @@ enum OwnedMutationRequest {
   SetEntrypointEnabled(SetEntrypointEnabledRequest),
   SetDomainEnabled(SetDomainEnabledRequest),
   SetAutostart(SetAutostartRequest),
-  SetIisHandoff(SetIisHandoffRequest),
 }
 
 impl OwnedMutationRequest {
@@ -1707,7 +1701,6 @@ impl OwnedMutationRequest {
       Self::SetEntrypointEnabled(_) => message_types::SET_ENTRYPOINT_ENABLED_RESPONSE,
       Self::SetDomainEnabled(_) => message_types::SET_DOMAIN_ENABLED_RESPONSE,
       Self::SetAutostart(_) => message_types::SET_AUTOSTART_RESPONSE,
-      Self::SetIisHandoff(_) => message_types::SET_IIS_HANDOFF_RESPONSE,
     }
   }
 
@@ -1763,9 +1756,6 @@ impl OwnedMutationRequest {
       Self::SetAutostart(request) => Ok(OwnedMutationResponse::Autostart(
         state.set_autostart_fenced(request, &fence).await?,
       )),
-      Self::SetIisHandoff(request) => Ok(OwnedMutationResponse::Iis(Box::new(
-        state.set_iis_handoff_fenced(request, &fence).await?,
-      ))),
     }
   }
 }
@@ -1776,7 +1766,6 @@ enum OwnedMutationResponse {
   Register(cadder_ipc::RegisterEntrypointResponse),
   Basic(cadder_ipc::BasicResponse),
   Autostart(cadder_ipc::SetAutostartResponse),
-  Iis(Box<cadder_ipc::SetIisHandoffResponse>),
 }
 
 fn operation_uses_fence(definition: &cadder_ipc::OperationDefinition) -> bool {
@@ -2361,18 +2350,6 @@ where
         .set_domain_enabled_fenced(request, mutation_fence(operation_fence)?)
         .await?;
       send_response!(message_types::SET_DOMAIN_ENABLED_RESPONSE, response);
-    }
-    message_types::QUERY_IIS_BINDINGS_REQUEST => {
-      let request = decode_request!(QueryIisBindingsRequest);
-      let response = state.query_iis_bindings(request.request_id).await;
-      send_response!(message_types::QUERY_IIS_BINDINGS_RESPONSE, response);
-    }
-    message_types::SET_IIS_HANDOFF_REQUEST => {
-      let request = decode_request!(SetIisHandoffRequest);
-      let response = state
-        .set_iis_handoff_fenced(request, mutation_fence(operation_fence)?)
-        .await?;
-      send_response!(message_types::SET_IIS_HANDOFF_RESPONSE, response);
     }
     message_types::QUERY_LOGS_REQUEST => {
       let request = decode_request!(QueryLogsRequest);
@@ -4531,16 +4508,14 @@ fn prepend_path_dir(command: &mut Command, dir: &std::path::Path) {
 mod tests {
   use super::*;
   use crate::{
-    CaddyConfigCoordinator, IisBindingRecord, IisProvider, IpcEndpoint, PrivilegeStatus,
-    discover_ipc_endpoint, logs::LogQuery, operation_fence::OperationFenceAuthority,
-    state::RegistrationPublishTestHook,
+    CaddyConfigCoordinator, IpcEndpoint, PrivilegeStatus, discover_ipc_endpoint, logs::LogQuery,
+    operation_fence::OperationFenceAuthority, state::RegistrationPublishTestHook,
   };
   use cadder_ipc::{
     ActivationState, AutostartMode, BasicResponse, EntrypointInstanceIdentity,
-    EntrypointRegistration, IisHandoffState, IpcEnvelope, OPERATION_REGISTRY, OwnerProcessIdentity,
-    ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, QueryIisBindingsRequest,
-    QueryIisBindingsResponse, QueryStateRequest, QueryStateResponse, ShimRunMetadata, SourcePath,
-    message_types, new_request_id,
+    EntrypointRegistration, IpcEnvelope, OPERATION_REGISTRY, OwnerProcessIdentity,
+    ProtocolErrorCode, ProtocolErrorKind, ProtocolErrorResponse, QueryStateRequest,
+    QueryStateResponse, ShimRunMetadata, SourcePath, message_types, new_request_id,
   };
   use chrono::Utc;
   use std::{env, ffi::OsString, fs, future::Future, future::pending};
@@ -4566,7 +4541,6 @@ mod tests {
         message_types::HEARTBEAT_ENTRYPOINT_REQUEST,
         message_types::SET_ENTRYPOINT_ENABLED_REQUEST,
         message_types::SET_DOMAIN_ENABLED_REQUEST,
-        message_types::SET_IIS_HANDOFF_REQUEST,
         message_types::SET_AUTOSTART_REQUEST,
       ]
     );
@@ -4596,9 +4570,6 @@ mod tests {
     ));
     assert!(owned_mutation_uses_worker(
       message_types::SET_AUTOSTART_REQUEST
-    ));
-    assert!(owned_mutation_uses_worker(
-      message_types::SET_IIS_HANDOFF_REQUEST
     ));
     assert!(!owned_mutation_uses_worker(
       message_types::QUERY_STATE_REQUEST
@@ -7924,61 +7895,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn daemon_server_query_iis_bindings_uses_fake_provider_over_ipc() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    paths.ensure_dirs().unwrap();
-    let available = iis_binding("Default Web Site", "http", "*:80:app.localhost");
-    let missing_route = iis_binding("Default Web Site", "https", "*:443:");
-    let available_id = available.binding_id();
-    let missing_route_id = missing_route.binding_id();
-    let state = DaemonState::with_iis_provider(
-      CaddyConfigCoordinator::new_mock(paths.clone()),
-      IisProvider::fake(vec![available, missing_route]),
-    );
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let daemon = tokio::spawn(DaemonServer::new(paths.clone(), state).run_until(shutdown_rx));
-    wait_for_ready(&paths).await;
-    let client = CadderClient::new(paths.clone());
-
-    let response: QueryIisBindingsResponse = client
-      .request(
-        message_types::QUERY_IIS_BINDINGS_REQUEST,
-        message_types::QUERY_IIS_BINDINGS_RESPONSE,
-        &QueryIisBindingsRequest {
-          request_id: "query-fake-iis".to_string(),
-        },
-      )
-      .await
-      .unwrap();
-
-    assert!(response.accepted, "{response:?}");
-    assert_eq!(response.request_id, "query-fake-iis");
-    assert_eq!(response.bindings.len(), 2);
-    let available = response
-      .bindings
-      .iter()
-      .find(|binding| binding.identity.binding_id == available_id)
-      .unwrap();
-    let missing_route = response
-      .bindings
-      .iter()
-      .find(|binding| binding.identity.binding_id == missing_route_id)
-      .unwrap();
-    assert_eq!(available.handoff_state, IisHandoffState::Available);
-    assert!(available.issue.is_none());
-    assert_eq!(missing_route.handoff_state, IisHandoffState::MissingRoute);
-    assert!(missing_route.issue.is_some());
-
-    shutdown_tx.send(true).unwrap();
-    timeout(Duration::from_secs(2), daemon)
-      .await
-      .unwrap()
-      .unwrap()
-      .unwrap();
-  }
-
-  #[tokio::test]
   async fn ensure_daemon_running_returns_when_socket_already_available() {
     let server = ScriptedIpcServer::start(|_conn| async move {});
 
@@ -8570,10 +8486,6 @@ mod tests {
       .expect("peer denial should not wait for a protocol request")
       .unwrap();
     assert_eq!(read, 0, "peer denial should close without a response");
-  }
-
-  fn iis_binding(site: &str, protocol: &str, binding: &str) -> IisBindingRecord {
-    IisBindingRecord::from_binding_information(site, protocol, binding).unwrap()
   }
 
   async fn write_basic_response(writer: &mut tokio::io::WriteHalf<Stream>, message_type: &str) {

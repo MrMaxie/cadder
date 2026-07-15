@@ -3,7 +3,6 @@ mod caddy;
 mod caddy_image;
 mod caddy_path_trust;
 mod config;
-mod iis;
 mod ipc;
 mod ipc_client_error;
 mod ipc_codec;
@@ -34,7 +33,6 @@ pub use caddy::{
   RealCaddyResolver,
 };
 pub use config::{CONFIG_FILE_NAME, CadderConfig, RuntimeConfig};
-pub use iis::{IisBindingRecord, IisMetadataStore, IisProvider};
 pub use ipc::{
   CadderClient, CadderSession, DaemonLaunchMode, DaemonLaunchOptions, DaemonServer,
   StateSubscription, ensure_daemon_running, ensure_daemon_running_with_options,

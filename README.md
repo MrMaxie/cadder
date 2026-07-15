@@ -25,7 +25,7 @@ OpenSpec is the planning source of truth for architecture, requirements, design 
 1. Download the runtime installer or portable archive for your OS from [GitHub Releases](https://github.com/MrMaxie/cadder/releases).
 2. Copy the `cadder.toml` template to the standard per-user Cadder configuration directory and set an absolute `defaults.real_caddy` path, or place a trusted real `caddy` on `PATH`.
 3. Run `cadder setup shim`, start `cadderd`, then run a project through the optional `caddy` alias.
-4. Use `cadder` for automation-friendly state, log, diagnostics, IIS, autostart, daemon lifecycle, and TUI workflows.
+4. Use `cadder` for automation-friendly state, log, diagnostics, autostart, daemon lifecycle, and TUI workflows.
 
 ## Commands
 

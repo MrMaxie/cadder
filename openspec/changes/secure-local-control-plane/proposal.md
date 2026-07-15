@@ -1,6 +1,6 @@
 ## Why
 
-Cadder cannot safely become the single owner of a user's local Caddy runtime while its control plane accepts unbounded frames and connections, derives client identity too late, and lets project-local input influence executable selection. The shim also treats a broken transport as immediate detachment instead of a bounded lease interruption. This slice establishes the trust boundary that every later CLI, TUI, runtime, and IIS operation depends on.
+Cadder cannot safely become the single owner of a user's local Caddy runtime while its control plane accepts unbounded frames and connections, derives client identity too late, and lets project-local input influence executable selection. The shim also treats a broken transport as immediate detachment instead of a bounded lease interruption. This slice establishes the trust boundary that every later CLI, TUI, and runtime operation depends on.
 
 ## Requirement IDs
 
@@ -35,7 +35,6 @@ The implementation touches `cadder-protocol`, `cadder-daemon`, `cadderd`, `cadde
 
 - Private Caddy Admin API transport, transactional `/load`, last-known-good configuration, drift repair, and the complete Caddyfile allowlist remain in `stabilize-caddy-runtime`.
 - Bounded collection paging, final public view-models, generated JSON Schemas, and stable CLI output remain in `deliver-operator-cli`.
-- The elevated IIS helper, handle-inheritance boundary, and its typed plan channel remain in `complete-windows-iis-handoff` together with `IPC-002`.
 - Full managed-run readiness, durable desired activation, the final entrypoint state model, tombstones, and failed-removal presentation remain in `stabilize-state-observability` and `deliver-operator-cli` together with `REG-001`, `REG-008`, and `REG-009`. This slice implements only the stable key and public ID needed by `REG-002`, not the remaining desired-state behavior in `REG-009`.
 - The complete runtime configuration schema, listener-collision checks, retention settings, and status/doctor source presentation remain in their owning runtime, observability, and operator changes together with `RUN-008`. This slice accepts only the explicit real-Caddy selector needed by `CAD-001`.
 - Web, Tauri, remote APIs, and MCP surfaces remain outside Cadder 1.0.

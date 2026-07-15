@@ -848,7 +848,6 @@ mod tests {
 
     assert!(message.contains("caddy shim is running with elevated privileges"));
     assert!(message.contains("user that owns the Cadder runtime"));
-    assert!(message.contains("IIS handoff"));
   }
 
   #[test]

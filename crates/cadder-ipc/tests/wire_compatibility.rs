@@ -124,30 +124,6 @@ fn wire_compatibility_public_response_dtos_accept_recursive_additions() {
     "domainKey": null,
     "channel": "control"
   });
-  let issue = json!({"kind": "busy", "message": "IIS is busy."});
-  let binding = json!({
-    "identity": {
-      "bindingId": "binding-1",
-      "siteName": "Example",
-      "protocol": "http",
-      "bindingInformation": "*:80:app.localhost"
-    },
-    "ipAddress": "*",
-    "port": 80,
-    "hostHeader": "app.localhost",
-    "domainKey": "app.localhost",
-    "handoffState": "available",
-    "issue": issue.clone(),
-    "restoreMetadata": {
-      "siteName": "Example",
-      "protocol": "http",
-      "ipAddress": "*",
-      "port": 80,
-      "hostHeader": "app.localhost",
-      "bindingInformation": "*:80:app.localhost"
-    }
-  });
-
   assert_additive_json::<RegisterEntrypointResponse>(json!({
     "requestId": "register-response-1",
     "accepted": true,
@@ -233,29 +209,6 @@ fn wire_compatibility_public_response_dtos_accept_recursive_additions() {
     "hasGap": false,
     "hasMoreBefore": false,
     "truncatedByRetention": false
-  }));
-  assert_additive_json::<QueryIisBindingsResponse>(json!({
-    "requestId": "iis-query-1",
-    "accepted": true,
-    "message": "Bindings returned.",
-    "bindings": [binding.clone()],
-    "issue": issue.clone()
-  }));
-  assert_additive_json::<SetIisHandoffResponse>(json!({
-    "requestId": "iis-set-1",
-    "accepted": true,
-    "message": "Handoff planned.",
-    "binding": binding,
-    "issue": issue.clone(),
-    "steps": [{
-      "stepId": "elevate",
-      "label": "Apply binding",
-      "privilegeLevel": "administrator",
-      "status": "requiresElevation",
-      "approval": "required",
-      "issue": issue
-    }],
-    "followUpActions": ["retryElevation"]
   }));
   assert_additive_value(ProtocolErrorResponse::rejected(
     Some(RequestId::parse("protocol-error-1").unwrap()),
@@ -415,12 +368,6 @@ fn wire_compatibility_unknown_discriminators_are_not_reinterpreted() {
     AutostartStatus,
     ConfigApplyStatus,
     HistoryKind,
-    IisElevationApproval,
-    IisFollowUpAction,
-    IisHandoffState,
-    IisIssueKind,
-    IisOperationStepStatus,
-    IisPrivilegeLevel,
     LogAttributionKind,
     LogEntryKind,
     LogSeverity,
@@ -589,7 +536,6 @@ define_mutation_contract_helpers!(
     message_types::SET_DOMAIN_ENABLED_REQUEST,
     SetDomainEnabledPayload
   ),
-  (message_types::SET_IIS_HANDOFF_REQUEST, SetIisHandoffPayload),
   (message_types::SET_AUTOSTART_REQUEST, SetAutostartPayload),
   (
     message_types::SHUTDOWN_DAEMON_REQUEST,
@@ -807,65 +753,8 @@ fn wire_discriminators() -> Value {
       HistoryKind::Registration,
       HistoryKind::Runtime,
       HistoryKind::Config,
-      HistoryKind::Iis,
       HistoryKind::Autostart,
       HistoryKind::Log,
-    ]),
-    "iisElevationApproval": enum_wire_values!(IisElevationApproval => [
-      IisElevationApproval::NotRequired,
-      IisElevationApproval::Required,
-      IisElevationApproval::Approved,
-      IisElevationApproval::Denied,
-      IisElevationApproval::Unsupported,
-    ]),
-    "iisFollowUpAction": enum_wire_values!(IisFollowUpAction => [
-      IisFollowUpAction::RetryElevation,
-      IisFollowUpAction::RollbackHandoff,
-      IisFollowUpAction::RetryRestore,
-      IisFollowUpAction::RemoveLoopbackBinding,
-      IisFollowUpAction::ClearRestoreMetadata,
-    ]),
-    "iisHandoffState": enum_wire_values!(IisHandoffState => [
-      IisHandoffState::Available,
-      IisHandoffState::HandedOff,
-      IisHandoffState::Unsupported,
-      IisHandoffState::Conflict,
-      IisHandoffState::MissingRoute,
-      IisHandoffState::Unavailable,
-      IisHandoffState::Busy,
-    ]),
-    "iisIssueKind": enum_wire_values!(IisIssueKind => [
-      IisIssueKind::IisUnavailable,
-      IisIssueKind::HandoffUnavailable,
-      IisIssueKind::InsufficientPrivileges,
-      IisIssueKind::ElevationRequired,
-      IisIssueKind::ElevationDenied,
-      IisIssueKind::ElevationUnsupported,
-      IisIssueKind::UnsupportedBindingShape,
-      IisIssueKind::MissingTlsCertificate,
-      IisIssueKind::Conflict,
-      IisIssueKind::MissingBinding,
-      IisIssueKind::MissingRoute,
-      IisIssueKind::RollbackSucceeded,
-      IisIssueKind::RollbackFailed,
-      IisIssueKind::RestoreFailed,
-      IisIssueKind::Busy,
-      IisIssueKind::ProviderError,
-    ]),
-    "iisOperationStepStatus": enum_wire_values!(IisOperationStepStatus => [
-      IisOperationStepStatus::Pending,
-      IisOperationStepStatus::Succeeded,
-      IisOperationStepStatus::RequiresElevation,
-      IisOperationStepStatus::Approved,
-      IisOperationStepStatus::Denied,
-      IisOperationStepStatus::Failed,
-      IisOperationStepStatus::Skipped,
-      IisOperationStepStatus::Unsupported,
-    ]),
-    "iisPrivilegeLevel": enum_wire_values!(IisPrivilegeLevel => [
-      IisPrivilegeLevel::User,
-      IisPrivilegeLevel::Administrator,
-      IisPrivilegeLevel::Unsupported,
     ]),
     "logAttributionKind": enum_wire_values!(LogAttributionKind => [
       LogAttributionKind::Unknown,

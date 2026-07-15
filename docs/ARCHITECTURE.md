@@ -10,9 +10,9 @@ The product contract is limited to the daemon, shim, operator CLI, and TUI. Futu
 
 ## Process Roles
 
-- `cadderd` owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, durable history, native autostart state, IIS handoff metadata, and bounded log storage.
+- `cadderd` owns registrations, local IPC, Caddyfile adaptation, effective Caddy config composition, the Cadder-owned real Caddy process, runtime diagnostics, durable history, native autostart state, and bounded log storage.
 - `caddy` intentionally shadows Caddy for managed `caddy run` commands. It attaches to an already running daemon, registers the caller's config, heartbeats while alive, and unregisters on exit. Non-`run` commands are delegated to the safely resolved real Caddy binary.
-- `cadder` is the only operator-facing v1 binary. Its CLI supports daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, settings, and watch flows. The current TUI slice covers runtime status, entrypoints, domains, retained logs, and explicit daemon recovery. Both surfaces attach through the daemon protocol and render from mockable operator view models.
+- `cadder` is the only operator-facing v1 binary. Its CLI supports daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, autostart, settings, and watch flows. The current TUI slice covers runtime status, entrypoints, domains, retained logs, and explicit daemon recovery. Both surfaces attach through the daemon protocol and render from mockable operator view models.
 - Real Caddy is an external binary. Cadder never embeds Caddy and must not recursively execute its own shim.
 
 All release-facing Cadder binaries expose `--help` and `--version`. Runtime installers and portable archives contain only `cadderd`, `cadder`, `caddy`, and `cadder.toml`.
@@ -38,7 +38,7 @@ Development workflows can select `CADDER_CADDY_BACKEND=mock` or `--caddy-backend
 
 The CLI is the stable automation surface for people, scripts, and agents. It supports `human`, `json`, and `jsonl` output modes where appropriate.
 
-The TUI is the interactive operator surface. Its current slice renders daemon and Caddy status, entrypoints, domains, retained logs, and recovery actions from the shared operator view models. It remains useful when `cadderd` is offline by showing daemon-unavailable status and a visible start action. Later OpenSpec changes can add dedicated IIS handoff, autostart, settings, diagnostics, and history views without embedding local state in the TUI.
+The TUI is the interactive operator surface. Its current slice renders daemon and Caddy status, entrypoints, domains, retained logs, and recovery actions from the shared operator view models. It remains useful when `cadderd` is offline by showing daemon-unavailable status and a visible start action. Later OpenSpec changes can add dedicated autostart, settings, diagnostics, and history views without embedding local state in the TUI.
 
 Web and Tauri GUI are future surfaces. They may return only as clients of the same daemon protocol and shared view-model contracts. Remote pairing, authentication, multi-host management, and update channels are out of scope for the reset.
 
@@ -57,8 +57,6 @@ Supported v1.0 public messages include:
 - subscribe to state changes;
 - set entrypoint enabled;
 - set domain enabled;
-- query Windows IIS bindings;
-- set Windows IIS handoff enabled or disabled;
 - query Caddy logs;
 - query durable history;
 - query and set native autostart mode;
@@ -102,16 +100,6 @@ Cadder stores durable profile data in owner-protected files. Versioned JSON docu
 One file-store worker owns `storage.lock` and serializes commits, queries, maintenance, and shutdown. Shutdown closes admission, drains accepted records, flushes active segments, and joins the worker before the daemon removes IPC discovery or releases process ownership. If a durability call exceeds its normal budget, Cadder keeps ownership until the worker finishes.
 
 The store rejects unsupported schemas and invalid complete records. After a crash, it may remove only an incomplete final line. Corrupt authoritative files remain available as owner-protected recovery evidence. Live process handles, subscriptions, connection leases, and daemon-instance ownership stay in memory and are never restored as durable leases.
-
-## Windows IIS Handoff
-
-On Windows, the daemon exposes a small IIS provider behind `query-iis-bindings` and `set-iis-handoff`. The provider is platform-gated: non-Windows builds return an IIS-unavailable issue instead of loading Windows-only dependencies.
-
-Discovery, route planning, restore metadata writes, Caddy config updates, and daemon/operator operation stay in the normal user context. Only IIS binding mutations are classified as administrator steps and are executed as a short privileged batch through the OS elevation prompt.
-
-Supported handoff shapes are IIS `http` port 80 and `https` port 443 bindings when Cadder can identify one route host. Cadder persists restore metadata before mutating IIS, creates deterministic loopback backend bindings, injects a Caddy reverse-proxy route, and supports restore/rollback follow-up actions.
-
-Windows Sandbox remains the preferred smoke boundary for installer, autostart, shim, daemon lifecycle, IIS handoff, and cleanup tests because those checks intentionally touch OS-level state.
 
 ## Packaging
 

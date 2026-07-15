@@ -73,10 +73,6 @@ Every TUI mutation SHALL invoke the same operator operation and validation used 
 - **THEN** the TUI invokes the same operation as `cadder entrypoint forget`
 - **AND** it refreshes the authoritative entrypoint list while retained logs and history remain available
 
-#### Scenario: Privileged IIS action requires review
-- **WHEN** an operator selects an IIS handoff or restore action
-- **THEN** the TUI displays the immutable preview plan and requires explicit confirmation before invoking the same plan-based apply or restore operation exposed by the CLI
-
 ### Requirement: TUI-006: Structured log inspection
 The TUI SHALL render structured daemon log events for runtime, entrypoint, and domain streams. It SHALL support stream and minimum-severity selection, cursor-based continuation, inclusive time-range queries, tail follow, manual pause through scrolling, and explicit notices for empty, stale, removed, read-error, retention-gap, and truncation states. Scrolling away from the newest entry SHALL pause follow mode, and returning to the end SHALL resume it.
 

@@ -39,7 +39,6 @@ export default defineConfig({
               label: 'Windows',
               items: [
                 { label: 'Overview', slug: 'cookbooks/windows/overview' },
-                { label: 'IIS handoff', slug: 'cookbooks/windows/iis' },
               ],
             },
             { label: 'macOS', slug: 'cookbooks/macos' },

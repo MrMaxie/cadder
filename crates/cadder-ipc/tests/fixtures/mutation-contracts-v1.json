@@ -102,17 +102,6 @@
     },
     {
       "protocolVersion": { "major": 1, "minor": 0 },
-      "operation": "set-iis-handoff-request",
-      "requestId": "iis-handoff-1",
-      "payloadCapabilities": [],
-      "payload": {
-        "bindingId": "binding-1",
-        "enabled": true,
-        "routeHost": "app.localhost"
-      }
-    },
-    {
-      "protocolVersion": { "major": 1, "minor": 0 },
       "operation": "set-autostart-request",
       "requestId": "autostart-1",
       "payloadCapabilities": [],

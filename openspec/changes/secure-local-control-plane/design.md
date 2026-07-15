@@ -34,8 +34,6 @@ Cadder protects every directly spawned Caddy process tree. Unix uses the `proces
 
 - This design does not define the final paged snapshot/view-model protocol.
 - This design does not expose the private Caddy Admin API or complete configuration transactions.
-- This design does not implement IIS mutations or elevation.
-- This design does not complete `IPC-002`; the future IIS helper and handle-inheritance proof stay in the IIS change.
 - This design does not complete managed-run readiness, failed-removal snapshots, tombstones, or durable desired activation from `REG-001`, `REG-008`, and `REG-009`. It implements the stable key and public registration ID required for `REG-002` without claiming the remaining desired-state behavior in `REG-009`.
 - This design does not complete the full runtime configuration and status/doctor contract in `RUN-008`; it moves only the real-Caddy selector required by `CAD-001`.
 - This design does not make pre-1.0 protocol versions wire-compatible.
@@ -44,7 +42,7 @@ Lease expiry still uses the existing coordinator's product-level prepare, apply,
 
 ## Ownership and trust boundaries
 
-The runtime owner is the effective user that starts the per-user daemon. This change authenticates that principal at the control plane; the separate helper-role and elevation construction boundary remains part of `IPC-002` and the IIS change.
+The runtime owner is the effective user that starts the per-user daemon. This change authenticates that principal at the control plane.
 
 On Linux and macOS, the runtime directory is mode `0700`, the filesystem socket and discovery file are mode `0600`, and the accepted peer effective UID must equal the daemon effective UID before a protocol byte is read. On Windows, the runtime directory, discovery file, and named pipe use an owner-only DACL, and the pipe rejects remote clients. The connection boundary consumes exactly one ASCII space byte (`0x20`) as a transport-authentication preface under the original acceptance deadline. The preface is not a protocol frame, secret, or authority claim. Without an intervening await point, the server impersonates the named-pipe client, reads and copies the thread-token user SID, verifies `RevertToSelf`, and compares the SID to the daemon owner. Only then can the connection reach protocol buffering. A revert failure terminates the daemon; PID remains diagnostic metadata only.
 
@@ -92,8 +90,6 @@ A central `OperationRegistry` maps every message type to its capability, immutab
 | `runtime-state` | query state | read-only, unary | ordinary | yes |
 | `state-subscription` | subscribe state | read-only, server stream | stream | yes |
 | `activation-control` | set entrypoint/domain enabled | mutation, unary | reload | no |
-| `iis-handoff` | query bindings | read-only, unary | ordinary | yes |
-| `iis-handoff` | set handoff | mutation, unary | reload | no |
 | `logs` | query logs | read-only, unary | ordinary | yes |
 | `history` | query history | read-only, unary | ordinary | yes |
 | `autostart` | query autostart | read-only, unary | ordinary | yes |

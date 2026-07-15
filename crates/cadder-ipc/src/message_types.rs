@@ -15,8 +15,6 @@ request_message_types! {
   SUBSCRIBE_STATE_REQUEST = "subscribe-state-request";
   SET_ENTRYPOINT_ENABLED_REQUEST = "set-entrypoint-enabled-request";
   SET_DOMAIN_ENABLED_REQUEST = "set-domain-enabled-request";
-  QUERY_IIS_BINDINGS_REQUEST = "query-iis-bindings-request";
-  SET_IIS_HANDOFF_REQUEST = "set-iis-handoff-request";
   QUERY_LOGS_REQUEST = "query-logs-request";
   QUERY_HISTORY_REQUEST = "query-history-request";
   QUERY_AUTOSTART_REQUEST = "query-autostart-request";
@@ -33,8 +31,6 @@ pub const STATE_STREAM_HEARTBEAT: &str = "state-stream-heartbeat";
 pub const STATE_STREAM_GAP: &str = "state-stream-gap";
 pub const SET_ENTRYPOINT_ENABLED_RESPONSE: &str = "set-entrypoint-enabled-response";
 pub const SET_DOMAIN_ENABLED_RESPONSE: &str = "set-domain-enabled-response";
-pub const QUERY_IIS_BINDINGS_RESPONSE: &str = "query-iis-bindings-response";
-pub const SET_IIS_HANDOFF_RESPONSE: &str = "set-iis-handoff-response";
 pub const QUERY_LOGS_RESPONSE: &str = "query-logs-response";
 pub const QUERY_HISTORY_RESPONSE: &str = "query-history-response";
 pub const QUERY_AUTOSTART_RESPONSE: &str = "query-autostart-response";

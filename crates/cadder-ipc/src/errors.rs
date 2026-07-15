@@ -13,7 +13,6 @@ pub mod capabilities {
   pub const DAEMON_LIFECYCLE: &str = "daemon-lifecycle";
   pub const ENTRYPOINT_REGISTRATION: &str = "entrypoint-registration";
   pub const HISTORY: &str = "history";
-  pub const IIS_HANDOFF: &str = "iis-handoff";
   pub const LOGS: &str = "logs";
   pub const RUNTIME_STATE: &str = "runtime-state";
   pub const STATE_SUBSCRIPTION: &str = "state-subscription";
@@ -25,7 +24,6 @@ pub mod capabilities {
     DAEMON_LIFECYCLE,
     ENTRYPOINT_REGISTRATION,
     HISTORY,
-    IIS_HANDOFF,
     LOGS,
     RUNTIME_STATE,
     STATE_SUBSCRIPTION,

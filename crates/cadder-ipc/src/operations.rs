@@ -523,30 +523,6 @@ const OPERATIONS: &[OperationDefinition] = &[
     ),
   ),
   OperationDefinition::new(
-    message_types::QUERY_IIS_BINDINGS_REQUEST,
-    PROTOCOL_VERSION_1_0,
-    capabilities::IIS_HANDOFF,
-    OperationPolicy::new(
-      OperationAccess::ReadOnly,
-      OperationShape::Unary,
-      OperationDeadlineClass::Ordinary,
-      true,
-      NO_PAYLOAD_EXTENSIONS,
-    ),
-  ),
-  OperationDefinition::new(
-    message_types::SET_IIS_HANDOFF_REQUEST,
-    PROTOCOL_VERSION_1_0,
-    capabilities::IIS_HANDOFF,
-    OperationPolicy::new(
-      OperationAccess::Mutation,
-      OperationShape::Unary,
-      OperationDeadlineClass::Reload,
-      false,
-      NO_PAYLOAD_EXTENSIONS,
-    ),
-  ),
-  OperationDefinition::new(
     message_types::QUERY_LOGS_REQUEST,
     PROTOCOL_VERSION_1_0,
     capabilities::LOGS,
