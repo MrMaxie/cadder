@@ -1,6 +1,7 @@
 //! Unix ownership and peer-authentication primitives for local IPC.
 
 use crate::RuntimePaths;
+use fs4::FileExt;
 use interprocess::local_socket::{
   GenericFilePath, ListenerOptions, Name, ToFsName,
   tokio::{Stream, prelude::*},
@@ -24,6 +25,29 @@ use interprocess::os::unix::local_socket::ListenerOptionsExt;
 const OWNER_DIRECTORY_MODE: u32 = 0o700;
 const OWNER_FILE_MODE: u32 = 0o600;
 const PORTABLE_SOCKET_PATH_MAX_BYTES: usize = 103;
+
+/// Serializes only socket recovery while a daemon is claiming its endpoint.
+///
+/// The advisory lock is rooted next to the Unix socket, never in the runtime
+/// directory, and is released by the kernel if its owner exits. It therefore
+/// cannot become persistent runtime ownership or block a later daemon.
+#[derive(Debug)]
+pub(crate) struct SocketClaimGuard(File);
+
+impl SocketClaimGuard {
+  pub(crate) fn acquire(paths: &RuntimePaths) -> io::Result<Self> {
+    secure_socket_directory()?;
+    let path = unix_socket_path(paths).with_extension("reclaim");
+    let file = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .mode(OWNER_FILE_MODE)
+      .open(path)?;
+    file.lock_exclusive()?;
+    Ok(Self(file))
+  }
+}
 
 /// Creates the runtime and socket transport directories for the effective user.
 ///
@@ -182,6 +206,17 @@ pub(crate) fn secure_bound_socket(paths: &RuntimePaths) -> io::Result<()> {
     ExpectedFileType::Socket,
     OWNER_FILE_MODE,
   )
+}
+
+/// Removes a non-responsive owner-only socket before retrying a bind.
+///
+/// Callers must first attempt an authenticated connection. This helper only
+/// permits reclaiming the expected socket type in Cadder's private directory;
+/// it never deletes an arbitrary runtime path.
+pub(crate) fn remove_stale_socket(paths: &RuntimePaths) -> io::Result<()> {
+  let path = unix_socket_path(paths);
+  secure_bound_socket(paths)?;
+  fs::remove_file(&path)
 }
 
 fn unix_socket_directory() -> PathBuf {

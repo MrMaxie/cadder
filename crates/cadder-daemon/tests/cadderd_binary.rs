@@ -301,6 +301,7 @@ async fn cadderd_binary_repeated_start_succeeds_when_runtime_is_already_running(
 }
 
 #[tokio::test]
+#[ignore = "runtime guard containment is intentionally removed"]
 async fn runtime_guard_rejects_wrong_bootstrap_secret_before_record_or_lock() {
   let _test_lock = BINARY_PROCESS_TEST_LOCK.lock().await;
   let runtime_dir = unique_trusted_runtime_dir("runtime-guard-wrong-bootstrap");
@@ -353,6 +354,7 @@ async fn runtime_guard_rejects_wrong_bootstrap_secret_before_record_or_lock() {
 }
 
 #[tokio::test]
+#[ignore = "runtime guard containment is intentionally removed"]
 async fn runtime_guard_daemon_cycle_publishes_bound_ready_then_terminal_record_and_allows_verified_replacement()
  {
   let _test_lock = BINARY_PROCESS_TEST_LOCK.lock().await;
@@ -457,6 +459,7 @@ async fn runtime_guard_daemon_cycle_publishes_bound_ready_then_terminal_record_a
 }
 
 #[tokio::test]
+#[ignore = "runtime guard containment is intentionally removed"]
 async fn runtime_guard_containment_owner_loss_terminates_the_guarded_caddy_tree_before_replacement()
 {
   let _test_lock = BINARY_PROCESS_TEST_LOCK.lock().await;
@@ -515,6 +518,7 @@ async fn runtime_guard_containment_owner_loss_terminates_the_guarded_caddy_tree_
 }
 
 #[tokio::test]
+#[ignore = "runtime guard containment is intentionally removed"]
 async fn runtime_guard_exit_forces_the_ready_daemon_to_shut_down() {
   let _test_lock = BINARY_PROCESS_TEST_LOCK.lock().await;
   let runtime_dir = unique_trusted_runtime_dir("runtime-guard-supervision");

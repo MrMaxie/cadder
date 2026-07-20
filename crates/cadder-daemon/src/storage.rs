@@ -2,7 +2,6 @@ use crate::paths::StoragePaths;
 use anyhow::{Context, Result, anyhow, bail};
 use cadder_ipc::{HistoryKind, HistoryRecord, RuntimeDiagnostic, StorageState};
 use chrono::Utc;
-use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -113,7 +112,6 @@ struct MemoryHistoryStore {
 }
 
 struct FileHistoryStore {
-  _lock: File,
   paths: StoragePaths,
   generation: String,
   segment: File,
@@ -832,10 +830,6 @@ impl MemoryHistoryStore {
 impl FileHistoryStore {
   fn open(paths: &StoragePaths) -> Result<Self> {
     secure_storage_directories(paths)?;
-    let lock = open_or_create_owner_only_file(&paths.lock_path())?;
-    FileExt::try_lock(&lock)
-      .map_err(|error| anyhow!("runtime storage is already owned: {error}"))?;
-
     let manifest = load_or_create_manifest(paths)?;
     validate_generation(&manifest.active_generation)?;
     let transaction_dir = paths
@@ -894,7 +888,6 @@ impl FileHistoryStore {
     segment.seek(SeekFrom::End(0))?;
 
     Ok(Self {
-      _lock: lock,
       paths: paths.clone(),
       generation: manifest.active_generation,
       segment,
@@ -1389,20 +1382,6 @@ fn validate_generation(generation: &str) -> Result<()> {
     Ok(())
   } else {
     bail!("runtime storage manifest contains an invalid generation identifier")
-  }
-}
-
-fn open_or_create_owner_only_file(path: &Path) -> Result<File> {
-  match create_owner_only_file(path) {
-    Ok(file) => Ok(file),
-    Err(error)
-      if error
-        .downcast_ref::<io::Error>()
-        .is_some_and(|error| error.kind() == io::ErrorKind::AlreadyExists) =>
-    {
-      open_owner_only_file(path)
-    }
-    Err(error) => Err(error),
   }
 }
 

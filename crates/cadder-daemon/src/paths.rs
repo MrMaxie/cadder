@@ -47,6 +47,7 @@ impl StoragePaths {
     &self.profile_dir
   }
 
+  #[allow(dead_code)]
   pub fn lock_path(&self) -> PathBuf {
     self.profile_dir.join("storage.lock")
   }
@@ -135,26 +136,32 @@ impl RuntimePaths {
     &self.storage_paths
   }
 
+  #[allow(dead_code)]
   pub fn lock_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder.lock")
   }
 
+  #[allow(dead_code)]
   pub fn lock_metadata_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder.lock.json")
   }
 
+  #[allow(dead_code)]
   pub fn containment_lock_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-containment.lock")
   }
 
+  #[allow(dead_code)]
   pub fn containment_record_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-containment.json")
   }
 
+  #[allow(dead_code)]
   pub fn ipc_endpoint_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-ipc.json")
   }
 
+  #[allow(dead_code)]
   pub fn ipc_discovery_lock_path(&self) -> PathBuf {
     self.runtime_dir.join("cadder-ipc.lock")
   }

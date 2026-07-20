@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use cadder_daemon::{
-  CaddyBackendMode, DaemonLaunchMode, DaemonLaunchOptions, DaemonOptions,
-  RuntimeGuardHiddenOptions, RuntimePaths, ensure_daemon_running_with_options, run_daemon,
-  run_runtime_guard,
+  CaddyBackendMode, DaemonLaunchMode, DaemonLaunchOptions, DaemonOptions, RuntimePaths,
+  ensure_daemon_running_with_options, run_daemon,
 };
 use clap::Parser;
 use std::{env, path::PathBuf};
@@ -37,27 +36,12 @@ struct Args {
 
   #[arg(long, hide = true)]
   detach_ready: bool,
-
-  #[arg(long, hide = true)]
-  runtime_guard: bool,
-
-  #[arg(long, hide = true, requires = "runtime_guard")]
-  runtime_guard_instance: Option<String>,
-
-  #[arg(long, hide = true, requires = "runtime_guard")]
-  runtime_guard_owner_generation: Option<String>,
-
-  #[arg(long, hide = true, requires = "runtime_guard")]
-  runtime_guard_commitment: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
   tracing_subscriber::fmt::init();
   let args = Args::parse();
-  if args.runtime_guard {
-    return launch_runtime_guard(args).await;
-  }
   if args.background {
     return launch_background_daemon(args).await;
   }
@@ -69,45 +53,28 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
   });
 
-  let current_exe = env::current_exe().context("resolve current cadderd executable")?;
   run_daemon(
     DaemonOptions {
       runtime_dir: None,
       runtime_profile: None,
       real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,
-      runtime_guard_executable: Some(current_exe),
+      runtime_guard_executable: None,
     },
     shutdown_rx,
   )
   .await
 }
 
-async fn launch_runtime_guard(args: Args) -> Result<()> {
-  let paths = RuntimePaths::resolve(None)?;
-  run_runtime_guard(RuntimeGuardHiddenOptions {
-    paths,
-    daemon_instance_id: args
-      .runtime_guard_instance
-      .context("hidden runtime guard requires its daemon instance")?,
-    owner_generation: args
-      .runtime_guard_owner_generation
-      .context("hidden runtime guard requires its daemon owner generation")?,
-    nonce_commitment: args
-      .runtime_guard_commitment
-      .context("hidden runtime guard requires its nonce commitment")?,
-  })
-  .await
-}
-
 async fn launch_background_daemon(args: Args) -> Result<()> {
   let paths = RuntimePaths::resolve(None)?;
-  let current_exe = env::current_exe().context("resolve current cadderd executable")?;
+  let current_daemon =
+    env::current_exe().context("resolve the cadderd executable for the background daemon")?;
 
   ensure_daemon_running_with_options(
     &paths,
     DaemonLaunchOptions {
-      explicit_daemon: Some(current_exe),
+      explicit_daemon: Some(current_daemon),
       runtime_profile: None,
       real_caddy_override: args.real_caddy_override,
       caddy_backend: args.caddy_backend,

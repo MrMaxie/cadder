@@ -310,6 +310,7 @@ impl PinnedCaddyImage {
     &self.version
   }
 
+  #[allow(dead_code)]
   pub(crate) fn runtime_guard_identity(&self) -> RuntimeGuardPinnedCaddyIdentity {
     RuntimeGuardPinnedCaddyIdentity {
       image: RuntimeGuardImageIdentity {

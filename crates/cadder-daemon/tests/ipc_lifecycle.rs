@@ -1,8 +1,8 @@
 use cadder_daemon::{
   CadderClient, CadderSession, CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer,
-  DaemonState, IpcClientError, IpcClientPhase, IpcEndpoint, IpcEndpointMetadata,
-  IpcEndpointPublication, LocalIpcErrorKind, ProcessRuntime, RealCaddyResolver, RuntimePaths,
-  RuntimeTimeouts, discover_ipc_endpoint, ensure_daemon_running,
+  DaemonState, IpcClientError, IpcClientPhase, IpcEndpointMetadata, IpcEndpointPublication,
+  LocalIpcErrorKind, ProcessRuntime, RealCaddyResolver, RuntimePaths, RuntimeTimeouts,
+  discover_ipc_endpoint, ensure_daemon_running,
 };
 use cadder_ipc::{
   ActivationState, BasicResponse, ClientHello, ConfigApplyStatus, EntrypointInstanceIdentity,
@@ -1901,17 +1901,15 @@ async fn raw_ipc_session(
   BufReader<tokio::io::ReadHalf<Stream>>,
   tokio::io::WriteHalf<Stream>,
 ) {
-  let discovery = discover_ipc_endpoint(paths).unwrap();
-  let name = discovered_test_socket_name(&discovery);
-  let mut conn = Stream::connect(name).await.unwrap();
+  let mut conn = Stream::connect(test_socket_name(paths)).await.unwrap();
   send_test_authentication_preface(&mut conn).await;
   let (read_half, mut writer) = tokio::io::split(conn);
   let mut reader = BufReader::new(read_half);
   let request_id = RequestId::parse(new_request_id("raw-hello")).unwrap();
   let hello = ClientHello {
     request_id: request_id.clone(),
-    runtime_id: discovery.runtime_id.clone().into_boxed_str(),
-    daemon_instance_id: discovery.daemon_instance_id.clone().into_boxed_str(),
+    runtime_id: paths.instance_key().into(),
+    daemon_instance_id: None,
     supported_versions: SUPPORTED_PROTOCOL_VERSIONS,
     capabilities: OPERATION_REGISTRY
       .advertised_capabilities(SUPPORTED_PROTOCOL_VERSIONS.maximum())
@@ -1924,11 +1922,8 @@ async fn raw_ipc_session(
   match frame {
     ServerHandshakeFrame::Accepted(server) => {
       assert_eq!(server.request_id, request_id);
-      assert_eq!(server.runtime_id.as_ref(), discovery.runtime_id);
-      assert_eq!(
-        server.daemon_instance_id.as_ref(),
-        discovery.daemon_instance_id
-      );
+      assert_eq!(server.runtime_id.as_ref(), paths.instance_key());
+      assert!(!server.daemon_instance_id.is_empty());
     }
     ServerHandshakeFrame::Rejected(rejection) => {
       panic!("raw IPC handshake was rejected: {}", rejection.error())
@@ -2020,10 +2015,7 @@ async fn accept_scripted_handshake(conn: Stream, metadata: &IpcEndpointMetadata)
   reader.read_line(&mut line).await.unwrap();
   let hello: ClientHello = serde_json::from_str(&line).unwrap();
   assert_eq!(hello.runtime_id.as_ref(), metadata.runtime_id);
-  assert_eq!(
-    hello.daemon_instance_id.as_ref(),
-    metadata.daemon_instance_id
-  );
+  assert_eq!(hello.daemon_instance_id.as_ref(), None);
   let selected_version = hello
     .supported_versions
     .negotiate(metadata.supported_versions)
@@ -2085,30 +2077,6 @@ fn scripted_listener(paths: &RuntimePaths) -> interprocess::local_socket::tokio:
   #[cfg(unix)]
   fs::set_permissions(test_socket_path(paths), fs::Permissions::from_mode(0o600)).unwrap();
   listener
-}
-
-#[cfg(unix)]
-fn discovered_test_socket_name(metadata: &IpcEndpointMetadata) -> Name<'static> {
-  match &metadata.endpoint {
-    IpcEndpoint::UnixSocket { path } => path
-      .clone()
-      .to_fs_name::<GenericFilePath>()
-      .unwrap()
-      .into_owned(),
-    IpcEndpoint::WindowsNamedPipe { .. } => panic!("unexpected Windows IPC endpoint on Unix"),
-  }
-}
-
-#[cfg(windows)]
-fn discovered_test_socket_name(metadata: &IpcEndpointMetadata) -> Name<'static> {
-  match &metadata.endpoint {
-    IpcEndpoint::WindowsNamedPipe { name } => name
-      .clone()
-      .to_ns_name::<GenericNamespaced>()
-      .unwrap()
-      .into_owned(),
-    IpcEndpoint::UnixSocket { .. } => panic!("unexpected Unix IPC endpoint on Windows"),
-  }
 }
 
 #[cfg(unix)]

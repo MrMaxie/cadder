@@ -14,7 +14,14 @@ pub const SERVER_HELLO_OPERATION: &str = "server-hello";
 pub struct ClientHello {
   pub request_id: RequestId,
   pub runtime_id: Box<str>,
-  pub daemon_instance_id: Box<str>,
+  /// Optional legacy instance identifier.
+  ///
+  /// The local endpoint is the authority for selecting a daemon. New clients
+  /// therefore leave this empty and learn the daemon instance from
+  /// [`ServerHello`]. Keeping the field optional lets a newly built daemon
+  /// reject or accept older clients without a discovery sidecar.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub daemon_instance_id: Option<Box<str>>,
   pub supported_versions: ProtocolVersionRange,
   #[serde(default)]
   pub capabilities: Box<[CapabilityId]>,
@@ -73,12 +80,12 @@ pub struct HandshakeRejection {
 }
 
 impl HandshakeRejection {
-  /// Returns the runtime selected from discovery.
+  /// Returns the runtime selected by the local endpoint.
   pub fn runtime_id(&self) -> &str {
     &self.runtime_id
   }
 
-  /// Returns the daemon instance selected from discovery.
+  /// Returns the daemon instance that rejected the handshake.
   pub fn daemon_instance_id(&self) -> &str {
     &self.daemon_instance_id
   }
@@ -131,7 +138,7 @@ mod tests {
     let hello = ClientHello {
       request_id: RequestId::parse("hello-1").unwrap(),
       runtime_id: "runtime-1".into(),
-      daemon_instance_id: "instance-1".into(),
+      daemon_instance_id: Some("instance-1".into()),
       supported_versions: SUPPORTED_PROTOCOL_VERSIONS,
       capabilities: vec![CapabilityId::parse("logs").unwrap()].into_boxed_slice(),
     };

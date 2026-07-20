@@ -350,6 +350,7 @@ impl ProcessRuntime {
     }
   }
 
+  #[allow(dead_code)]
   pub(crate) fn guarded(
     resolver: RealCaddyResolver,
     paths: RuntimePaths,
