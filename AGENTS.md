@@ -9,7 +9,8 @@ Cadder is a cross-platform Rust Caddy coordinator. It provides a daemon (`cadder
 - If `.local` exists, keep `.local` listed in `.git/info/exclude`; do not add it to `.gitignore` unless explicitly requested.
 - Keep `.agents` content local-only unless a task explicitly makes it part of the repository contract.
 - Read this file, applicable nested `AGENTS.md` files, and relevant `.local` workflow files before editing.
-- Use OpenSpec change artifacts for architecture, requirements, design, and implementation plans.
+- Treat review, audit, analysis, `read-only`, and `do not run anything` requests as non-mutating. Only inspect and report: do not edit, format, build, test, launch processes, alter runtime state, stage, or commit until the user separately authorizes implementation.
+- Use OpenSpec change artifacts for architecture, requirements, design, and implementation plans. Before accepting or applying a change, name the existing user journey it preserves and the smallest end-to-end capability it delivers next. Defer infrastructure, proof machinery, custom tooling, and hardening that do not unblock that capability. After repeated failures in a newly introduced layer, stop and challenge whether that layer should exist before hardening it further.
 - Do not reintroduce Backlog.md, Backlog task folders, or MCP workflow surfaces unless the user explicitly requests a new OpenSpec change for that reversal.
 - Keep project-facing text, source comments, docs, commits, and task notes in English.
 - Keep chat with the user in Polish unless they ask otherwise.
@@ -38,6 +39,7 @@ cargo xtask check
 
 - `cargo xtask` is the current task-runner entrypoint from `.cargo/config.toml`; use `cargo xtask --help` to discover existing validation, docs, release, verification, and dev commands until OpenSpec-driven tooling changes replace or shrink it.
 - Run focused tests after narrow edits, then run the full relevant validation before closeout or commit.
+- Before reporting completion, reconcile every explicitly requested or accepted plan item as delivered, deliberately deferred with the user's approval, or blocked. A green validation gate does not make omitted requested work complete.
 - Use `cargo add`, `cargo remove`, or another Cargo command for dependency changes; do not hand-edit dependency entries.
 - Keep automated tests independent of a locally installed real Caddy unless explicitly marked ignored. Prefer fake Caddy fixtures for lifecycle/config/runtime tests.
 - Application have to be well tested (at least 85% coverage) and well documented (docs/ with Astro + Starlight theme, that allows to create nice documentation pages).
@@ -66,6 +68,7 @@ cargo xtask check
 - Use `$code-simplifier` after making any changes to code, to simplify the code for readability or performance.
 - Use `$handoff` when you are asked about handoff to other agents.
 - Use `$humanizer` when you are creating or updating user-facing text.
+- Use `$audience-scope-discipline` for user test, setup, and operational instructions. Verify that the documented public command and product surface actually exist, and keep test-only environment variables, private runtime paths, mock backends, and internal seams out unless the user explicitly asks for diagnostics.
 - Use `$rust-async-patterns` for Rust production code in this application that uses async patterns.
 - Use `$rust-best-practices` for Rust production code in this application that follows best practices.
 - Use `$rust-profiling` for Rust production code in this application to make application more performant.
