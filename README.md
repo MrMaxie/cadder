@@ -12,7 +12,7 @@ Cadder 1.0 consists of three version-matched executables:
 
 - `cadderd` owns local IPC, registrations, SQLite state, redacted logs, effective Caddy configuration, and the real Caddy child process.
 - `caddy` is the PATH-facing shim. `caddy run` starts or attaches to `cadderd`, registers the current project, sends heartbeats, and unregisters on exit.
-- `cadder` opens a routes-first TUI with contextual logs and explicit Start, Stop, and Restart actions.
+- `cadder` provides lifecycle, inspection, diagnostics, bounded logs, and a routes-first TUI.
 
 Keep all three executables together. Configure the trusted real Caddy source in `cadder.toml` beside them:
 
@@ -28,7 +28,7 @@ Use `real_command` instead when a separately named real Caddy executable is avai
 1. Download the matching `cadder` archive and SHA-256 file for your platform from [GitHub Releases](https://github.com/MrMaxie/cadder/releases).
 2. Extract its `cadder`, `cadderd`, and `caddy` executables into one user-owned directory.
 3. Copy `cadder.toml.example` to `cadder.toml` and configure real Caddy.
-4. Put the directory on PATH, run `caddy run` in each project, then open `cadder tui`.
+4. Put the directory on PATH, run `caddy run` in each project, then use `cadder status` or open `cadder tui`.
 
 Managed `caddy run` starts the matching daemon automatically when it is not already running. Mixed Cadder versions fail the exact protocol handshake before changing runtime state.
 

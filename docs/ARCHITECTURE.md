@@ -6,7 +6,7 @@ OpenSpec defines accepted behavior. This document describes the implemented 1.0 
 
 - `cadderd` is the single writer for one installation directory. It owns the local IPC listener, SQLite connection, active registrations, effective Caddy configuration, and the real Caddy child process.
 - `caddy` is the PATH-facing shim. A managed `caddy run` attaches to the daemon or starts the matching `cadderd`, registers one entrypoint, renews its lease, and unregisters when the shim exits.
-- `cadder` is the operator TUI. It reads bounded snapshots and logs and sends explicit lifecycle or activation mutations through the shared client API.
+- `cadder` is the operator CLI and TUI. Both read bounded daemon snapshots and send explicit activation mutations through the shared client API.
 
 Separate installation directories derive separate runtime identities. There is no public profile selector.
 
@@ -39,13 +39,19 @@ Leases, process ownership, and active routes are never restored as live after re
 
 The daemon resolves real Caddy only from an explicit foreground override, trusted configuration, or safe PATH discovery that excludes the shim by file identity. It pins the resolved executable for its lifetime. Project files and shim arguments cannot select a different real Caddy binary.
 
-Only the Caddy child started by this daemon is controlled. Cadder never enumerates or terminates unrelated Caddy processes.
+Only the Caddy child started by this daemon is controlled. `cadderd` never enumerates or terminates unrelated Caddy processes.
+
+Explicit `cadder port` commands are a separate operator boundary. The client uses `netstat2` to inspect local listening sockets and `sysinfo` to read or signal the expected process. A kill requires a caller-supplied PID and revalidates that the PID still owns the port. This does not expand daemon ownership.
+
+## CLI
+
+The Clap command tree exposes daemon lifecycle, status, project, domain, port, Caddyfile, diagnostics, and bounded log workflows. `comfy-table` renders compact terminal tables. One client-side correlation model joins daemon registrations to syntactically local upstream ports, while the daemon remains the source of truth for registration, activation, Caddy runtime, applied configuration, and redacted log state.
 
 ## TUI
 
 The Ratatui application separates pure UI state from async effects. Crossterm events and background results are coordinated with `tokio::select!`; owned effects are tracked and drained. Rendering uses Ratatui layout, table, paragraph, scrollbar, style, and test backend APIs rather than terminal-size assumptions or custom ANSI positioning.
 
-The routes workspace and its contextual log panel accept arbitrary collection lengths. Loopback upstreams hide redundant host text. Project paths dim the prefix and emphasize the repository-relative suffix, or only the final component when no repository boundary is found.
+The routes workspace accepts arbitrary collection lengths. The header reports `cadderd` and Caddy separately with consistent running and not-running states. Loopback upstreams hide redundant host text. Project paths dim the prefix and emphasize the repository-relative suffix, or only the final component when no repository boundary is found.
 
 ## Tooling and releases
 

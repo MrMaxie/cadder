@@ -1,0 +1,208 @@
+---
+import { faHeart } from '@fortawesome/free-solid-svg-icons';
+import EditLink from '@astrojs/starlight/components/EditLink.astro';
+import { Icon } from '@astrojs/starlight/components';
+import LastUpdated from '@astrojs/starlight/components/LastUpdated.astro';
+import Pagination from '@astrojs/starlight/components/Pagination.astro';
+import { siKofi } from 'simple-icons';
+
+const { hasSidebar } = Astro.locals.starlightRoute;
+const year = new Date().getUTCFullYear();
+const [heartWidth, heartHeight, , , heartPath] = faHeart.icon;
+const heartPathData = Array.isArray(heartPath) ? heartPath[0] : heartPath;
+---
+
+<footer class="page-footer">
+  {hasSidebar && (
+    <div class="page-meta">
+      <EditLink />
+      <LastUpdated />
+    </div>
+  )}
+  {hasSidebar && <Pagination />}
+  <div class="site-footer">
+    <p class="footer-owner">
+      <span>{year}</span>
+      <span class="footer-credit">
+        Created with <span class="sr-only">love</span>
+        <span class="footer-heart" aria-hidden="true">
+          <svg viewBox={`0 0 ${heartWidth} ${heartHeight}`}>
+            <path d={heartPathData}></path>
+          </svg>
+        </span>
+        by <a href="https://maxie.dev">Maciej Mieńko / Maxie</a>
+      </span>
+    </p>
+    <nav aria-label="External links">
+      <a href="https://github.com/MrMaxie/Cadder">
+        <Icon name="github" size="1rem" aria-hidden="true" />
+        <span>GitHub</span>
+      </a>
+      <a href="https://www.linkedin.com/in/maciej-mie%C5%84ko-b0200b190/">
+        <Icon name="linkedin" size="1rem" aria-hidden="true" />
+        <span>LinkedIn</span>
+      </a>
+      <a href="https://ko-fi.com/MrMaxie">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d={siKofi.path}></path>
+        </svg>
+        <span>Ko-fi</span>
+      </a>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  @layer starlight.core {
+    .page-footer {
+      display: grid;
+      gap: 1.25rem;
+      margin-top: 4rem;
+    }
+
+    .page-meta {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 0.75rem 2rem;
+      color: var(--cadder-muted);
+      font-size: 0.78rem;
+    }
+
+    :global(.pagination-links) {
+      gap: 0.75rem;
+    }
+
+    :global(.pagination-links a) {
+      min-height: 0;
+      padding: 0.75rem 0.85rem;
+      border-radius: 0.2rem;
+      box-shadow: none;
+    }
+
+    .site-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1.5rem 2rem;
+      border-top: 1px solid var(--cadder-line);
+      padding-block: 1.75rem 2.1rem;
+      color: var(--cadder-muted);
+      font-family: var(--sl-font-mono);
+      font-size: 0.72rem;
+    }
+
+    .site-footer p {
+      margin: 0;
+    }
+
+    .footer-owner,
+    .footer-credit,
+    .site-footer nav,
+    .site-footer nav a {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .footer-owner {
+      gap: 0.5rem 1.1rem;
+    }
+
+    .footer-credit {
+      gap: 0.3rem;
+    }
+
+    .footer-heart {
+      position: relative;
+      display: inline-grid;
+      width: 1.0625rem;
+      height: 1.0625rem;
+      place-items: center;
+      color: var(--cadder-heart);
+    }
+
+    .footer-heart::before {
+      position: absolute;
+      inset: -0.3rem;
+      border-radius: 50%;
+      background: radial-gradient(circle, color-mix(in srgb, var(--cadder-heart) 38%, transparent), transparent 68%);
+      content: '';
+      animation: cadder-heart-glow 1.8s ease-in-out infinite;
+    }
+
+    .footer-heart svg {
+      position: relative;
+      width: 1rem;
+      height: 1rem;
+      fill: currentColor;
+      animation: cadder-heart-pulse 1.8s ease-in-out infinite;
+    }
+
+    .site-footer nav {
+      justify-content: flex-end;
+      gap: 1rem 1.35rem;
+    }
+
+    .site-footer nav a {
+      gap: 0.42rem;
+    }
+
+    .site-footer nav svg {
+      width: 1rem;
+      height: 1rem;
+      flex: 0 0 auto;
+      fill: currentColor;
+    }
+
+    .site-footer a {
+      color: var(--cadder-muted);
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .site-footer a:hover {
+      color: var(--cadder-accent-strong);
+    }
+
+    @keyframes cadder-heart-glow {
+      0%,
+      100% {
+        opacity: 0.45;
+        transform: scale(0.85);
+      }
+      50% {
+        opacity: 0.8;
+        transform: scale(1.1);
+      }
+    }
+
+    @keyframes cadder-heart-pulse {
+      0%,
+      100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.12);
+      }
+    }
+
+    @media (max-width: 42rem) {
+      .site-footer {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .site-footer nav {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .footer-heart::before,
+      .footer-heart svg {
+        animation: none;
+      }
+    }
+  }
+</style>

@@ -1,12 +1,69 @@
 ---
-title: How to use Cadder
-description: Managed project and operator workflows.
+title: Daily workflow
+description: Run projects, inspect routes, and change activation without replacing existing Caddyfiles.
 ---
 
-Run `caddy run` in every local project that should participate in the shared runtime. Each live shim owns one registration and renews it periodically. Exiting the command removes that live registration.
+import { Steps } from '@astrojs/starlight/components';
 
-Open `cadder tui` to inspect projects and domains in one workspace. Domain ownership is exclusive: if two active projects request the same canonical domain, Cadder keeps the existing owner and rejects the conflicting change.
+The normal Cadder workflow starts in each project and moves to the operator only when you need the shared view.
 
-The daemon may restore desired activation from SQLite after restart, but it never treats old leases or process identities as live. A project becomes live only after a current shim registers it.
+<Steps>
 
-To upgrade, stop the daemon from the TUI, replace all three executables from one release, and start the next managed project or press Enter in the TUI while Cadder is offline.
+1. **Start each project from its own directory.**
+
+   ```sh frame="none"
+   caddy run
+   ```
+
+   Each live shim owns one registration and renews it periodically. Exiting the command removes that live registration.
+
+2. **Check the shared runtime.**
+
+   ```sh frame="none"
+   cadder status
+   ```
+
+   Use `cadder projects list` or `cadder domains list` when you need the registered routes rather than daemon details.
+
+3. **Open the routes workspace when you need to act.**
+
+   ```sh frame="none"
+   cadder tui
+   ```
+
+   The TUI groups domains beneath their projects. Use Space or Enter to toggle the selected row. Cadder keeps the current domain owner when another active project requests the same canonical domain.
+
+4. **Leave the project normally.**
+
+   Exit `caddy run` in the project terminal. Cadder removes the live registration without stopping unrelated projects.
+
+</Steps>
+
+## Inspect one route
+
+Use the boundary you already know:
+
+```sh frame="none"
+cadder port inspect 3000
+cadder caddyfile inspect ./Caddyfile
+cadder domains inspect app.localhost
+```
+
+Port inspection works without `cadderd`. When daemon state is available, Cadder connects the listener and process to its project, Caddyfile, domain, and upstream.
+
+## Change activation from the terminal
+
+Use the Caddyfile to select a project. Add `--caddyfile` when a domain name could belong to more than one registration.
+
+```sh frame="none"
+cadder projects disable ./Caddyfile
+cadder projects enable ./Caddyfile
+cadder domains disable app.localhost --caddyfile ./Caddyfile
+cadder domains enable app.localhost --caddyfile ./Caddyfile
+```
+
+## Upgrade all three executables together
+
+Stop the daemon from the TUI or with `cadder daemon stop`. Replace `cadder`, `cadderd`, and the `caddy` shim from one release, keep `cadder.toml`, then start the next managed project.
+
+Cadder may restore desired activation from SQLite after restart, but a project becomes live only after a current shim registers it. Old leases and process identities never become live state.

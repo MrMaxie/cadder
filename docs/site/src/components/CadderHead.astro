@@ -1,0 +1,62 @@
+---
+import DefaultHead from '@astrojs/starlight/components/Head.astro';
+import { ClientRouter } from 'astro:transitions';
+
+const site = Astro.site ?? new URL('https://maxie.dev');
+const productUrl = new URL('/cadder/', site).href;
+const socialImage = new URL('/cadder/og-banner.png', site).href;
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'Person',
+      '@id': new URL('/#person', site).href,
+      name: 'Maciej Mieńko',
+      alternateName: ['Maxie', 'MrMaxie'],
+      url: new URL('/about/', site).href,
+      sameAs: [
+        'https://github.com/MrMaxie',
+        'https://www.linkedin.com/in/maciej-mie%C5%84ko-b0200b190/',
+      ],
+    },
+    {
+      '@type': 'WebSite',
+      '@id': `${productUrl}#website`,
+      name: 'Cadder documentation',
+      url: productUrl,
+      publisher: { '@id': new URL('/#person', site).href },
+    },
+    {
+      '@type': 'SoftwareApplication',
+      '@id': `${productUrl}#software`,
+      name: 'Cadder',
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'Windows, macOS, Linux',
+      description: 'Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared web server and reverse proxy.',
+      url: productUrl,
+      codeRepository: 'https://github.com/MrMaxie/Cadder',
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+      author: { '@id': new URL('/#person', site).href },
+      isPartOf: { '@id': `${productUrl}#website` },
+    },
+  ],
+};
+const serializedStructuredData = JSON.stringify(structuredData)
+  .replaceAll('<', '\\u003c')
+  .replaceAll('\u2028', '\\u2028')
+  .replaceAll('\u2029', '\\u2029');
+---
+
+<DefaultHead />
+<meta name="theme-color" content="#0a0c0f" />
+<link rel="manifest" href="/cadder/site.webmanifest" />
+<link rel="describedby" href="/cadder/llms.txt" type="text/plain" />
+<meta property="og:image" content={socialImage} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Cadder coordinates project routes while Caddy forwards local addresses to app ports." />
+<meta name="twitter:image" content={socialImage} />
+<meta name="twitter:image:alt" content="Cadder coordinates project routes while Caddy forwards local addresses to app ports." />
+<script type="application/ld+json" set:html={serializedStructuredData} is:inline />
+<ClientRouter fallback="animate" />

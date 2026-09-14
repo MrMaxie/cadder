@@ -1,20 +1,91 @@
 ---
 title: Cadder
-description: Run multiple local Caddy projects through one coordinated runtime.
+description: Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared web server and reverse proxy.
 template: splash
 hero:
-  tagline: Keep using caddy run without making projects compete for the same ports.
+  title: Stable addresses for every local app.
+  tagline: "Cadder coordinates Caddy across your local projects. Caddy is the web server and reverse proxy that connects each local address to the port where an app is running. With Cadder, routes from different repositories are served together by one Caddy process."
   actions:
-    - text: Get started
+    - text: Set up your first route
       link: /cadder/quick-start/getting-started/
-      icon: right-arrow
       variant: primary
+    - text: How it works
+      link: '#how-it-works'
+      variant: secondary
 ---
 
-Cadder combines local Caddy routes behind one real Caddy process owned by a per-installation daemon.
+import CadderTuiPreview from '../../components/CadderTuiPreview.astro';
 
-- `cadderd` owns runtime state, SQLite storage, IPC, and real Caddy.
-- `caddy` is the PATH-facing shim used by existing `caddy run` workflows.
-- `cadder` provides a routes-first TUI with contextual logs and lifecycle controls.
+<section class="cadder-home-section" id="how-it-works">
 
-All three executables must come from the same 1.0 release. The exact protocol handshake rejects mixed versions before changing state.
+<div class="cadder-section-layout">
+  <div class="cadder-section-copy">
+    <p class="cadder-kicker">The Cadder view</p>
+
+## See every route in one place.
+
+`cadder tui` shows which project owns each address, where requests go, and whether Cadder and Caddy are running. Select a project or route to enable or disable it without touching the others.
+
+    <a class="cadder-section-action" href="/cadder/user-guide/cadder/">Explore the TUI and CLI</a>
+  </div>
+  <CadderTuiPreview />
+</div>
+
+</section>
+
+<section class="cadder-home-section">
+
+<p class="cadder-kicker">Clear responsibilities</p>
+
+## What Cadder adds around Caddy.
+
+<div class="cadder-capabilities">
+  <article>
+    <span>01</span>
+    <div><h3>Collect project routes.</h3><p>Each Caddyfile stays in its repository. <code>caddy run</code> registers it with Cadder.</p></div>
+  </article>
+  <article>
+    <span>02</span>
+    <div><h3>Reject collisions.</h3><p>Cadder checks route ownership and blocks conflicting active addresses before applying a change.</p></div>
+  </article>
+  <article>
+    <span>03</span>
+    <div><h3>Inspect the whole runtime.</h3><p>The CLI and TUI connect domains, ports, Caddyfiles, projects, logs, and Caddy state.</p></div>
+  </article>
+  <article>
+    <span>04</span>
+    <div><h3>Change one route at a time.</h3><p>Enable or disable one domain while unrelated local routes stay active.</p></div>
+  </article>
+</div>
+
+</section>
+
+<section class="cadder-home-section cadder-home-start">
+
+<p class="cadder-kicker">First route</p>
+
+## Keep the Caddyfile. Let Cadder run the shared runtime.
+
+Each repository keeps its own Caddyfile. The Cadder `caddy` shim registers it with `cadderd`, which combines active routes and applies them through one real Caddy process.
+
+```txt
+shop.localhost {
+  reverse_proxy localhost:3000
+}
+```
+
+Run the same command inside that project:
+
+```sh frame="none"
+caddy run
+```
+
+The route appears in `cadder tui`, where you can inspect its owner, target, and activation state.
+
+<nav class="cadder-home-links" aria-label="Learn Cadder">
+  <a class="primary" href="/cadder/quick-start/getting-started/">Install Cadder</a>
+  <a href="/cadder/user-guide/how-to-use/">Read the daily workflow</a>
+  <a href="/cadder/user-guide/cadder/">Open the CLI and TUI reference</a>
+</nav>
+
+</section>

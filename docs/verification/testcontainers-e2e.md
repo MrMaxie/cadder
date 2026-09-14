@@ -5,14 +5,14 @@ investigating the CI Docker E2E job.
 
 ## Purpose
 
-The suite validates compiled host Cadder binaries against real Caddy in a disposable container. It
+The suite validates compiled Cadder binaries against real Caddy in a disposable container. It
 complements the fast fake-Caddy lifecycle tests and does not replace `cargo test --workspace`.
 
 ## Prerequisites
 
 - Docker daemon is running.
 - Docker CLI is available on `PATH`.
-- The current user can start containers and pull `caddy:2.10.0-alpine`.
+- The current user can start containers and pull `caddy:2.11.3-alpine`.
 - No host-global Caddy installation is required.
 
 ## Command
@@ -20,7 +20,7 @@ complements the fast fake-Caddy lifecycle tests and does not replace `cargo test
 Run from the repository root:
 
 ```sh
-cargo build -p cadder-daemon -p cadder-shim
+cargo build --package cadder --bin cadderd --bin caddy
 cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
 ```
 
