@@ -5,8 +5,8 @@ description: Managed project and operator workflows.
 
 Run `caddy run` in every local project that should participate in the shared runtime. Each live shim owns one registration and renews it periodically. Exiting the command removes that live registration.
 
-Open `cadder tui` to inspect Status, Domains, and Logs. Domain ownership is exclusive: if two active projects request the same canonical domain, Cadder keeps the existing owner and rejects the conflicting change.
+Open `cadder tui` to inspect projects and domains in one workspace. Domain ownership is exclusive: if two active projects request the same canonical domain, Cadder keeps the existing owner and rejects the conflicting change.
 
 The daemon may restore desired activation from SQLite after restart, but it never treats old leases or process identities as live. A project becomes live only after a current shim registers it.
 
-To upgrade, stop the daemon from Status, replace all three executables from one release, and start the next managed project or use Start in the TUI.
+To upgrade, stop the daemon from the TUI, replace all three executables from one release, and start the next managed project or press Enter in the TUI while Cadder is offline.

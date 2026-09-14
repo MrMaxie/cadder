@@ -8,20 +8,26 @@ use ratatui::widgets::{
 
 use crate::widgets::theme::THEME;
 
-pub struct LogsTab<'a> {
+pub struct LogsPanel<'a> {
+  title: &'a str,
   lines: &'a [String],
   scroll: usize,
 }
 
-impl<'a> LogsTab<'a> {
-  pub const fn new(lines: &'a [String], scroll: usize) -> Self {
-    Self { lines, scroll }
+impl<'a> LogsPanel<'a> {
+  pub const fn new(title: &'a str, lines: &'a [String], scroll: usize) -> Self {
+    Self {
+      title,
+      lines,
+      scroll,
+    }
   }
 }
 
-impl Widget for LogsTab<'_> {
+impl Widget for LogsPanel<'_> {
   fn render(self, area: Rect, buf: &mut Buffer) {
     let block = Block::new()
+      .title(Line::from(format!(" {} ", self.title)).style(THEME.panel_title()))
       .borders(Borders::ALL)
       .border_style(THEME.table_border())
       .style(THEME.table());

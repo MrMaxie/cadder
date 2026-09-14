@@ -12,7 +12,7 @@ Cadder 1.0 consists of three version-matched executables:
 
 - `cadderd` owns local IPC, registrations, SQLite state, redacted logs, effective Caddy configuration, and the real Caddy child process.
 - `caddy` is the PATH-facing shim. `caddy run` starts or attaches to `cadderd`, registers the current project, sends heartbeats, and unregisters on exit.
-- `cadder` opens the keyboard-operated TUI for Status, Domains, and Logs, including explicit Start, Stop, and Restart actions.
+- `cadder` opens a routes-first TUI with contextual logs and explicit Start, Stop, and Restart actions.
 
 Keep all three executables together. Configure the trusted real Caddy source in `cadder.toml` beside them:
 

@@ -20,13 +20,6 @@ pub struct DomainTableRow {
   spaced_before: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct SettingsTableRow {
-  entity: EntityId,
-  name: String,
-  value: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntityId {
   Entrypoint(String),
@@ -34,15 +27,6 @@ pub enum EntityId {
     registration_id: String,
     canonical_domain: String,
   },
-  Status(StatusId),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusId {
-  Connection,
-  Runtime,
-  Config,
-  Storage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,37 +114,6 @@ impl DataModel {
       .collect()
   }
 
-  pub fn status_rows(&self, connection: &str) -> Vec<SettingsTableRow> {
-    let mut rows = vec![SettingsTableRow {
-      entity: EntityId::Status(StatusId::Connection),
-      name: "Daemon".to_string(),
-      value: connection.to_string(),
-    }];
-    if let Some(snapshot) = &self.snapshot {
-      rows.extend([
-        SettingsTableRow {
-          entity: EntityId::Status(StatusId::Runtime),
-          name: "Caddy runtime".to_string(),
-          value: format!("{:?}", snapshot.runtime.status),
-        },
-        SettingsTableRow {
-          entity: EntityId::Status(StatusId::Config),
-          name: "Configuration".to_string(),
-          value: format!("{:?}", snapshot.config.status),
-        },
-        SettingsTableRow {
-          entity: EntityId::Status(StatusId::Storage),
-          name: "Storage".to_string(),
-          value: snapshot.storage.as_ref().map_or_else(
-            || "Unavailable".to_string(),
-            |storage| storage.backend.clone(),
-          ),
-        },
-      ]);
-    }
-    rows
-  }
-
   pub fn mutation_target(&self, entity: &EntityId) -> Option<MutationTarget> {
     let snapshot = self.snapshot.as_ref()?;
     match entity {
@@ -178,7 +131,6 @@ impl DataModel {
           enabled: !domain.activation_state.is_enabled(),
         }
       }),
-      EntityId::Status(_) => None,
     }
   }
 
@@ -192,7 +144,6 @@ impl DataModel {
         canonical_domain,
       } => Self::find_domain(snapshot, registration_id, canonical_domain)
         .map(|domain| domain.log_stream.clone()),
-      EntityId::Status(_) => None,
     }
   }
 
@@ -217,94 +168,26 @@ impl DataModel {
       .find(|domain| domain.name.canonical == canonical_domain)
   }
 
-  pub fn describe(&self, entity: &EntityId) -> Vec<String> {
-    let Some(snapshot) = &self.snapshot else {
-      return vec!["No daemon snapshot is available.".to_string()];
-    };
+  pub fn log_title(&self, entity: &EntityId) -> String {
     match entity {
-      EntityId::Entrypoint(registration_id) => entrypoints_view(snapshot)
-        .entrypoints
-        .into_iter()
-        .find(|entrypoint| entrypoint.registration_id == *registration_id)
-        .map(|entrypoint| {
-          vec![
-            format!("Registration: {}", entrypoint.registration_id),
-            format!("State: {:?}", entrypoint.activation_state),
-            format!("Working directory: {}", entrypoint.working_directory),
-            format!("Config: {}", entrypoint.config_path),
-            format!("Process: {}", entrypoint.process_id),
-            format!("Domains: {}", entrypoint.domain_count),
-          ]
-        })
-        .unwrap_or_else(|| vec!["Entrypoint is no longer present.".to_string()]),
-      EntityId::Domain {
-        registration_id,
-        canonical_domain,
-      } => domains_view(snapshot, Some(registration_id))
-        .domains
-        .into_iter()
-        .find(|domain| domain.canonical_domain == *canonical_domain)
-        .map(|domain| {
-          vec![
-            format!("Domain: {}", domain.domain),
-            format!("State: {:?}", domain.activation_state),
-            format!("Entrypoint: {}", domain.registration_id),
-            format!("Upstream: {}", domain.upstream.as_deref().unwrap_or("none")),
-            format!("Config: {}", domain.config_path),
-          ]
-        })
-        .unwrap_or_else(|| vec!["Domain is no longer present.".to_string()]),
-      EntityId::Status(status) => self.describe_status(*status),
-    }
-  }
-
-  pub fn title(&self, entity: &EntityId) -> String {
-    match entity {
-      EntityId::Entrypoint(registration_id) => format!(" {registration_id} "),
+      EntityId::Entrypoint(registration_id) => self
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| Self::find_entrypoint(snapshot, registration_id))
+        .map_or_else(
+          || "Logs".to_string(),
+          |entrypoint| {
+            Path::new(&entrypoint.source_working_directory.raw)
+              .file_name()
+              .map_or_else(
+                || "Logs".to_string(),
+                |name| format!("Logs - {}", name.to_string_lossy()),
+              )
+          },
+        ),
       EntityId::Domain {
         canonical_domain, ..
-      } => format!(" {canonical_domain} "),
-      EntityId::Status(status) => format!(" {status:?} "),
-    }
-  }
-
-  fn describe_status(&self, status: StatusId) -> Vec<String> {
-    let Some(snapshot) = &self.snapshot else {
-      return vec!["No daemon snapshot is available.".to_string()];
-    };
-    match status {
-      StatusId::Connection => vec![
-        "Daemon connection is active.".to_string(),
-        format!("Snapshot captured: {}", snapshot.captured_at_utc),
-      ],
-      StatusId::Runtime => vec![
-        format!("Caddy runtime: {:?}", snapshot.runtime.status),
-        format!(
-          "Version: {}",
-          snapshot.runtime.version.as_deref().unwrap_or("unavailable")
-        ),
-        format!(
-          "Admin endpoint: {}",
-          snapshot
-            .runtime
-            .admin_endpoint
-            .as_deref()
-            .unwrap_or("unavailable")
-        ),
-      ],
-      StatusId::Config => vec![
-        format!("Configuration: {:?}", snapshot.config.status),
-        format!("Diagnostics: {}", snapshot.config.diagnostics.len()),
-      ],
-      StatusId::Storage => snapshot.storage.as_ref().map_or_else(
-        || vec!["Storage information is unavailable.".to_string()],
-        |storage| {
-          vec![
-            format!("Backend: {}", storage.backend),
-            format!("Schema version: {}", storage.schema_version),
-          ]
-        },
-      ),
+      } => format!("Logs - {canonical_domain}"),
     }
   }
 }
@@ -340,20 +223,6 @@ impl DomainTableRow {
 
   pub const fn spaced_before(&self) -> bool {
     self.spaced_before
-  }
-}
-
-impl SettingsTableRow {
-  pub fn entity(&self) -> EntityId {
-    self.entity.clone()
-  }
-
-  pub fn name(&self) -> &str {
-    &self.name
-  }
-
-  pub fn value(&self) -> &str {
-    &self.value
   }
 }
 
@@ -473,7 +342,7 @@ mod tests {
   }
 
   #[test]
-  fn snapshot_drives_rows_mutations_details_and_log_targets() {
+  fn snapshot_drives_rows_mutations_and_log_targets() {
     let mut model = DataModel::default();
     model.replace_snapshot(populated_snapshot());
 
@@ -500,37 +369,19 @@ mod tests {
 
     for row in &rows {
       let entity = row.entity();
-      assert!(!model.title(&entity).is_empty());
-      assert!(!model.describe(&entity).is_empty());
+      assert!(model.log_title(&entity).starts_with("Logs"));
       assert!(model.log_stream(&entity).is_some());
       let target = model.mutation_target(&entity).unwrap();
       assert_eq!(target.entity, entity);
       assert_eq!(target.enabled, !row.enabled());
     }
 
-    let settings = model.status_rows("connected");
-    assert_eq!(settings.len(), 4);
-    for row in settings {
-      assert!(!row.name().is_empty());
-      assert!(!row.value().is_empty());
-      let entity = row.entity();
-      assert!(matches!(entity, EntityId::Status(_)));
-      assert!(model.mutation_target(&entity).is_none());
-      assert!(model.log_stream(&entity).is_none());
-      assert!(!model.describe(&entity).is_empty());
-      assert!(!model.title(&entity).is_empty());
-    }
-
     model.clear_snapshot();
     assert!(model.domain_rows().is_empty());
-    assert_eq!(model.status_rows("offline").len(), 1);
     let missing = EntityId::Entrypoint("missing".to_string());
     assert!(model.mutation_target(&missing).is_none());
     assert!(model.log_stream(&missing).is_none());
-    assert_eq!(
-      model.describe(&missing),
-      ["No daemon snapshot is available."]
-    );
+    assert_eq!(model.log_title(&missing), "Logs");
   }
 
   #[test]

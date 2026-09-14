@@ -15,6 +15,6 @@ Cadder combines local Caddy routes behind one real Caddy process owned by a per-
 
 - `cadderd` owns runtime state, SQLite storage, IPC, and real Caddy.
 - `caddy` is the PATH-facing shim used by existing `caddy run` workflows.
-- `cadder` provides the Status, Domains, and Logs TUI.
+- `cadder` provides a routes-first TUI with contextual logs and lifecycle controls.
 
 All three executables must come from the same 1.0 release. The exact protocol handshake rejects mixed versions before changing state.

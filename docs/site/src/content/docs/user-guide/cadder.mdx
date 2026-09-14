@@ -11,12 +11,10 @@ cadder tui
 
 The 1.0 operator intentionally has one interactive surface. It does not expose a parallel scripting CLI.
 
-## Views
+## Workspace
 
-- Status shows daemon, Caddy, and storage health and provides Start, Stop, and Restart.
-- Domains groups every registered domain under its project entrypoint and supports activation toggles.
-- Logs shows a bounded list of redacted events for the selected runtime, entrypoint, or domain.
+The main table groups every registered domain under its project. A filled circle is enabled and an empty circle is disabled. The header keeps global Caddy health visible without repeating diagnostic state.
 
-Tab, Left, and Right switch views. Up and Down move through lists of any length. Enter opens details. Space performs the current action. Stop and Restart require confirmation. Esc closes details or confirmation, and Ctrl+C exits while restoring the terminal.
+Up and Down move through lists of any length. Space toggles the selection. Press `l` to open or close bounded redacted logs for that project or domain. Press `x` to stop or `R` to restart; both actions require inline confirmation. When Cadder is offline, Enter starts it. Press `q` or Ctrl+C to exit while restoring the terminal.
 
 Loopback upstreams show only the useful port. Project paths emphasize the repository-relative suffix, or the final folder when the path is not inside a Git repository.

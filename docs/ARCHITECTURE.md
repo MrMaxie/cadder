@@ -45,7 +45,7 @@ Only the Caddy child started by this daemon is controlled. Cadder never enumerat
 
 The Ratatui application separates pure UI state from async effects. Crossterm events and background results are coordinated with `tokio::select!`; owned effects are tracked and drained. Rendering uses Ratatui layout, table, paragraph, scrollbar, style, and test backend APIs rather than terminal-size assumptions or custom ANSI positioning.
 
-Status, Domains, and Logs accept arbitrary collection lengths. Loopback upstreams hide redundant host text. Project paths dim the prefix and emphasize the repository-relative suffix, or only the final component when no repository boundary is found.
+The routes workspace and its contextual log panel accept arbitrary collection lengths. Loopback upstreams hide redundant host text. Project paths dim the prefix and emphasize the repository-relative suffix, or only the final component when no repository boundary is found.
 
 ## Tooling and releases
 

@@ -7,7 +7,7 @@ Use a disposable Windows Sandbox to verify the released Windows x64 archives wit
 3. Place a valid `cadder.toml` beside the executables.
 4. Add the directory to the sandbox user's PATH.
 5. Run `caddy run` in two projects with distinct domains and confirm one daemon serves both registrations.
-6. Open `cadder tui` and inspect Status, Domains, and Logs.
+6. Open `cadder tui`, inspect the routes workspace, and open contextual logs with `l`.
 7. Confirm Stop and Restart require confirmation and terminate only the Cadder-owned Caddy child.
 8. Replace one executable with a different version and confirm the exact handshake rejects it without mutating state.
 9. Restore the matched executable set and confirm the runtime reconnects.

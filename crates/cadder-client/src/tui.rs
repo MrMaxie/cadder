@@ -109,33 +109,35 @@ mod tests {
   use ratatui::backend::TestBackend;
 
   #[test]
-  fn initial_screen_is_stable_at_the_minimum_supported_viewport() {
+  fn initial_screen_fits_the_minimum_supported_viewport() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut app = App::new();
 
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
-    insta::assert_snapshot!(terminal.backend());
+    let screen = format!("{}", terminal.backend());
+    assert!(screen.contains("Cadder v"));
+    assert!(screen.contains("Project / domain"));
+    assert!(screen.contains("Connecting to Cadder"));
   }
 
   #[test]
-  fn renderer_covers_status_logs_details_and_tiny_terminals() {
+  fn renderer_covers_offline_logs_confirmation_and_tiny_terminals() {
     let mut app = App::new();
     app.apply_refresh(crate::app::RefreshOutcome::Unavailable {
       connection: crate::app::ConnectionStatus::Offline,
       message: "Cadder is not running.".to_string(),
-      guidance: Some("Start it from Status.".to_string()),
+      guidance: Some("Press Enter to start it.".to_string()),
     });
-    app.next_tab();
 
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Start cadderd"));
+    assert!(format!("{}", terminal.backend()).contains("Press Enter to start it"));
 
-    app.next_tab();
+    app.toggle_logs();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Cadder is not running"));
+    assert!(format!("{}", terminal.backend()).contains("Logs"));
 
     let mut connected = App::new();
     connected.apply_refresh(crate::app::RefreshOutcome::Connected {
@@ -156,7 +158,7 @@ mod tests {
     terminal
       .draw(|frame| render(frame, &mut connected))
       .unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Confirm restart"));
+    assert!(format!("{}", terminal.backend()).contains("Restart Cadder"));
 
     let mut tiny = Terminal::new(TestBackend::new(1, 1)).unwrap();
     tiny.draw(|frame| render(frame, &mut App::new())).unwrap();

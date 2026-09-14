@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::app::{App, LifecycleAction, Tab};
+use crate::app::{App, LifecycleAction};
 use crate::data::MutationTarget;
 
 pub(super) fn handle_event(event: Event, app: &mut App) -> Option<UiAction> {
@@ -15,49 +15,51 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> Option<U
     app.quit();
     return None;
   }
-
-  if app.details().is_some() {
-    match code {
-      KeyCode::Esc => app.close_details(),
-      KeyCode::Enter => {
-        return app.confirm_lifecycle().map(|action| match action {
-          LifecycleAction::Stop => UiAction::StopDaemon,
-          LifecycleAction::Restart => UiAction::RestartDaemon,
-        });
-      }
-      KeyCode::Left | KeyCode::Up => app.previous_details_item(),
-      KeyCode::Right | KeyCode::Down => app.next_details_item(),
-      KeyCode::PageUp => app.page_details_up(),
-      KeyCode::PageDown => app.page_details_down(),
-      _ => {}
-    }
+  if matches!(code, KeyCode::Char('q' | 'Q')) {
+    app.quit();
     return None;
   }
 
+  if app.confirmation().is_some() {
+    return match code {
+      KeyCode::Esc => {
+        app.cancel_confirmation();
+        None
+      }
+      KeyCode::Enter => app.confirm_lifecycle().map(lifecycle_action),
+      _ => None,
+    };
+  }
+
   match code {
+    KeyCode::Esc if app.logs_open() => {
+      app.toggle_logs();
+    }
     KeyCode::Esc => app.quit(),
-    KeyCode::Left | KeyCode::BackTab => app.previous_tab(),
-    KeyCode::Right | KeyCode::Tab => app.next_tab(),
-    KeyCode::Up if app.active_tab() == Tab::Logs => app.scroll_logs_up(1),
-    KeyCode::Down if app.active_tab() == Tab::Logs => app.scroll_logs_down(1),
-    KeyCode::PageUp if app.active_tab() == Tab::Logs => app.scroll_logs_up(10),
-    KeyCode::PageDown if app.active_tab() == Tab::Logs => app.scroll_logs_down(10),
     KeyCode::Up => app.select_previous(),
     KeyCode::Down => app.select_next(),
-    KeyCode::Enter | KeyCode::Char(' ') if app.prepare_start_daemon_from_status() => {
-      return Some(UiAction::StartDaemon);
+    KeyCode::PageUp if app.logs_open() => app.scroll_logs_up(10),
+    KeyCode::PageDown if app.logs_open() => app.scroll_logs_down(10),
+    KeyCode::Char('l' | 'L') => {
+      if app.toggle_logs() {
+        return Some(UiAction::Refresh);
+      }
     }
+    KeyCode::Enter if app.prepare_start_daemon() => return Some(UiAction::StartDaemon),
     KeyCode::Char(' ') => return app.prepare_toggle_current().map(UiAction::Mutate),
     KeyCode::Char('r') => return Some(UiAction::Refresh),
     KeyCode::Char('x' | 'X') => app.prepare_lifecycle(LifecycleAction::Stop),
     KeyCode::Char('R') => app.prepare_lifecycle(LifecycleAction::Restart),
-    KeyCode::Char('s' | 'S') if app.prepare_start_daemon() => {
-      return Some(UiAction::StartDaemon);
-    }
-    KeyCode::Enter => app.open_details(),
     _ => {}
   }
   None
+}
+
+const fn lifecycle_action(action: LifecycleAction) -> UiAction {
+  match action {
+    LifecycleAction::Stop => UiAction::StopDaemon,
+    LifecycleAction::Restart => UiAction::RestartDaemon,
+  }
 }
 
 fn is_force_quit_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -85,10 +87,6 @@ mod tests {
       handle_key(KeyCode::Char('r'), KeyModifiers::NONE, &mut app),
       Some(UiAction::Refresh)
     ));
-    handle_key(KeyCode::Tab, KeyModifiers::NONE, &mut app);
-    handle_key(KeyCode::BackTab, KeyModifiers::NONE, &mut app);
-    handle_key(KeyCode::Right, KeyModifiers::NONE, &mut app);
-    handle_key(KeyCode::Left, KeyModifiers::NONE, &mut app);
     handle_key(KeyCode::Up, KeyModifiers::NONE, &mut app);
     handle_key(KeyCode::Down, KeyModifiers::NONE, &mut app);
 
@@ -97,7 +95,6 @@ mod tests {
       message: "Cadder is not running.".to_string(),
       guidance: None,
     });
-    app.next_tab();
     assert!(matches!(
       handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut app),
       Some(UiAction::StartDaemon)
@@ -119,11 +116,7 @@ mod tests {
       }),
     });
     handle_key(KeyCode::Char('x'), KeyModifiers::NONE, &mut connected);
-    assert!(connected.details().is_some());
-    handle_key(KeyCode::Left, KeyModifiers::NONE, &mut connected);
-    handle_key(KeyCode::Right, KeyModifiers::NONE, &mut connected);
-    handle_key(KeyCode::PageUp, KeyModifiers::NONE, &mut connected);
-    handle_key(KeyCode::PageDown, KeyModifiers::NONE, &mut connected);
+    assert!(connected.confirmation().is_some());
     assert!(matches!(
       handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut connected),
       Some(UiAction::StopDaemon)
@@ -131,7 +124,7 @@ mod tests {
 
     let mut quitting = App::new();
     assert!(handle_event(Event::Resize(100, 40), &mut quitting).is_none());
-    handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut quitting);
+    handle_key(KeyCode::Char('q'), KeyModifiers::NONE, &mut quitting);
     assert!(quitting.should_quit());
   }
 }

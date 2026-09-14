@@ -5,8 +5,6 @@ use ratatui::widgets::Widget;
 use crate::app::RuntimeStatus;
 use crate::widgets::theme::THEME;
 
-const STATUS_WIDTH: u16 = 42;
-
 pub struct HeaderBar {
   version: &'static str,
   runtime_status: RuntimeStatus,
@@ -29,11 +27,18 @@ impl Widget for HeaderBar {
 
     buf.set_style(area, THEME.header());
 
-    let title_width = if area.width > STATUS_WIDTH + 1 {
-      area.width - STATUS_WIDTH - 1
+    let marker = if self.runtime_status.is_healthy() {
+      "●"
     } else {
-      area.width
+      "○"
     };
+    let status = format!(
+      "{marker} {} {} ",
+      self.runtime_status.service_label(),
+      self.runtime_status.state_label()
+    );
+    let status_width = u16::try_from(status.chars().count()).unwrap_or(u16::MAX);
+    let title_width = area.width.saturating_sub(status_width + 1).max(1);
     let title = format!(" Cadder v{}", self.version);
     buf.set_stringn(
       area.x,
@@ -43,42 +48,14 @@ impl Widget for HeaderBar {
       THEME.header_title(),
     );
 
-    if area.width >= STATUS_WIDTH {
-      let status_x = area.x + area.width - STATUS_WIDTH;
-      render_service_status(
-        buf,
-        status_x,
-        area.y,
-        "Cadder",
-        self.runtime_status.connection_label(),
-        self.runtime_status.is_connected(),
-      );
-      buf.set_string(status_x + 20, area.y, " | ", THEME.service_separator());
-      render_service_status(
-        buf,
-        status_x + 23,
-        area.y,
-        "Caddy",
-        self.runtime_status.caddy_label(),
-        self.runtime_status.caddy_label() == "running",
-      );
+    if area.width > status_width + 1 {
+      let status_x = area.x + area.width - status_width;
+      let style = if self.runtime_status.is_healthy() {
+        THEME.service_online()
+      } else {
+        THEME.service_offline()
+      };
+      buf.set_stringn(status_x, area.y, status, status_width.into(), style);
     }
   }
-}
-
-fn render_service_status(
-  buf: &mut Buffer,
-  x: u16,
-  y: u16,
-  label: &str,
-  status: &str,
-  online: bool,
-) {
-  let style = if online {
-    THEME.service_online()
-  } else {
-    THEME.service_offline()
-  };
-
-  buf.set_string(x, y, format!("{label}: {status}"), style);
 }

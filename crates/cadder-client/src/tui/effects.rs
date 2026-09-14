@@ -116,7 +116,6 @@ async fn execute_mutation(
       )
       .await
       .map(|_| ()),
-    EntityId::Status(_) => return Ok(()),
   };
   result.map_err(Into::into)
 }
@@ -221,13 +220,13 @@ mod tests {
       Effect::Restart
     ));
     let target = MutationTarget {
-      entity: EntityId::Status(crate::data::StatusId::Runtime),
+      entity: EntityId::Entrypoint("entry-1".to_string()),
       enabled: true,
     };
     assert!(matches!(
       Effect::from(UiAction::Mutate(target), stream),
       Effect::Mutate(MutationTarget {
-        entity: EntityId::Status(_),
+        entity: EntityId::Entrypoint(_),
         enabled: true
       })
     ));
@@ -253,10 +252,6 @@ mod tests {
           registration_id: "entry-1".to_string(),
           canonical_domain: "app.localhost".to_string(),
         },
-        enabled: false,
-      },
-      MutationTarget {
-        entity: EntityId::Status(crate::data::StatusId::Runtime),
         enabled: false,
       },
     ] {

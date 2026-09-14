@@ -76,7 +76,6 @@ tokio-util = { version = "=0.7.18", features = ["rt"] }
 tracing-subscriber = "=0.3.23"
 
 [dev-dependencies]
-insta = { version = "=1.48.0", default-features = false }
 tempfile = "=3.27.0"
 
 # Config for 'dist'

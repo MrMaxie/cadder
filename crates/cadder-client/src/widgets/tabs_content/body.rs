@@ -2,33 +2,27 @@ use std::net::IpAddr;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Margin, Rect};
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
   Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget,
   Table, TableState, Widget,
 };
 
-use crate::data::{DomainRowKind, DomainTableRow, SettingsTableRow};
+use crate::data::{DomainRowKind, DomainTableRow};
 use crate::widgets::theme::THEME;
 
-const SELECTOR_COLUMN_WIDTH: u16 = 5;
+const SELECTOR_COLUMN_WIDTH: u16 = 3;
 const PRIMARY_COLUMN_MIN_WIDTH: u16 = 20;
 const COLUMN_SPACING: u16 = 1;
 
-pub(crate) enum TableBodyRows {
-  Domains(Vec<DomainTableRow>),
-  Settings(Vec<SettingsTableRow>),
-}
-
 pub(crate) struct TableBody {
-  accent: Color,
-  rows: TableBodyRows,
+  rows: Vec<DomainTableRow>,
 }
 
 impl TableBody {
-  pub const fn new(accent: Color, rows: TableBodyRows) -> Self {
-    Self { accent, rows }
+  pub const fn new(rows: Vec<DomainTableRow>) -> Self {
+    Self { rows }
   }
 }
 
@@ -44,21 +38,18 @@ impl StatefulWidget for TableBody {
     block.render(area, buf);
 
     let row_count = self.rows.len();
-    let has_header = self.rows.has_header();
-    let reserved_header = if has_header { 2 } else { 0 };
-    let viewport = usize::from(inner.height.saturating_sub(reserved_header)).max(1);
+    let viewport = usize::from(inner.height.saturating_sub(2)).max(1);
     apply_scroll_margin(state, row_count, viewport);
 
     let trailing_available_width = inner
       .width
       .saturating_sub(SELECTOR_COLUMN_WIDTH + PRIMARY_COLUMN_MIN_WIDTH + 2 * COLUMN_SPACING);
     let trailing_column_width = fit_trailing_column_width(
-      self.rows.trailing_column_content_width(),
+      trailing_column_content_width(&self.rows),
       trailing_available_width,
     );
-    let header = has_header.then(|| Row::new(self.rows.headers()).style(THEME.table_header()));
     let table = Table::new(
-      self.rows.into_rows(),
+      into_rows(self.rows),
       [
         Constraint::Length(SELECTOR_COLUMN_WIDTH),
         Constraint::Min(PRIMARY_COLUMN_MIN_WIDTH),
@@ -66,13 +57,13 @@ impl StatefulWidget for TableBody {
       ],
     )
     .column_spacing(COLUMN_SPACING)
-    .row_highlight_style(THEME.table_highlight(self.accent))
-    .highlight_symbol("> ");
-    let table = if let Some(header) = header {
-      table.header(header.bottom_margin(1))
-    } else {
-      table
-    };
+    .row_highlight_style(THEME.table_highlight())
+    .highlight_symbol("> ")
+    .header(
+      Row::new(["", "Project / domain", "Target"])
+        .style(THEME.table_header())
+        .bottom_margin(1),
+    );
 
     StatefulWidget::render(table, inner, buf, state);
 
@@ -83,7 +74,7 @@ impl StatefulWidget for TableBody {
       StatefulWidget::render(
         Scrollbar::new(ScrollbarOrientation::VerticalRight),
         inner.inner(Margin {
-          vertical: if has_header { 1 } else { 0 },
+          vertical: 1,
           horizontal: 0,
         }),
         buf,
@@ -93,45 +84,24 @@ impl StatefulWidget for TableBody {
   }
 }
 
-impl TableBodyRows {
-  fn len(&self) -> usize {
-    match self {
-      Self::Domains(rows) => rows.len(),
-      Self::Settings(rows) => rows.len(),
-    }
-  }
+fn trailing_column_content_width(rows: &[DomainTableRow]) -> usize {
+  rows
+    .iter()
+    .filter(|row| row.kind() == DomainRowKind::Domain)
+    .map(|row| Line::from(display_upstream(row.endpoint())).width())
+    .max()
+    .unwrap_or_default()
+    .max(Line::from("Target").width())
+}
 
-  const fn has_header(&self) -> bool {
-    true
+fn into_rows(rows: Vec<DomainTableRow>) -> Vec<Row<'static>> {
+  if rows.is_empty() {
+    return vec![
+      Row::new(["", "No registered routes. Run caddy run in a project.", ""])
+        .style(THEME.table_disabled_row()),
+    ];
   }
-
-  fn headers(&self) -> [&'static str; 3] {
-    match self {
-      Self::Domains(_) => ["", "Entrypoint / domain", "Upstream"],
-      Self::Settings(_) => ["", "Component", "State"],
-    }
-  }
-
-  fn trailing_column_content_width(&self) -> usize {
-    let row_width = match self {
-      Self::Domains(rows) => rows
-        .iter()
-        .filter(|row| row.kind() == DomainRowKind::Domain)
-        .map(|row| Line::from(display_upstream(row.endpoint())).width())
-        .max(),
-      Self::Settings(rows) => rows.iter().map(|row| Line::from(row.value()).width()).max(),
-    }
-    .unwrap_or_default();
-
-    row_width.max(Line::from(self.headers()[2]).width())
-  }
-
-  fn into_rows(self) -> Vec<Row<'static>> {
-    match self {
-      Self::Domains(rows) => rows.into_iter().map(domain_row).collect(),
-      Self::Settings(rows) => rows.into_iter().map(settings_row).collect(),
-    }
-  }
+  rows.into_iter().map(domain_row).collect()
 }
 
 fn domain_row(row: DomainTableRow) -> Row<'static> {
@@ -139,7 +109,7 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
   let row_style = row_style(visually_enabled);
   let mut table_row = match row.kind() {
     DomainRowKind::Entrypoint => Row::new([
-      Cell::from(checkbox(row.enabled(), visually_enabled)),
+      Cell::from(state_marker(row.enabled(), visually_enabled)),
       Cell::from(project_path_line(
         row.name(),
         row.name_emphasis_start().unwrap_or_default(),
@@ -149,7 +119,7 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
     ])
     .style(row_style),
     DomainRowKind::Domain => Row::new([
-      Cell::from(checkbox(row.enabled(), visually_enabled)),
+      Cell::from(state_marker(row.enabled(), visually_enabled)),
       Cell::from(format!("  {}", row.name())),
       Cell::from(right_aligned(display_upstream(row.endpoint()))),
     ])
@@ -163,18 +133,9 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
   table_row
 }
 
-fn settings_row(row: SettingsTableRow) -> Row<'static> {
-  Row::new([
-    Cell::from(""),
-    Cell::from(row.name().to_string()),
-    Cell::from(right_aligned(row.value().to_string())),
-  ])
-  .style(THEME.table_row())
-}
-
-fn checkbox(checked: bool, visually_enabled: bool) -> Span<'static> {
-  let marker = if checked { "[x]" } else { "[ ]" };
-  Span::styled(marker, checkbox_style(visually_enabled))
+fn state_marker(active: bool, visually_enabled: bool) -> Span<'static> {
+  let marker = if active { "●" } else { "○" };
+  Span::styled(marker, marker_style(visually_enabled))
 }
 
 fn row_style(enabled: bool) -> ratatui::style::Style {
@@ -185,7 +146,7 @@ fn row_style(enabled: bool) -> ratatui::style::Style {
   }
 }
 
-fn checkbox_style(enabled: bool) -> ratatui::style::Style {
+fn marker_style(enabled: bool) -> ratatui::style::Style {
   if enabled {
     THEME.selected_marker()
   } else {
@@ -379,7 +340,7 @@ mod tests {
   }
 
   #[test]
-  fn native_tables_render_dynamic_domain_and_settings_rows_with_scrollbars() {
+  fn native_table_renders_dynamic_routes_with_scrollbars() {
     let mut model = DataModel::default();
     model.replace_snapshot(GuiStateSnapshot {
       captured_at_utc: Utc::now(),
@@ -408,13 +369,11 @@ mod tests {
     let area = Rect::new(0, 0, 80, 12);
     let mut buffer = Buffer::empty(area);
     let mut state = TableState::default().with_selected(Some(0));
-    TableBody::new(
-      THEME.domains_accent(),
-      TableBodyRows::Domains(model.domain_rows()),
-    )
-    .render(area, &mut buffer, &mut state);
+    TableBody::new(model.domain_rows()).render(area, &mut buffer, &mut state);
     let text = buffer_text(&buffer);
-    assert!(text.contains("Entrypoint / domain"));
+    assert!(text.contains("Project / domain"));
+    assert!(text.contains('●'));
+    assert!(text.contains('○'));
     assert!(text.contains("project-1"));
     assert!(text.contains("app.localhost"));
     assert!(text.contains(":51809"));
@@ -424,25 +383,8 @@ mod tests {
     let small_area = Rect::new(0, 0, 80, 8);
     let mut small_buffer = Buffer::empty(small_area);
     let mut state = TableState::default().with_selected(Some(4));
-    TableBody::new(
-      THEME.domains_accent(),
-      TableBodyRows::Domains(model.domain_rows()),
-    )
-    .render(small_area, &mut small_buffer, &mut state);
+    TableBody::new(model.domain_rows()).render(small_area, &mut small_buffer, &mut state);
     assert!(state.offset() > 0);
-
-    let settings = model.status_rows("Connected");
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 12));
-    let mut state = TableState::default().with_selected(Some(0));
-    TableBody::new(THEME.settings_accent(), TableBodyRows::Settings(settings)).render(
-      Rect::new(0, 0, 60, 12),
-      &mut buffer,
-      &mut state,
-    );
-    let text = buffer_text(&buffer);
-    assert!(text.contains("Component"));
-    assert!(text.contains("Daemon"));
-    assert!(text.contains("Connected"));
   }
 
   #[test]

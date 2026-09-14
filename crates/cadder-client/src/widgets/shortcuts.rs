@@ -5,38 +5,37 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::widgets::theme::THEME;
 
-pub const MAIN_SHORTCUTS: [Shortcut; 9] = [
-  Shortcut::new("Tab/Left/Right", "switch view"),
-  Shortcut::new("Up/Down", "select row"),
-  Shortcut::new("Space", "request toggle"),
-  Shortcut::new("Enter", "details"),
+pub const MAIN_SHORTCUTS: [Shortcut; 7] = [
+  Shortcut::new("Up/Down", "select"),
+  Shortcut::new("Space", "enable/disable"),
+  Shortcut::new("l", "logs"),
   Shortcut::new("r", "refresh"),
   Shortcut::new("x", "stop"),
   Shortcut::new("R", "restart"),
-  Shortcut::new("Esc", "quit"),
-  Shortcut::new("Ctrl+C", "quit"),
+  Shortcut::new("q", "quit"),
 ];
 
 pub const LOG_SHORTCUTS: [Shortcut; 6] = [
-  Shortcut::new("Tab/Left/Right", "switch view"),
-  Shortcut::new("Up/Down", "scroll logs"),
+  Shortcut::new("Up/Down", "select"),
   Shortcut::new("PgUp/PgDn", "scroll logs"),
+  Shortcut::new("l", "close logs"),
   Shortcut::new("r", "refresh"),
-  Shortcut::new("Esc", "quit"),
-  Shortcut::new("Ctrl+C", "quit"),
+  Shortcut::new("Space", "enable/disable"),
+  Shortcut::new("q", "quit"),
 ];
 
-pub const OFFLINE_SHORTCUTS: [Shortcut; 5] = [
-  Shortcut::new("Tab/Left/Right", "switch view"),
+pub const OFFLINE_SHORTCUTS: [Shortcut; 3] = [
   Shortcut::new("Enter", "start cadderd"),
   Shortcut::new("r", "retry"),
-  Shortcut::new("Esc", "quit"),
-  Shortcut::new("Ctrl+C", "quit"),
+  Shortcut::new("q", "quit"),
 ];
 
-pub const STARTING_SHORTCUTS: [Shortcut; 2] = [
-  Shortcut::new("Starting", "cadderd"),
-  Shortcut::new("Esc", "quit"),
+pub const PENDING_SHORTCUTS: [Shortcut; 1] = [Shortcut::new("q", "quit")];
+
+pub const CONFIRMATION_SHORTCUTS: [Shortcut; 3] = [
+  Shortcut::new("Enter", "confirm"),
+  Shortcut::new("Esc", "cancel"),
+  Shortcut::new("q", "quit"),
 ];
 
 #[derive(Debug, Clone, Copy)]

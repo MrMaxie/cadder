@@ -25,5 +25,4 @@ tokio-util = { version = "=0.7.18", features = ["rt"] }
 
 [dev-dependencies]
 chrono = { version = "=0.4.45", features = ["serde"] }
-insta = { version = "=1.48.0", default-features = false }
 tempfile = "=3.27.0"
