@@ -6,7 +6,7 @@ use crate::data::{EntityId, MutationTarget};
 use super::events::UiAction;
 
 pub(super) enum Effect {
-  Refresh(cadder_ipc::LogStreamIdentity),
+  Refresh,
   Start,
   Stop,
   Restart,
@@ -14,9 +14,9 @@ pub(super) enum Effect {
 }
 
 impl Effect {
-  pub(super) fn from(action: UiAction, log_stream: cadder_ipc::LogStreamIdentity) -> Self {
+  pub(super) fn from(action: UiAction) -> Self {
     match action {
-      UiAction::Refresh => Self::Refresh(log_stream),
+      UiAction::Refresh => Self::Refresh,
       UiAction::StartDaemon => Self::Start,
       UiAction::StopDaemon => Self::Stop,
       UiAction::RestartDaemon => Self::Restart,
@@ -39,7 +39,7 @@ pub(super) fn spawn_effect(
 ) {
   effects.spawn(async move {
     match effect {
-      Effect::Refresh(stream) => EffectResult::Refresh(load_refresh(&context, stream).await),
+      Effect::Refresh => EffectResult::Refresh(load_refresh(&context).await),
       Effect::Start => EffectResult::Start(
         context
           .ensure_daemon_running("tui")
@@ -55,10 +55,7 @@ pub(super) fn spawn_effect(
   });
 }
 
-async fn load_refresh(
-  context: &OperatorContext,
-  stream: cadder_ipc::LogStreamIdentity,
-) -> RefreshOutcome {
+async fn load_refresh(context: &OperatorContext) -> RefreshOutcome {
   match context.query_state_response().await {
     Ok(response) => {
       let Some(snapshot) = response.snapshot else {
@@ -68,13 +65,8 @@ async fn load_refresh(
           guidance: None,
         };
       };
-      let logs = context
-        .query_logs("tui", "query logs", stream, 200)
-        .await
-        .map_err(Into::into);
       RefreshOutcome::Connected {
         snapshot: Box::new(snapshot),
-        logs,
       }
     }
     Err(error) => {
@@ -202,21 +194,11 @@ mod tests {
 
   #[test]
   fn effects_map_every_ui_action_without_erasing_payloads() {
-    let stream = LogStreamIdentity::domain("app.localhost");
+    assert!(matches!(Effect::from(UiAction::Refresh), Effect::Refresh));
+    assert!(matches!(Effect::from(UiAction::StartDaemon), Effect::Start));
+    assert!(matches!(Effect::from(UiAction::StopDaemon), Effect::Stop));
     assert!(matches!(
-      Effect::from(UiAction::Refresh, stream.clone()),
-      Effect::Refresh(value) if value == stream
-    ));
-    assert!(matches!(
-      Effect::from(UiAction::StartDaemon, stream.clone()),
-      Effect::Start
-    ));
-    assert!(matches!(
-      Effect::from(UiAction::StopDaemon, stream.clone()),
-      Effect::Stop
-    ));
-    assert!(matches!(
-      Effect::from(UiAction::RestartDaemon, stream.clone()),
+      Effect::from(UiAction::RestartDaemon),
       Effect::Restart
     ));
     let target = MutationTarget {
@@ -224,7 +206,7 @@ mod tests {
       enabled: true,
     };
     assert!(matches!(
-      Effect::from(UiAction::Mutate(target), stream),
+      Effect::from(UiAction::Mutate(target)),
       Effect::Mutate(MutationTarget {
         entity: EntityId::Entrypoint(_),
         enabled: true
@@ -235,7 +217,7 @@ mod tests {
   #[tokio::test]
   async fn refresh_mutations_and_lifecycle_effects_run_through_the_operator_api() {
     let (_temp, context, _shutdown_tx, _session, server_task) = running_context().await;
-    let refresh = load_refresh(&context, LogStreamIdentity::runtime_control()).await;
+    let refresh = load_refresh(&context).await;
     assert!(matches!(refresh, RefreshOutcome::Connected { .. }));
 
     for target in [
@@ -259,11 +241,7 @@ mod tests {
     }
 
     let mut effects = tokio::task::JoinSet::new();
-    spawn_effect(
-      &mut effects,
-      context.clone(),
-      Effect::Refresh(LogStreamIdentity::runtime_control()),
-    );
+    spawn_effect(&mut effects, context.clone(), Effect::Refresh);
     assert!(matches!(
       effects.join_next().await.unwrap().unwrap(),
       EffectResult::Refresh(_)
@@ -289,7 +267,7 @@ mod tests {
     );
 
     assert!(matches!(
-      load_refresh(&context, LogStreamIdentity::runtime_control()).await,
+      load_refresh(&context).await,
       RefreshOutcome::Unavailable {
         connection: ConnectionStatus::Offline,
         ..

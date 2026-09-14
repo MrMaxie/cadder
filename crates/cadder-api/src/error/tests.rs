@@ -30,7 +30,7 @@ async fn typed_error_daemon_unavailable_maps_to_stable_exit_code() {
   assert_eq!(mapped.kind, AppExit::DaemonUnavailable);
   assert_eq!(
     mapped.guidance.as_deref(),
-    Some("Open Cadder and start it from Status, then retry.")
+    Some("Run `cadder tui` and press Enter to start cadderd, then retry.")
   );
 }
 

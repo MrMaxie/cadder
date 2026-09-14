@@ -185,7 +185,7 @@ exit /b 1
     use std::os::unix::fs::PermissionsExt;
     fs::write(
       path,
-      r#"#!/usr/bin/env sh
+      r#"#!/bin/sh
 if [ "$1" = "adapt" ]; then
 printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
 exit 0
@@ -222,7 +222,7 @@ exit /b 0
     fs::write(
       path,
       format!(
-        r#"#!/usr/bin/env sh
+        r#"#!/bin/sh
 if [ "$1" = "adapt" ]; then
 printf '%s\n' '{adapt_body}'
 exit {exit_code}
@@ -303,7 +303,7 @@ exit /b 1
     use std::os::unix::fs::PermissionsExt;
     fs::write(
       path,
-      r#"#!/usr/bin/env sh
+      r#"#!/bin/sh
 case "$1" in
 adapt)
   printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
@@ -698,10 +698,7 @@ async fn prepare_registration_commits_routes_on_success() {
   write_fake_caddy(&fake_caddy);
   let config_path = dir.path().join("Caddyfile");
   fs::write(&config_path, "project.localhost { respond ok }").unwrap();
-  let resolver = RealCaddyResolver::with_executable_path(
-    Some(fake_caddy.display().to_string()),
-    Some(dir.path().join(exe_name_for_test("cadderd"))),
-  );
+  let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
   let adapter = CaddyConfigAdapter::new(resolver.clone());
   let paths = RuntimePaths::resolve(Some(dir.path().join("run"))).unwrap();
   paths.ensure_dirs().unwrap();
@@ -715,7 +712,12 @@ async fn prepare_registration_commits_routes_on_success() {
 
   let prepared = coordinator.prepare_registration(registration).await;
 
-  assert_eq!(prepared.registered_domains.len(), 1);
+  assert_eq!(
+    prepared.registered_domains.len(),
+    1,
+    "registration diagnostics: {:?}",
+    coordinator.registration_diagnostics
+  );
   assert_eq!(
     prepared.registered_domains[0].name.canonical,
     "project.localhost"

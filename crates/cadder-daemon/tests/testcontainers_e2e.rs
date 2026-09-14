@@ -735,7 +735,7 @@ fn cadder_binary(env_var: &str, name: &str) -> Result<PathBuf> {
   let candidate = target_dir.join(profile).join(exe_name(name));
   ensure!(
     candidate.is_file(),
-    "missing {}. Build e2e binaries first with `cargo build -p cadder-daemon -p cadder-shim`, \
+    "missing {}. Build e2e binaries first with `cargo build --package cadder --bin cadderd --bin caddy`, \
      or set {env_var}. Looked for {}",
     name,
     candidate.display()

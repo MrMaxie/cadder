@@ -240,12 +240,9 @@ async fn connected_and_unavailable_statuses_include_operator_context() {
   let status = unavailable_status(&context, &not_running);
   assert_eq!(status.connection_state, ConnectionStateView::NotRunning);
   assert!(status.message.contains("is not running"));
-  assert!(
-    status
-      .guidance
-      .as_deref()
-      .is_some_and(|guidance| guidance == "Open Cadder and start it from Status, then retry.")
-  );
+  assert!(status.guidance.as_deref().is_some_and(|guidance| {
+    guidance == "Run `cadder tui` and press Enter to start cadderd, then retry."
+  }));
 
   let failed = IpcClientError::Daemon(ProtocolError::new(
     ProtocolErrorKind::IncompatibleProtocolVersion,

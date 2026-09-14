@@ -1,5 +1,5 @@
 use cadder_api::{domains_view, entrypoints_view};
-use cadder_ipc::{GuiStateSnapshot, LogStreamIdentity};
+use cadder_ipc::GuiStateSnapshot;
 use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Clone, Default)]
@@ -17,7 +17,7 @@ pub struct DomainTableRow {
   name: String,
   name_emphasis_start: Option<usize>,
   endpoint: String,
-  spaced_before: bool,
+  last_in_project: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,15 +68,21 @@ impl DataModel {
     let Some(snapshot) = &self.snapshot else {
       return Vec::new();
     };
-    let entrypoints = entrypoints_view(snapshot);
-    let domains = domains_view(snapshot, None);
+    let mut entrypoints = entrypoints_view(snapshot);
+    entrypoints
+      .entrypoints
+      .sort_by(|left, right| left.working_directory.cmp(&right.working_directory));
+    let mut domains = domains_view(snapshot, None);
+    domains.domains.sort_by(|left, right| {
+      (&left.working_directory, &left.canonical_domain)
+        .cmp(&(&right.working_directory, &right.canonical_domain))
+    });
     let project_name_emphasis = &self.project_name_emphasis;
 
     entrypoints
       .entrypoints
       .iter()
-      .enumerate()
-      .flat_map(|(entrypoint_index, entrypoint)| {
+      .flat_map(|entrypoint| {
         let registration_id = entrypoint.registration_id.clone();
         let entrypoint_enabled = entrypoint.activation_state.is_enabled();
         let entrypoint_row = DomainTableRow {
@@ -89,13 +95,19 @@ impl DataModel {
             .get(&entrypoint.working_directory)
             .copied(),
           endpoint: String::new(),
-          spaced_before: entrypoint_index > 0,
+          last_in_project: false,
         };
+        let domain_count = domains
+          .domains
+          .iter()
+          .filter(|domain| domain.registration_id == registration_id)
+          .count();
         let domain_rows = domains
           .domains
           .iter()
           .filter(move |domain| domain.registration_id == registration_id)
-          .map(move |domain| DomainTableRow {
+          .enumerate()
+          .map(move |(index, domain)| DomainTableRow {
             entity: EntityId::Domain {
               registration_id: domain.registration_id.clone(),
               canonical_domain: domain.canonical_domain.clone(),
@@ -106,7 +118,7 @@ impl DataModel {
             name: domain.domain.clone(),
             name_emphasis_start: None,
             endpoint: domain.upstream.clone().unwrap_or_default(),
-            spaced_before: false,
+            last_in_project: index + 1 == domain_count,
           });
 
         std::iter::once(entrypoint_row).chain(domain_rows)
@@ -134,19 +146,6 @@ impl DataModel {
     }
   }
 
-  pub fn log_stream(&self, entity: &EntityId) -> Option<LogStreamIdentity> {
-    let snapshot = self.snapshot.as_ref()?;
-    match entity {
-      EntityId::Entrypoint(registration_id) => Self::find_entrypoint(snapshot, registration_id)
-        .map(|entrypoint| entrypoint.log_stream.clone()),
-      EntityId::Domain {
-        registration_id,
-        canonical_domain,
-      } => Self::find_domain(snapshot, registration_id, canonical_domain)
-        .map(|domain| domain.log_stream.clone()),
-    }
-  }
-
   fn find_entrypoint<'a>(
     snapshot: &'a GuiStateSnapshot,
     registration_id: &str,
@@ -166,29 +165,6 @@ impl DataModel {
       .registered_domains
       .iter()
       .find(|domain| domain.name.canonical == canonical_domain)
-  }
-
-  pub fn log_title(&self, entity: &EntityId) -> String {
-    match entity {
-      EntityId::Entrypoint(registration_id) => self
-        .snapshot
-        .as_ref()
-        .and_then(|snapshot| Self::find_entrypoint(snapshot, registration_id))
-        .map_or_else(
-          || "Logs".to_string(),
-          |entrypoint| {
-            Path::new(&entrypoint.source_working_directory.raw)
-              .file_name()
-              .map_or_else(
-                || "Logs".to_string(),
-                |name| format!("Logs - {}", name.to_string_lossy()),
-              )
-          },
-        ),
-      EntityId::Domain {
-        canonical_domain, ..
-      } => format!("Logs - {canonical_domain}"),
-    }
   }
 }
 
@@ -221,8 +197,8 @@ impl DomainTableRow {
     &self.endpoint
   }
 
-  pub const fn spaced_before(&self) -> bool {
-    self.spaced_before
+  pub const fn is_last_in_project(&self) -> bool {
+    self.last_in_project
   }
 }
 
@@ -266,7 +242,8 @@ mod tests {
   use super::*;
   use cadder_ipc::{
     ActivationState, ConfigState, DomainName, EntrypointInstanceIdentity, EntrypointRegistration,
-    OwnerProcessIdentity, RegisteredDomain, RuntimeState, SourcePath, StorageState,
+    LogStreamIdentity, OwnerProcessIdentity, RegisteredDomain, RuntimeState, SourcePath,
+    StorageState,
   };
   use chrono::Utc;
 
@@ -342,7 +319,7 @@ mod tests {
   }
 
   #[test]
-  fn snapshot_drives_rows_mutations_and_log_targets() {
+  fn snapshot_drives_rows_and_mutations() {
     let mut model = DataModel::default();
     model.replace_snapshot(populated_snapshot());
 
@@ -353,24 +330,38 @@ mod tests {
     assert!(rows[0].visually_enabled());
     assert_eq!(rows[0].name(), "workspace/project-1");
     assert_eq!(rows[0].endpoint(), "");
-    assert!(!rows[0].spaced_before());
+    assert!(!rows[0].is_last_in_project());
     assert_eq!(
       &rows[0].name()[rows[0].name_emphasis_start().unwrap()..],
       "project-1"
     );
-    assert_eq!(rows[1].kind(), DomainRowKind::Domain);
-    assert!(rows[1].enabled());
-    assert!(rows[1].visually_enabled());
-    assert_eq!(rows[1].endpoint(), "127.0.0.1:3000");
-    assert!(!rows[2].enabled());
-    assert!(!rows[2].visually_enabled());
-    assert!(rows[3].spaced_before());
-    assert!(!rows[4].visually_enabled());
+    let app = rows
+      .iter()
+      .find(|row| row.name() == "app.localhost")
+      .unwrap();
+    assert_eq!(app.kind(), DomainRowKind::Domain);
+    assert!(app.enabled());
+    assert!(app.visually_enabled());
+    assert_eq!(app.endpoint(), "127.0.0.1:3000");
+    assert!(app.is_last_in_project());
+
+    let api = rows
+      .iter()
+      .find(|row| row.name() == "api.localhost")
+      .unwrap();
+    assert!(!api.enabled());
+    assert!(!api.visually_enabled());
+    assert!(!api.is_last_in_project());
+
+    let disabled = rows
+      .iter()
+      .find(|row| row.name() == "disabled.localhost")
+      .unwrap();
+    assert!(!disabled.visually_enabled());
+    assert!(disabled.is_last_in_project());
 
     for row in &rows {
       let entity = row.entity();
-      assert!(model.log_title(&entity).starts_with("Logs"));
-      assert!(model.log_stream(&entity).is_some());
       let target = model.mutation_target(&entity).unwrap();
       assert_eq!(target.entity, entity);
       assert_eq!(target.enabled, !row.enabled());
@@ -380,8 +371,6 @@ mod tests {
     assert!(model.domain_rows().is_empty());
     let missing = EntityId::Entrypoint("missing".to_string());
     assert!(model.mutation_target(&missing).is_none());
-    assert!(model.log_stream(&missing).is_none());
-    assert_eq!(model.log_title(&missing), "Logs");
   }
 
   #[test]

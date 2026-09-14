@@ -6,8 +6,8 @@ use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use crate::app::App;
 use crate::widgets::theme::THEME;
 use crate::widgets::{
-  CONFIRMATION_SHORTCUTS, HeaderBar, LOG_SHORTCUTS, LogsPanel, MAIN_SHORTCUTS, OFFLINE_SHORTCUTS,
-  PENDING_SHORTCUTS, RoutesTable, Shortcut, ShortcutsBar,
+  CONFIRMATION_SHORTCUTS, HeaderBar, MAIN_SHORTCUTS, OFFLINE_SHORTCUTS, PENDING_SHORTCUTS,
+  RoutesTable, Shortcut, ShortcutsBar,
 };
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -26,8 +26,6 @@ fn shortcuts(app: &App) -> &'static [Shortcut] {
     &PENDING_SHORTCUTS
   } else if app.can_start_daemon() {
     &OFFLINE_SHORTCUTS
-  } else if app.logs_open() {
-    &LOG_SHORTCUTS
   } else {
     &MAIN_SHORTCUTS
   }
@@ -39,7 +37,7 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
   }
 
   let notice = app.notice();
-  let areas = main_areas(area, app.logs_open(), notice.is_some());
+  let areas = main_areas(area, notice.is_some());
   frame.render_widget(
     HeaderBar::new(APP_VERSION, app.runtime_status()),
     areas.header,
@@ -53,14 +51,6 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     app.table_state_mut(),
   );
 
-  if let Some(logs) = areas.logs {
-    app.set_logs_viewport(logs.height.saturating_sub(2));
-    frame.render_widget(
-      LogsPanel::new(&app.log_title(), app.log_lines(), app.log_scroll()),
-      logs,
-    );
-  }
-
   if let (Some(notice_area), Some(notice)) = (areas.notice, notice) {
     Paragraph::new(Line::from(notice))
       .style(THEME.notice())
@@ -71,7 +61,6 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 struct MainAreas {
   header: Rect,
   routes: Rect,
-  logs: Option<Rect>,
   notice: Option<Rect>,
 }
 
@@ -92,25 +81,17 @@ fn root_areas(root: Rect) -> (Rect, Rect) {
   (main_area, footer_area)
 }
 
-fn main_areas(area: Rect, logs_open: bool, has_notice: bool) -> MainAreas {
+fn main_areas(area: Rect, has_notice: bool) -> MainAreas {
   let notice_height = u16::from(has_notice);
-  let available_content = area.height.saturating_sub(1 + notice_height);
-  let logs_height = if logs_open && available_content >= 8 {
-    (available_content / 3).clamp(6, 12)
-  } else {
-    0
-  };
-  let [header, routes, logs, notice] = area.layout(&Layout::vertical([
+  let [header, routes, notice] = area.layout(&Layout::vertical([
     Constraint::Length(1),
     Constraint::Fill(1),
-    Constraint::Length(logs_height),
     Constraint::Length(notice_height),
   ]));
 
   MainAreas {
     header,
     routes,
-    logs: (logs_height > 0).then_some(logs),
     notice: has_notice.then_some(notice),
   }
 }

@@ -1,30 +1,14 @@
 mod app;
+mod cli;
 mod data;
-mod logs;
+mod inspection;
 mod tui;
 mod widgets;
 
 use cadder_api::{AppExit, DaemonLaunchOptions, OperatorContext};
-use clap::{Parser, Subcommand, error::ErrorKind};
+use clap::{Parser, error::ErrorKind};
+use cli::Cli;
 use color_eyre::Result;
-
-#[derive(Debug, Parser)]
-#[command(
-  name = "cadder",
-  version,
-  about = "Cadder operator",
-  arg_required_else_help = true
-)]
-struct Cli {
-  #[command(subcommand)]
-  command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-  /// Open the full-screen operator.
-  Tui,
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> AppExit {
@@ -34,15 +18,7 @@ async fn main() -> AppExit {
   }
 
   match Cli::try_parse() {
-    Ok(Cli {
-      command: Command::Tui,
-    }) => match run_tui().await {
-      Ok(()) => AppExit::Success,
-      Err(error) => {
-        eprintln!("Could not run the Cadder TUI: {error}");
-        AppExit::IpcFailure
-      }
-    },
+    Ok(cli) => cli::run(cli).await,
     Err(error) => {
       let exit = cli_exit(&error);
       let _ = error.print();
@@ -59,7 +35,7 @@ fn cli_exit(error: &clap::Error) -> AppExit {
   }
 }
 
-async fn run_tui() -> Result<()> {
+pub(crate) async fn run_tui() -> Result<()> {
   let context = OperatorContext::new("tui", None, DaemonLaunchOptions::default())?;
   tui::run(context).await
 }

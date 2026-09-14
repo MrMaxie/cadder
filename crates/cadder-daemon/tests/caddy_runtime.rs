@@ -330,7 +330,7 @@ exit /b 0
     fs::write(
       &path,
       format!(
-        r#"#!/usr/bin/env sh
+        r#"#!/bin/sh
 printf '%s\n' "$*" >> '{command_log}'
 if [ "$1" = "adapt" ]; then
   {adapt_behavior}

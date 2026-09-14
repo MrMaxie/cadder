@@ -22,6 +22,9 @@ ratatui = "=0.30.2"
 tokio = { version = "=1.52.3", features = ["macros", "rt", "time"] }
 futures-util = "=0.3.32"
 tokio-util = { version = "=0.7.18", features = ["rt"] }
+netstat2 = "=0.11.2"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
+comfy-table = { version = "=8.0.0", default-features = false }
 
 [dev-dependencies]
 chrono = { version = "=0.4.45", features = ["serde"] }

@@ -34,11 +34,7 @@ async fn run_event_loop(
   refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
   let mut effects = tokio::task::JoinSet::new();
   let mut refresh_in_flight = true;
-  spawn_effect(
-    &mut effects,
-    context.clone(),
-    Effect::Refresh(app.log_stream()),
-  );
+  spawn_effect(&mut effects, context.clone(), Effect::Refresh);
 
   while !app.should_quit() {
     terminal.draw(|frame| render(frame, app))?;
@@ -46,7 +42,7 @@ async fn run_event_loop(
     tokio::select! {
       _ = refresh.tick(), if !refresh_in_flight && !app.is_pending() => {
         refresh_in_flight = true;
-        spawn_effect(&mut effects, context.clone(), Effect::Refresh(app.log_stream()));
+        spawn_effect(&mut effects, context.clone(), Effect::Refresh);
       },
       event = events.next() => {
         match event.transpose()? {
@@ -55,7 +51,7 @@ async fn run_event_loop(
               if matches!(action, UiAction::Refresh) {
                 refresh_in_flight = true;
               }
-              spawn_effect(&mut effects, context.clone(), Effect::from(action, app.log_stream()));
+              spawn_effect(&mut effects, context.clone(), Effect::from(action));
             }
           }
           None => app.quit(),
@@ -70,19 +66,19 @@ async fn run_event_loop(
           EffectResult::Start(result) => {
             if app.complete_daemon_start(result) && !refresh_in_flight {
               refresh_in_flight = true;
-              spawn_effect(&mut effects, context.clone(), Effect::Refresh(app.log_stream()));
+              spawn_effect(&mut effects, context.clone(), Effect::Refresh);
             }
           }
           EffectResult::Mutation(result) => {
             if app.complete_mutation(result) && !refresh_in_flight {
               refresh_in_flight = true;
-              spawn_effect(&mut effects, context.clone(), Effect::Refresh(app.log_stream()));
+              spawn_effect(&mut effects, context.clone(), Effect::Refresh);
             }
           }
           EffectResult::Lifecycle(result) => {
             if app.complete_lifecycle(result) && !refresh_in_flight {
               refresh_in_flight = true;
-              spawn_effect(&mut effects, context.clone(), Effect::Refresh(app.log_stream()));
+              spawn_effect(&mut effects, context.clone(), Effect::Refresh);
             }
           }
         }
@@ -123,7 +119,7 @@ mod tests {
   }
 
   #[test]
-  fn renderer_covers_offline_logs_confirmation_and_tiny_terminals() {
+  fn renderer_covers_offline_confirmation_and_tiny_terminals() {
     let mut app = App::new();
     app.apply_refresh(crate::app::RefreshOutcome::Unavailable {
       connection: crate::app::ConnectionStatus::Offline,
@@ -135,10 +131,6 @@ mod tests {
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     assert!(format!("{}", terminal.backend()).contains("Press Enter to start it"));
 
-    app.toggle_logs();
-    terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Logs"));
-
     let mut connected = App::new();
     connected.apply_refresh(crate::app::RefreshOutcome::Connected {
       snapshot: Box::new(cadder_ipc::GuiStateSnapshot {
@@ -147,11 +139,6 @@ mod tests {
         runtime: cadder_ipc::RuntimeState::idle(),
         config: cadder_ipc::ConfigState::idle(),
         storage: None,
-      }),
-      logs: Ok(cadder_api::LogsView {
-        stream: cadder_ipc::LogStreamIdentity::runtime_control(),
-        stream_status: cadder_ipc::LogStreamStatus::Empty,
-        entries: Vec::new(),
       }),
     });
     connected.prepare_lifecycle(crate::app::LifecycleAction::Restart);

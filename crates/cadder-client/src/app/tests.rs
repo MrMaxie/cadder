@@ -1,5 +1,5 @@
 use super::*;
-use cadder_ipc::{ConfigState, GuiStateSnapshot, LogStreamStatus, RuntimeState};
+use cadder_ipc::{ConfigState, GuiStateSnapshot, RuntimeState};
 use chrono::Utc;
 
 fn empty_snapshot() -> GuiStateSnapshot {
@@ -16,32 +16,29 @@ fn connected_app() -> App {
   let mut app = App::new();
   app.apply_refresh(RefreshOutcome::Connected {
     snapshot: Box::new(empty_snapshot()),
-    logs: Ok(LogsView {
-      stream: LogStreamIdentity::runtime_control(),
-      stream_status: LogStreamStatus::Empty,
-      entries: Vec::new(),
-    }),
   });
   app
 }
 
 #[test]
-fn runtime_status_keeps_global_health_compact() {
+fn runtime_status_reports_daemon_and_caddy_independently() {
   let running = RuntimeStatus {
     connection: ConnectionStatus::Connected,
     caddy_status: ProtocolRuntimeStatus::Running,
   };
-  assert_eq!(running.service_label(), "Caddy");
-  assert_eq!(running.state_label(), "running");
-  assert!(running.is_healthy());
+  assert_eq!(running.daemon_label(), "running");
+  assert_eq!(running.caddy_label(), "running");
+  assert!(running.daemon_is_running());
+  assert!(running.caddy_is_running());
 
   let offline = RuntimeStatus {
     connection: ConnectionStatus::Offline,
     caddy_status: ProtocolRuntimeStatus::Unknown,
   };
-  assert_eq!(offline.service_label(), "Cadder");
-  assert_eq!(offline.state_label(), "offline");
-  assert!(!offline.is_healthy());
+  assert_eq!(offline.daemon_label(), "not running");
+  assert_eq!(offline.caddy_label(), "not running");
+  assert!(!offline.daemon_is_running());
+  assert!(!offline.caddy_is_running());
 }
 
 #[test]
@@ -75,18 +72,6 @@ fn lifecycle_confirmation_stays_inline_and_explicit() {
   app.prepare_lifecycle(LifecycleAction::Stop);
   assert_eq!(app.confirm_lifecycle(), Some(LifecycleAction::Stop));
   assert!(app.is_pending());
-}
-
-#[test]
-fn logs_are_contextual_and_toggle_without_changing_views() {
-  let mut app = connected_app();
-  assert!(!app.logs_open());
-  assert!(app.toggle_logs());
-  assert_eq!(app.log_title(), "Logs");
-  app.set_logs_viewport(2);
-  app.scroll_logs_down(10);
-  app.scroll_logs_up(10);
-  assert!(!app.toggle_logs());
 }
 
 #[test]

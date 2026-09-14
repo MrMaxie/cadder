@@ -165,7 +165,7 @@ impl OperatorError {
         "Use the account that owns this Cadder runtime and verify access to the daemon executable and runtime directory."
           .to_string()
       } else {
-        "Fix the Cadder startup problem, then open Cadder and start it from Status."
+        "Fix the Cadder startup problem, then retry `cadder daemon start`."
           .to_string()
       })
     });
@@ -250,7 +250,7 @@ pub fn error_indicates_permission(error: &Error) -> bool {
 }
 
 pub fn start_guidance(_paths: &Path) -> String {
-  "Open Cadder and start it from Status, then retry.".to_string()
+  "Run `cadder tui` and press Enter to start cadderd, then retry.".to_string()
 }
 
 #[cfg(test)]

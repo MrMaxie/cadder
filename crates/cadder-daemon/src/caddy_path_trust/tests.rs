@@ -1,5 +1,7 @@
 use super::*;
-use std::{env, fs};
+#[cfg(windows)]
+use std::env;
+use std::fs;
 
 #[test]
 fn trusted_caddy_source_requires_absolute_executable_path() {

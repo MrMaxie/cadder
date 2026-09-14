@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli::Command;
 use clap::CommandFactory;
 
 #[test]
@@ -29,10 +30,35 @@ fn version_returns_success() {
 }
 
 #[test]
-fn tui_is_the_only_operator_command() {
+fn tui_command_is_preserved() {
   let cli = Cli::try_parse_from(["cadder", "tui"]).expect("TUI should parse");
 
   assert!(matches!(cli.command, Command::Tui));
+}
+
+#[test]
+fn inspection_and_listing_commands_parse() {
+  for arguments in [
+    vec!["cadder", "status"],
+    vec!["cadder", "daemon", "start"],
+    vec!["cadder", "projects", "list"],
+    vec!["cadder", "domains", "list"],
+    vec!["cadder", "domains", "inspect", "app.localhost"],
+    vec!["cadder", "port", "inspect", "3000"],
+    vec!["cadder", "caddyfile", "inspect", "Caddyfile"],
+    vec!["cadder", "diagnostics"],
+    vec!["cadder", "logs", "runtime"],
+  ] {
+    Cli::try_parse_from(arguments).expect("supported command should parse");
+  }
+}
+
+#[test]
+fn port_kill_requires_expected_pid() {
+  let error = Cli::try_parse_from(["cadder", "port", "kill", "3000"])
+    .expect_err("kill should require an expected PID");
+
+  assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -57,8 +83,14 @@ fn unknown_command_is_rejected_without_starting_the_tui() {
 fn root_help_is_generated_from_the_cli_definition() {
   let help = Cli::command().render_help().to_string();
 
-  assert!(help.contains("Cadder operator"));
+  assert!(help.contains("Inspect and manage Cadder routes"));
   assert!(!help.contains("--runtime-dir"));
   assert!(!help.contains("--profile"));
   assert!(help.contains("tui"));
+  assert!(help.contains("projects"));
+  assert!(help.contains("domains"));
+  assert!(help.contains("port"));
+  assert!(help.contains("caddyfile"));
+  assert!(help.contains("diagnostics"));
+  assert!(help.contains("logs"));
 }

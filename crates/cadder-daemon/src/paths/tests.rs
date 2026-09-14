@@ -43,6 +43,27 @@ fn resolve_override_derives_stable_socket_and_runtime_paths() {
 }
 
 #[test]
+fn explicit_runtime_directory_precedes_environment_directory() {
+  let explicit = PathBuf::from("explicit-runtime");
+  let environment = PathBuf::from("environment-runtime");
+
+  assert_eq!(
+    resolve_runtime_dir(Some(explicit.clone()), Some(environment)).unwrap(),
+    explicit
+  );
+}
+
+#[test]
+fn environment_runtime_directory_is_used_without_an_explicit_override() {
+  let environment = PathBuf::from("environment-runtime");
+
+  assert_eq!(
+    resolve_runtime_dir(None, Some(environment.clone())).unwrap(),
+    environment
+  );
+}
+
+#[test]
 fn for_executable_uses_its_parent_as_the_runtime_directory() {
   let dir = tempfile::tempdir().unwrap();
   let executable = dir.path().join("bin").join("cadder.exe");
@@ -56,11 +77,11 @@ fn for_executable_uses_its_parent_as_the_runtime_directory() {
 }
 
 #[test]
-fn resolve_uses_the_current_executable_parent() {
-  let paths = RuntimePaths::resolve(None).unwrap();
+fn runtime_resolution_falls_back_to_the_current_executable_parent() {
+  let runtime_dir = resolve_runtime_dir(None, None).unwrap();
   let executable = std::env::current_exe().unwrap();
 
-  assert_eq!(paths.runtime_dir(), executable.parent().unwrap());
+  assert_eq!(runtime_dir, executable.parent().unwrap());
 }
 
 #[test]

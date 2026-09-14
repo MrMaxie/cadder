@@ -1,5 +1,3 @@
-use std::net::IpAddr;
-
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Margin, Rect};
 use ratatui::style::Modifier;
@@ -10,9 +8,10 @@ use ratatui::widgets::{
 };
 
 use crate::data::{DomainRowKind, DomainTableRow};
+use crate::inspection::display_upstream;
 use crate::widgets::theme::THEME;
 
-const SELECTOR_COLUMN_WIDTH: u16 = 3;
+const SELECTOR_COLUMN_WIDTH: u16 = 4;
 const PRIMARY_COLUMN_MIN_WIDTH: u16 = 20;
 const COLUMN_SPACING: u16 = 1;
 
@@ -107,7 +106,7 @@ fn into_rows(rows: Vec<DomainTableRow>) -> Vec<Row<'static>> {
 fn domain_row(row: DomainTableRow) -> Row<'static> {
   let visually_enabled = row.visually_enabled();
   let row_style = row_style(visually_enabled);
-  let mut table_row = match row.kind() {
+  match row.kind() {
     DomainRowKind::Entrypoint => Row::new([
       Cell::from(state_marker(row.enabled(), visually_enabled)),
       Cell::from(project_path_line(
@@ -119,23 +118,29 @@ fn domain_row(row: DomainTableRow) -> Row<'static> {
     ])
     .style(row_style),
     DomainRowKind::Domain => Row::new([
-      Cell::from(state_marker(row.enabled(), visually_enabled)),
-      Cell::from(format!("  {}", row.name())),
+      Cell::from(domain_marker(
+        row.enabled(),
+        visually_enabled,
+        row.is_last_in_project(),
+      )),
+      Cell::from(row.name().to_string()),
       Cell::from(right_aligned(display_upstream(row.endpoint()))),
     ])
     .style(row_style),
-  };
-
-  if row.spaced_before() {
-    table_row = table_row.top_margin(1);
   }
-
-  table_row
 }
 
 fn state_marker(active: bool, visually_enabled: bool) -> Span<'static> {
   let marker = if active { "●" } else { "○" };
   Span::styled(marker, marker_style(visually_enabled))
+}
+
+fn domain_marker(active: bool, visually_enabled: bool, last: bool) -> Line<'static> {
+  let branch = if last { "└─ " } else { "├─ " };
+  Line::from(vec![
+    Span::styled(branch, THEME.tree_branch()),
+    state_marker(active, visually_enabled),
+  ])
 }
 
 fn row_style(enabled: bool) -> ratatui::style::Style {
@@ -156,7 +161,7 @@ fn marker_style(enabled: bool) -> ratatui::style::Style {
 
 fn project_name_style(visual_enabled: bool) -> ratatui::style::Style {
   if visual_enabled {
-    THEME.accent_text()
+    THEME.project_name()
   } else {
     THEME.table_disabled_row()
   }
@@ -178,30 +183,6 @@ fn project_path_line(path: &str, emphasis_start: usize, visually_enabled: bool) 
     ),
     Span::styled(emphasized.to_string(), project_name_style(visually_enabled)),
   ])
-}
-
-fn display_upstream(upstream: &str) -> String {
-  let Some((host, port)) = upstream.rsplit_once(':') else {
-    return upstream.to_string();
-  };
-  if port.parse::<u16>().is_err() {
-    return upstream.to_string();
-  }
-
-  let host = host
-    .strip_prefix('[')
-    .and_then(|host| host.strip_suffix(']'))
-    .unwrap_or(host);
-  let is_loopback = host.eq_ignore_ascii_case("localhost")
-    || host
-      .parse::<IpAddr>()
-      .is_ok_and(|address| address.is_loopback());
-
-  if is_loopback {
-    format!(":{port}")
-  } else {
-    upstream.to_string()
-  }
 }
 
 fn right_aligned(value: String) -> Line<'static> {
@@ -372,6 +353,8 @@ mod tests {
     TableBody::new(model.domain_rows()).render(area, &mut buffer, &mut state);
     let text = buffer_text(&buffer);
     assert!(text.contains("Project / domain"));
+    assert!(text.contains("├─ ○"), "rendered table:\n{text}");
+    assert!(text.contains("└─ ●"), "rendered table:\n{text}");
     assert!(text.contains('●'));
     assert!(text.contains('○'));
     assert!(text.contains("project-1"));

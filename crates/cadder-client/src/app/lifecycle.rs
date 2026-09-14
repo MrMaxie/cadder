@@ -5,7 +5,7 @@ use super::*;
 impl App {
   pub fn apply_refresh(&mut self, outcome: RefreshOutcome) {
     match outcome {
-      RefreshOutcome::Connected { snapshot, logs } => {
+      RefreshOutcome::Connected { snapshot } => {
         self.last_start_failed = false;
         self.runtime_status = RuntimeStatus {
           connection: ConnectionStatus::Connected,
@@ -15,10 +15,6 @@ impl App {
         self.connection_guidance = None;
         self.data.replace_snapshot(*snapshot);
         self.ensure_selected_row();
-        match logs {
-          Ok(logs) => self.logs.replace(logs),
-          Err(error) => self.logs.set_notice(error.message),
-        }
       }
       RefreshOutcome::Unavailable {
         connection,

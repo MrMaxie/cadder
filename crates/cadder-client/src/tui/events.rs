@@ -32,21 +32,13 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> Option<U
   }
 
   match code {
-    KeyCode::Esc if app.logs_open() => {
-      app.toggle_logs();
-    }
     KeyCode::Esc => app.quit(),
     KeyCode::Up => app.select_previous(),
     KeyCode::Down => app.select_next(),
-    KeyCode::PageUp if app.logs_open() => app.scroll_logs_up(10),
-    KeyCode::PageDown if app.logs_open() => app.scroll_logs_down(10),
-    KeyCode::Char('l' | 'L') => {
-      if app.toggle_logs() {
-        return Some(UiAction::Refresh);
-      }
-    }
     KeyCode::Enter if app.prepare_start_daemon() => return Some(UiAction::StartDaemon),
-    KeyCode::Char(' ') => return app.prepare_toggle_current().map(UiAction::Mutate),
+    KeyCode::Enter | KeyCode::Char(' ') => {
+      return app.prepare_toggle_current().map(UiAction::Mutate);
+    }
     KeyCode::Char('r') => return Some(UiAction::Refresh),
     KeyCode::Char('x' | 'X') => app.prepare_lifecycle(LifecycleAction::Stop),
     KeyCode::Char('R') => app.prepare_lifecycle(LifecycleAction::Restart),
@@ -78,6 +70,37 @@ pub(super) enum UiAction {
 mod tests {
   use super::*;
   use crate::app::RefreshOutcome;
+  use cadder_ipc::{
+    ActivationState, EntrypointInstanceIdentity, EntrypointRegistration, LogStreamIdentity,
+    OwnerProcessIdentity, SourcePath,
+  };
+  use chrono::Utc;
+
+  fn registration() -> EntrypointRegistration {
+    let now = Utc::now();
+    EntrypointRegistration {
+      registration_id: "entry-1".to_string(),
+      entrypoint_instance: EntrypointInstanceIdentity {
+        instance_id: "entry-1".to_string(),
+        started_at_utc: now,
+        shim_session_nonce: "nonce-1".to_string(),
+      },
+      source_working_directory: SourcePath::new("workspace/project-1", None),
+      source_config_path: SourcePath::new("workspace/project-1/Caddyfile", None),
+      registered_domains: Vec::new(),
+      activation_state: ActivationState::Active,
+      owner_process: OwnerProcessIdentity {
+        process_id: 42,
+        process_start_time_utc: now,
+        shim_session_nonce: "nonce-1".to_string(),
+        executable_path: None,
+      },
+      log_stream: LogStreamIdentity::entrypoint("entry-1"),
+      shim_run: None,
+      created_at_utc: now,
+      last_heartbeat_utc: now,
+    }
+  }
 
   #[test]
   fn keys_cover_navigation_refresh_start_lifecycle_and_quit() {
@@ -100,6 +123,21 @@ mod tests {
       Some(UiAction::StartDaemon)
     ));
 
+    let mut toggle = App::new();
+    toggle.apply_refresh(RefreshOutcome::Connected {
+      snapshot: Box::new(cadder_ipc::GuiStateSnapshot {
+        captured_at_utc: Utc::now(),
+        registrations: vec![registration()],
+        runtime: cadder_ipc::RuntimeState::idle(),
+        config: cadder_ipc::ConfigState::idle(),
+        storage: None,
+      }),
+    });
+    assert!(matches!(
+      handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut toggle),
+      Some(UiAction::Mutate(_))
+    ));
+
     let mut connected = App::new();
     connected.apply_refresh(RefreshOutcome::Connected {
       snapshot: Box::new(cadder_ipc::GuiStateSnapshot {
@@ -108,11 +146,6 @@ mod tests {
         runtime: cadder_ipc::RuntimeState::idle(),
         config: cadder_ipc::ConfigState::idle(),
         storage: None,
-      }),
-      logs: Ok(cadder_api::LogsView {
-        stream: cadder_ipc::LogStreamIdentity::runtime_control(),
-        stream_status: cadder_ipc::LogStreamStatus::Empty,
-        entries: Vec::new(),
       }),
     });
     handle_key(KeyCode::Char('x'), KeyModifiers::NONE, &mut connected);

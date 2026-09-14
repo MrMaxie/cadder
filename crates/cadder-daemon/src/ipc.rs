@@ -217,9 +217,13 @@ impl RuntimeEndpointLease {
     match Self::create(paths, &owner_principal) {
       Ok(listener) => {
         #[cfg(unix)]
-        return Self::from_listener(listener, owner_principal, paths, socket_claim_guard).map(Some);
+        {
+          Self::from_listener(listener, owner_principal, paths, socket_claim_guard).map(Some)
+        }
         #[cfg(not(unix))]
-        Self::from_listener(listener, owner_principal, paths).map(Some)
+        {
+          Self::from_listener(listener, owner_principal, paths).map(Some)
+        }
       }
       Err(error)
         if matches!(
@@ -235,8 +239,7 @@ impl RuntimeEndpointLease {
           crate::ipc_unix_security::remove_stale_socket(paths)?;
           let listener =
             Self::create(paths, &owner_principal).context("reclaim stale local IPC socket")?;
-          return Self::from_listener(listener, owner_principal, paths, socket_claim_guard)
-            .map(Some);
+          Self::from_listener(listener, owner_principal, paths, socket_claim_guard).map(Some)
         }
         #[cfg(not(unix))]
         {

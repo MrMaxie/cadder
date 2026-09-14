@@ -1,6 +1,7 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::widgets::Widget;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::app::RuntimeStatus;
 use crate::widgets::theme::THEME;
@@ -27,17 +28,23 @@ impl Widget for HeaderBar {
 
     buf.set_style(area, THEME.header());
 
-    let marker = if self.runtime_status.is_healthy() {
-      "●"
-    } else {
-      "○"
-    };
-    let status = format!(
-      "{marker} {} {} ",
-      self.runtime_status.service_label(),
-      self.runtime_status.state_label()
-    );
-    let status_width = u16::try_from(status.chars().count()).unwrap_or(u16::MAX);
+    let status = Line::from(vec![
+      Span::styled("cadderd", THEME.status_name()),
+      Span::raw(" "),
+      Span::styled(
+        self.runtime_status.daemon_label(),
+        status_state(self.runtime_status.daemon_is_running()),
+      ),
+      Span::styled(" | ", THEME.status_separator()),
+      Span::styled("Caddy", THEME.status_name()),
+      Span::raw(" "),
+      Span::styled(
+        self.runtime_status.caddy_label(),
+        status_state(self.runtime_status.caddy_is_running()),
+      ),
+      Span::raw(" "),
+    ]);
+    let status_width = u16::try_from(status.width()).unwrap_or(u16::MAX);
     let title_width = area.width.saturating_sub(status_width + 1).max(1);
     let title = format!(" Cadder v{}", self.version);
     buf.set_stringn(
@@ -50,12 +57,18 @@ impl Widget for HeaderBar {
 
     if area.width > status_width + 1 {
       let status_x = area.x + area.width - status_width;
-      let style = if self.runtime_status.is_healthy() {
-        THEME.service_online()
-      } else {
-        THEME.service_offline()
-      };
-      buf.set_stringn(status_x, area.y, status, status_width.into(), style);
+      Paragraph::new(status)
+        .alignment(Alignment::Right)
+        .style(THEME.header())
+        .render(Rect::new(status_x, area.y, status_width, 1), buf);
     }
+  }
+}
+
+fn status_state(running: bool) -> ratatui::style::Style {
+  if running {
+    THEME.status_running()
+  } else {
+    THEME.status_stopped()
   }
 }

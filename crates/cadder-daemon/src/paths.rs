@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const RUNTIME_DIR_ENV: &str = "CADDER_RUNTIME_DIR";
 
 #[derive(Debug, Clone)]
 pub struct RuntimePaths {
@@ -57,7 +60,10 @@ impl StoragePaths {
 
 impl RuntimePaths {
   pub fn resolve(override_dir: Option<PathBuf>) -> Result<Self> {
-    let runtime_dir = override_dir.map_or_else(runtime_dir_for_current_executable, Ok)?;
+    let environment_dir = env::var_os(RUNTIME_DIR_ENV)
+      .filter(|value| !value.is_empty())
+      .map(PathBuf::from);
+    let runtime_dir = resolve_runtime_dir(override_dir, environment_dir)?;
     Self::from_runtime_dir(runtime_dir)
   }
 
@@ -109,6 +115,15 @@ impl RuntimePaths {
   pub fn effective_config_path(&self) -> PathBuf {
     self.runtime_dir.join("effective-caddy.json")
   }
+}
+
+fn resolve_runtime_dir(
+  override_dir: Option<PathBuf>,
+  environment_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+  override_dir
+    .or(environment_dir)
+    .map_or_else(runtime_dir_for_current_executable, Ok)
 }
 
 fn runtime_dir_for_current_executable() -> Result<PathBuf> {

@@ -32,7 +32,9 @@ const PORTABLE_SOCKET_PATH_MAX_BYTES: usize = 103;
 /// directory, and is released by the kernel if its owner exits. It therefore
 /// cannot become persistent runtime ownership or block a later daemon.
 #[derive(Debug)]
-pub(crate) struct SocketClaimGuard(File);
+pub(crate) struct SocketClaimGuard {
+  _file: File,
+}
 
 impl SocketClaimGuard {
   pub(crate) fn acquire(paths: &RuntimePaths) -> io::Result<Self> {
@@ -44,8 +46,8 @@ impl SocketClaimGuard {
       .create(true)
       .mode(OWNER_FILE_MODE)
       .open(path)?;
-    file.lock_exclusive()?;
-    Ok(Self(file))
+    FileExt::lock(&file)?;
+    Ok(Self { _file: file })
   }
 }
 
@@ -90,14 +92,6 @@ pub(crate) fn validate_owner_only_runtime_file(path: &Path) -> io::Result<()> {
 pub(crate) fn secure_owner_only_runtime_file(path: &Path) -> io::Result<()> {
   let file = open_existing_lock_file_without_following_symlinks(path)?;
   secure_open_file(&file, path)
-}
-
-/// Opens an existing owner-controlled regular file without following symbolic links.
-pub(crate) fn open_owner_only_runtime_file(path: &Path) -> io::Result<File> {
-  validate_owned_path(path, ExpectedFileType::RegularFile)?;
-  let file = open_existing_lock_file_without_following_symlinks(path)?;
-  secure_open_file(&file, path)?;
-  Ok(file)
 }
 
 /// Restricts an existing owner-controlled directory to mode `0700`.

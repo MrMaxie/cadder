@@ -23,15 +23,15 @@ struct Colors {
 impl Theme {
   pub const fn cadder() -> Self {
     let colors = Colors {
-      backdrop: Color::Rgb(4, 15, 14),
-      surface: Color::Rgb(7, 24, 22),
-      surface_selected: Color::Rgb(12, 55, 49),
-      border: Color::Rgb(26, 102, 91),
-      text: Color::Rgb(223, 255, 249),
-      text_muted: Color::Rgb(139, 190, 181),
-      text_soft: Color::Rgb(187, 231, 224),
-      mint_soft: Color::Rgb(125, 244, 221),
-      dim: Color::Rgb(45, 85, 80),
+      backdrop: Color::Rgb(10, 12, 15),
+      surface: Color::Rgb(17, 20, 24),
+      surface_selected: Color::Rgb(30, 36, 42),
+      border: Color::Rgb(55, 64, 71),
+      text: Color::Rgb(231, 235, 238),
+      text_muted: Color::Rgb(127, 138, 145),
+      text_soft: Color::Rgb(194, 203, 208),
+      mint_soft: Color::Rgb(91, 218, 191),
+      dim: Color::Rgb(79, 89, 95),
     };
 
     Self { colors }
@@ -62,18 +62,29 @@ impl Theme {
       .add_modifier(Modifier::BOLD)
   }
 
-  pub fn service_online(self) -> Style {
+  pub fn status_name(self) -> Style {
+    Style::new()
+      .fg(self.colors.text)
+      .bg(self.colors.backdrop)
+      .add_modifier(Modifier::BOLD)
+  }
+
+  pub fn status_running(self) -> Style {
     Style::new()
       .fg(self.colors.mint_soft)
       .bg(self.colors.backdrop)
       .add_modifier(Modifier::BOLD)
   }
 
-  pub fn service_offline(self) -> Style {
+  pub fn status_stopped(self) -> Style {
     Style::new()
       .fg(self.colors.dim)
       .bg(self.colors.backdrop)
       .add_modifier(Modifier::DIM)
+  }
+
+  pub fn status_separator(self) -> Style {
+    Style::new().fg(self.colors.dim).bg(self.colors.backdrop)
   }
 
   pub fn table(self) -> Style {
@@ -94,13 +105,14 @@ impl Theme {
 
   pub fn table_header(self) -> Style {
     Style::new()
-      .fg(self.colors.mint_soft)
-      .bg(self.colors.surface_selected)
+      .fg(self.colors.text_soft)
       .add_modifier(Modifier::BOLD)
   }
 
   pub fn table_highlight(self) -> Style {
-    Style::new().add_modifier(Modifier::BOLD)
+    Style::new()
+      .bg(self.colors.surface_selected)
+      .add_modifier(Modifier::BOLD)
   }
 
   pub fn selected_marker(self) -> Style {
@@ -113,10 +125,8 @@ impl Theme {
     Style::new().fg(self.colors.text_muted)
   }
 
-  pub fn panel_title(self) -> Style {
-    Style::new()
-      .fg(self.colors.mint_soft)
-      .add_modifier(Modifier::BOLD)
+  pub fn tree_branch(self) -> Style {
+    Style::new().fg(self.colors.dim)
   }
 
   pub fn notice(self) -> Style {
@@ -125,13 +135,9 @@ impl Theme {
       .bg(self.colors.surface_selected)
   }
 
-  pub fn text(self) -> Style {
-    Style::new().fg(self.colors.text)
-  }
-
-  pub fn accent_text(self) -> Style {
+  pub fn project_name(self) -> Style {
     Style::new()
-      .fg(self.colors.mint_soft)
+      .fg(self.colors.text)
       .add_modifier(Modifier::BOLD)
   }
 }
@@ -151,13 +157,15 @@ mod tests {
     assert_eq!(theme.footer().bg, Some(theme.colors.backdrop));
     assert_eq!(theme.header().bg, Some(theme.colors.backdrop));
     assert_eq!(theme.header_title().fg, Some(theme.colors.text));
-    assert_eq!(theme.service_online().fg, Some(theme.colors.mint_soft));
-    assert_eq!(theme.service_offline().fg, Some(theme.colors.dim));
+    assert_eq!(theme.status_name().fg, Some(theme.colors.text));
+    assert_eq!(theme.status_running().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.status_stopped().fg, Some(theme.colors.dim));
+    assert_eq!(theme.status_separator().fg, Some(theme.colors.dim));
     assert_eq!(theme.table().bg, Some(theme.colors.surface));
     assert_eq!(theme.table_border().fg, Some(theme.colors.border));
     assert_eq!(theme.table_row().fg, Some(theme.colors.text_soft));
     assert_eq!(theme.table_disabled_row().fg, Some(theme.colors.text_muted));
-    assert_eq!(theme.table_header().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.table_header().fg, Some(theme.colors.text_soft));
     assert!(
       theme
         .table_highlight()
@@ -166,9 +174,8 @@ mod tests {
     );
     assert_eq!(theme.selected_marker().fg, Some(theme.colors.mint_soft));
     assert_eq!(theme.disabled_marker().fg, Some(theme.colors.text_muted));
-    assert_eq!(theme.panel_title().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.tree_branch().fg, Some(theme.colors.dim));
     assert_eq!(theme.notice().bg, Some(theme.colors.surface_selected));
-    assert_eq!(theme.text().fg, Some(theme.colors.text));
-    assert_eq!(theme.accent_text().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.project_name().fg, Some(theme.colors.text));
   }
 }

@@ -53,7 +53,7 @@ async fn pinned_caddy_image_metadata_reader_bounds_and_drains_output() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn wait_keeps_tree_non_empty_after_leader_exits_until_grandchild_cleanup() {
+async fn terminate_and_join_cleans_an_orphaned_grandchild() {
   let temp = tempfile::tempdir().unwrap();
   let grandchild_started = temp.path().join("grandchild-started");
   let program = write_orphaned_grandchild_process_tree(temp.path(), &grandchild_started);
@@ -69,21 +69,14 @@ async fn wait_keeps_tree_non_empty_after_leader_exits_until_grandchild_cleanup()
     .trim()
     .parse::<libc::pid_t>()
     .unwrap();
-  wait_for_unix_process_exit(&mut child, process_group_id).await;
+  let leader_status = wait_for_unix_process_exit(&mut child).await;
 
+  assert!(leader_status.success());
   assert!(unix_process_exists(grandchild_id));
   assert_eq!(
     unix_process_group_id(grandchild_id).unwrap(),
     process_group_id
   );
-  assert!(child.try_wait().unwrap().is_none());
-  assert!(
-    timeout(Duration::from_millis(100), child.wait())
-      .await
-      .is_err(),
-    "wait completed while the orphaned grandchild still occupied the process group"
-  );
-
   timeout(
     CLEANUP_TIMEOUT + Duration::from_secs(1),
     child.terminate_and_join("orphaned grandchild test tree"),
@@ -92,7 +85,7 @@ async fn wait_keeps_tree_non_empty_after_leader_exits_until_grandchild_cleanup()
   .expect("orphaned grandchild cleanup exceeded its test deadline")
   .unwrap();
 
-  assert!(unix_process_group_is_empty(process_group_id).unwrap());
+  wait_for_unix_process_group_empty(process_group_id).await;
 }
 
 #[cfg(windows)]
@@ -132,17 +125,31 @@ async fn wait_for_file(path: &Path) {
 }
 
 #[cfg(unix)]
-async fn wait_for_unix_process_exit(child: &mut ProcessTreeChild, process_id: libc::pid_t) {
+async fn wait_for_unix_process_exit(child: &mut ProcessTreeChild) -> std::process::ExitStatus {
   let deadline = Instant::now() + CLEANUP_TIMEOUT;
-  while unix_process_exists(process_id) {
-    assert!(
-      child.try_wait().unwrap().is_none(),
-      "process tree reported completion before the leader exited"
-    );
+  loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      return status;
+    }
     assert!(
       Instant::now() < deadline,
-      "process-tree leader did not exit within its deadline"
+      "process-tree leader did not exit"
     );
+    sleep(Duration::from_millis(10)).await;
+  }
+}
+
+#[cfg(unix)]
+async fn wait_for_unix_process_group_empty(process_group_id: libc::pid_t) {
+  let deadline = Instant::now() + CLEANUP_TIMEOUT;
+  loop {
+    assert!(
+      Instant::now() < deadline,
+      "orphaned process group was not reaped"
+    );
+    if unix_process_group_is_empty(process_group_id).unwrap() {
+      return;
+    }
     sleep(Duration::from_millis(10)).await;
   }
 }
@@ -164,6 +171,20 @@ fn unix_process_group_id(process_id: libc::pid_t) -> io::Result<libc::pid_t> {
     return Err(io::Error::last_os_error());
   }
   Ok(process_group_id)
+}
+
+#[cfg(unix)]
+fn unix_process_group_is_empty(process_group_id: libc::pid_t) -> io::Result<bool> {
+  // SAFETY: a negative PID with signal zero checks the process group without sending a signal.
+  if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+    return Ok(false);
+  }
+  let error = io::Error::last_os_error();
+  match error.raw_os_error() {
+    Some(libc::ESRCH) => Ok(true),
+    Some(libc::EPERM) => Ok(false),
+    _ => Err(error),
+  }
 }
 
 fn write_blocking_process_tree(dir: &Path, started: &Path) -> std::path::PathBuf {

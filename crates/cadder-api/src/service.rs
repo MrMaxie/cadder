@@ -14,6 +14,11 @@ use cadder_ipc::{
   SetDomainEnabledPayload, SetEntrypointEnabledPayload, ShutdownDaemonPayload, new_request_id,
 };
 use std::path::PathBuf;
+use tokio::time::{Duration, sleep};
+
+const DAEMON_STOP_ATTEMPTS: usize = 100;
+const DAEMON_STOP_CONFIRMATIONS: usize = 3;
+const DAEMON_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainSelector {
@@ -160,7 +165,43 @@ impl OperatorContext {
 
   pub async fn restart_daemon(&self, command: &'static str) -> Result<(), OperatorError> {
     self.stop_daemon(command).await?;
+    self.wait_for_daemon_stop(command).await?;
     self.ensure_daemon_running(command).await
+  }
+
+  async fn wait_for_daemon_stop(&self, command: &'static str) -> Result<(), OperatorError> {
+    let mut stopped_confirmations = 0;
+    for _ in 0..DAEMON_STOP_ATTEMPTS {
+      match self.query_state_response().await {
+        Ok(_) => stopped_confirmations = 0,
+        Err(error)
+          if error.retryable()
+            || daemon_error_indicates_unavailable(&error)
+            || error.is_stale_instance() =>
+        {
+          stopped_confirmations += 1;
+          if stopped_confirmations == DAEMON_STOP_CONFIRMATIONS {
+            return Ok(());
+          }
+        }
+        Err(error) => {
+          return Err(OperatorError::daemon_request(
+            command,
+            self.paths.runtime_dir(),
+            "wait for the daemon to stop",
+            error,
+          ));
+        }
+      }
+      sleep(DAEMON_STOP_POLL_INTERVAL).await;
+    }
+
+    Err(OperatorError::new(
+      command,
+      crate::AppExit::IpcFailure,
+      "Cadder timed out waiting for the previous daemon process to release its local endpoint.",
+      Some("Check the daemon diagnostics, then retry the restart once.".to_string()),
+    ))
   }
 
   pub async fn resolve_logs_target(
@@ -176,7 +217,7 @@ impl OperatorContext {
           OperatorError::target_not_found(
             command,
             format!("Entrypoint `{registration_id}` was not found."),
-            Some("Run `cadder entrypoints list` to inspect valid registration IDs.".to_string()),
+            Some("Run `cadder projects list` to inspect registered Caddyfiles.".to_string()),
           )
         })?;
         Ok(entrypoint.log_stream.clone())
@@ -228,7 +269,7 @@ impl OperatorContext {
       return Err(OperatorError::target_not_found(
         command,
         format!("Entrypoint `{registration_id}` was not found."),
-        Some("Run `cadder entrypoints list` to inspect valid registration IDs.".to_string()),
+        Some("Run `cadder projects list` to inspect registered Caddyfiles.".to_string()),
       ));
     }
 
@@ -299,10 +340,7 @@ impl OperatorContext {
             "Domain `{canonical_domain}` matches multiple entrypoints: {}.",
             matches.join(", ")
           ),
-          Some(
-            "Retry the command with `--registration <id>` to choose the exact entrypoint."
-              .to_string(),
-          ),
+          Some("Run `cadder projects list`, then retry with the exact Caddyfile path.".to_string()),
         ),
       }
     })

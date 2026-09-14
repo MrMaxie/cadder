@@ -1,22 +1,17 @@
 mod lifecycle;
 mod navigation;
 
-use cadder_api::LogsView;
-use cadder_ipc::{LogStreamIdentity, RuntimeStatus as ProtocolRuntimeStatus};
+use cadder_ipc::RuntimeStatus as ProtocolRuntimeStatus;
 use ratatui::widgets::TableState;
 
 use crate::data::DataModel;
-use crate::logs::LogStore;
 
 pub struct App {
   data: DataModel,
-  logs: LogStore,
-  log_stream: LogStreamIdentity,
   table_state: TableState,
   runtime_status: RuntimeStatus,
   connection_message: String,
   connection_guidance: Option<String>,
-  logs_open: bool,
   confirmation: Option<LifecycleAction>,
   notice: Option<String>,
   pending_message: Option<&'static str>,
@@ -27,7 +22,6 @@ pub struct App {
 pub enum RefreshOutcome {
   Connected {
     snapshot: Box<cadder_ipc::GuiStateSnapshot>,
-    logs: Result<LogsView, ActionFailure>,
   },
   Unavailable {
     connection: ConnectionStatus,
@@ -75,8 +69,6 @@ impl App {
   pub fn new() -> Self {
     let mut app = Self {
       data: DataModel::default(),
-      logs: LogStore::new(),
-      log_stream: LogStreamIdentity::runtime_control(),
       table_state: TableState::new(),
       runtime_status: RuntimeStatus {
         connection: ConnectionStatus::Connecting,
@@ -84,7 +76,6 @@ impl App {
       },
       connection_message: "Connecting to Cadder...".to_string(),
       connection_guidance: None,
-      logs_open: false,
       confirmation: None,
       notice: None,
       pending_message: None,
@@ -97,33 +88,28 @@ impl App {
 }
 
 impl RuntimeStatus {
-  pub const fn service_label(self) -> &'static str {
-    if matches!(self.connection, ConnectionStatus::Connected) {
-      "Caddy"
+  pub const fn daemon_label(self) -> &'static str {
+    if self.daemon_is_running() {
+      "running"
     } else {
-      "Cadder"
+      "not running"
     }
   }
 
-  pub const fn state_label(self) -> &'static str {
-    match self.connection {
-      ConnectionStatus::Connecting => "connecting",
-      ConnectionStatus::Offline => "offline",
-      ConnectionStatus::Error => "connection error",
-      ConnectionStatus::Connected => match self.caddy_status {
-        ProtocolRuntimeStatus::Unknown => "unknown",
-        ProtocolRuntimeStatus::NotResolved => "not resolved",
-        ProtocolRuntimeStatus::Resolved => "resolved",
-        ProtocolRuntimeStatus::Running => "running",
-        ProtocolRuntimeStatus::Unhealthy => "unhealthy",
-        ProtocolRuntimeStatus::Idle => "idle",
-      },
+  pub const fn caddy_label(self) -> &'static str {
+    if self.caddy_is_running() {
+      "running"
+    } else {
+      "not running"
     }
   }
 
-  pub const fn is_healthy(self) -> bool {
+  pub const fn daemon_is_running(self) -> bool {
     matches!(self.connection, ConnectionStatus::Connected)
-      && matches!(self.caddy_status, ProtocolRuntimeStatus::Running)
+  }
+
+  pub const fn caddy_is_running(self) -> bool {
+    self.daemon_is_running() && matches!(self.caddy_status, ProtocolRuntimeStatus::Running)
   }
 }
 

@@ -100,3 +100,24 @@ fn unix_ipc_security_accepts_an_owner_only_socket_root() {
 
   validate_socket_root(root.path()).unwrap();
 }
+
+#[test]
+fn unix_ipc_security_socket_claim_guard_holds_the_recovery_lock() {
+  let root = tempfile::tempdir().unwrap();
+  let paths = runtime_paths(root.path());
+  let guard = SocketClaimGuard::acquire(&paths).unwrap();
+  let lock_path = unix_socket_path(&paths).with_extension("reclaim");
+  let contender = OpenOptions::new()
+    .read(true)
+    .write(true)
+    .open(lock_path)
+    .unwrap();
+
+  assert!(matches!(
+    FileExt::try_lock(&contender),
+    Err(fs4::TryLockError::WouldBlock)
+  ));
+
+  drop(guard);
+  FileExt::try_lock(&contender).unwrap();
+}

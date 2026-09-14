@@ -5,22 +5,12 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::widgets::theme::THEME;
 
-pub const MAIN_SHORTCUTS: [Shortcut; 7] = [
+pub const MAIN_SHORTCUTS: [Shortcut; 6] = [
   Shortcut::new("Up/Down", "select"),
-  Shortcut::new("Space", "enable/disable"),
-  Shortcut::new("l", "logs"),
+  Shortcut::new("Space/Enter", "enable/disable"),
   Shortcut::new("r", "refresh"),
   Shortcut::new("x", "stop"),
   Shortcut::new("R", "restart"),
-  Shortcut::new("q", "quit"),
-];
-
-pub const LOG_SHORTCUTS: [Shortcut; 6] = [
-  Shortcut::new("Up/Down", "select"),
-  Shortcut::new("PgUp/PgDn", "scroll logs"),
-  Shortcut::new("l", "close logs"),
-  Shortcut::new("r", "refresh"),
-  Shortcut::new("Space", "enable/disable"),
   Shortcut::new("q", "quit"),
 ];
 
