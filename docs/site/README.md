@@ -14,14 +14,14 @@ mise run docs-build
 When working directly in this package, run commands from `docs/site`.
 
 ```sh
-bun install --frozen-lockfile
-bun run dev
-bun run check
-bun run build
-bun run preview
+npm ci
+npm run dev
+npm run check
+npm run build
+npm run preview
 ```
 
-`bun run build` writes generated output to `docs/site/dist`. Do not commit generated output, `.astro`, cache directories, or preview artifacts.
+`npm run build` writes generated output to `docs/site/dist`. Do not commit generated output, `.astro`, cache directories, or preview artifacts.
 
 ## Content source
 

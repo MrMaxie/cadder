@@ -11,7 +11,7 @@ mise install --locked
 mise tasks
 ```
 
-The lockfile pins Rust and its formatting, lint, and coverage components, Bun, Node, OpenSpec, cargo-llvm-cov, and cargo-dist.
+The lockfile pins Rust and its formatting, lint, and coverage components, Node.js, OpenSpec, cargo-llvm-cov, and cargo-dist. npm is provided by the pinned Node.js distribution.
 
 ## Validation
 

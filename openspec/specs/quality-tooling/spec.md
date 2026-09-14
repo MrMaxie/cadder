@@ -34,7 +34,7 @@ Tasks MUST remain small adapters to an owning tool. The repository MUST NOT add 
 - **AND** any claimed exception requires an explicit Cadder product invariant and a focused verification owner
 
 ### Requirement: QT-003: Maintained tools own validation and release formats
-Cargo SHALL own Rust formatting, linting, builds, and tests; `cargo-llvm-cov` SHALL own coverage calculation and the configured threshold; the official OpenSpec CLI SHALL own specification validation; Bun and Astro SHALL own documentation dependency and build checks; and `cargo-dist` SHALL own release planning, portable archives, included release files, SHA-256 checksums, and generated GitHub Release automation.
+Cargo SHALL own Rust formatting, linting, builds, and tests; `cargo-llvm-cov` SHALL own coverage calculation and the configured threshold; the official OpenSpec CLI SHALL own specification validation; npm and Astro SHALL own documentation dependency and build checks; and `cargo-dist` SHALL own release planning, portable archives, included release files, SHA-256 checksums, and generated GitHub Release automation.
 
 Cadder-specific executable behavior MUST be verified by tests in the package that owns the executable. Repository checks that only restate a native manifest, generated release plan, or accepted OpenSpec declaration MUST NOT be retained as independent policy engines.
 

@@ -55,6 +55,6 @@ The routes workspace accepts arbitrary collection lengths. The header reports `c
 
 ## Tooling and releases
 
-`mise.toml` and `mise.lock` define the repository environment and tasks. Maintained tools own their own policies: Cargo and Clippy for Rust, cargo-llvm-cov for coverage, OpenSpec for specifications, Bun/Astro for documentation, and cargo-dist for release archives and checksums.
+`mise.toml` and `mise.lock` define the repository environment and tasks. Maintained tools own their own policies: Cargo and Clippy for Rust, cargo-llvm-cov for coverage, OpenSpec for specifications, Node.js, npm, and Astro for documentation, and cargo-dist for release archives and checksums.
 
 The cargo-dist workflow is generated at `.github/workflows/release.yml`. Windows x64, Linux x64, macOS x64, and macOS arm64 are release targets. A configuration-only root package lets cargo-dist produce one platform archive containing all three version-matched executables, the README, changelog, license, and sample configuration plus a SHA-256 checksum. Runtime code remains in its owning workspace crates.
