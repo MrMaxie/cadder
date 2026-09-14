@@ -1,6 +1,6 @@
 //! Standalone frames used before versioned operation envelopes are available.
 
-use crate::{CapabilityId, ProtocolError, ProtocolVersion, ProtocolVersionRange, RequestId};
+use crate::{ProtocolError, ProtocolVersion, RequestId};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// Operation label used for the first client frame on a connection.
@@ -14,17 +14,7 @@ pub const SERVER_HELLO_OPERATION: &str = "server-hello";
 pub struct ClientHello {
   pub request_id: RequestId,
   pub runtime_id: Box<str>,
-  /// Optional legacy instance identifier.
-  ///
-  /// The local endpoint is the authority for selecting a daemon. New clients
-  /// therefore leave this empty and learn the daemon instance from
-  /// [`ServerHello`]. Keeping the field optional lets a newly built daemon
-  /// reject or accept older clients without a discovery sidecar.
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub daemon_instance_id: Option<Box<str>>,
-  pub supported_versions: ProtocolVersionRange,
-  #[serde(default)]
-  pub capabilities: Box<[CapabilityId]>,
+  pub protocol_version: ProtocolVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,9 +24,7 @@ pub struct ServerHello {
   pub request_id: RequestId,
   pub runtime_id: Box<str>,
   pub daemon_instance_id: Box<str>,
-  pub selected_version: ProtocolVersion,
-  #[serde(default)]
-  pub capabilities: Box<[CapabilityId]>,
+  pub protocol_version: ProtocolVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,11 +103,6 @@ impl<'de> Deserialize<'de> for HandshakeRejection {
         "a handshake rejection must contain a correlated request ID",
       ));
     }
-    if rejection.error.has_legacy_version_metadata() {
-      return Err(de::Error::custom(
-        "a versioned handshake error cannot contain legacy protocol metadata",
-      ));
-    }
     Ok(Self {
       runtime_id: rejection.runtime_id,
       daemon_instance_id: rejection.daemon_instance_id,
@@ -129,113 +112,4 @@ impl<'de> Deserialize<'de> for HandshakeRejection {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::{CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
-
-  #[test]
-  fn protocol_handshake_roundtrips_and_rejects_unknown_fields() {
-    let hello = ClientHello {
-      request_id: RequestId::parse("hello-1").unwrap(),
-      runtime_id: "runtime-1".into(),
-      daemon_instance_id: Some("instance-1".into()),
-      supported_versions: SUPPORTED_PROTOCOL_VERSIONS,
-      capabilities: vec![CapabilityId::parse("logs").unwrap()].into_boxed_slice(),
-    };
-    let json = serde_json::to_string(&hello).unwrap();
-    let decoded: ClientHello = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(decoded, hello);
-    assert!(json.contains("\"major\":1"));
-    assert_eq!(
-      CURRENT_PROTOCOL_VERSION,
-      ProtocolVersion::new(1, 0).unwrap()
-    );
-    assert!(
-      serde_json::from_str::<ClientHello>(
-        r#"{"requestId":"hello-1","runtimeId":"r","daemonInstanceId":"i","supportedVersions":{"minimum":{"major":1,"minor":0},"maximum":{"major":1,"minor":0}},"capabilities":[],"unexpected":true}"#
-      )
-      .is_err()
-    );
-
-    let server_with_additive_field = r#"{"requestId":"hello-1","runtimeId":"runtime-1","daemonInstanceId":"instance-1","selectedVersion":{"major":1,"minor":0},"capabilities":["logs"],"futureDiagnostic":"ready"}"#;
-    assert!(serde_json::from_str::<ServerHello>(server_with_additive_field).is_ok());
-  }
-
-  #[test]
-  fn protocol_handshake_rejects_an_incompatible_major_with_guidance() {
-    let offered = ProtocolVersionRange::exact(ProtocolVersion::new(2, 0).unwrap());
-    assert_eq!(offered.negotiate(SUPPORTED_PROTOCOL_VERSIONS), None);
-
-    let frame = ServerHandshakeFrame::rejected(
-      RequestId::parse("hello-major-2").unwrap(),
-      "runtime-1",
-      "instance-1",
-      ProtocolError::incompatible_protocol_range(offered, SUPPORTED_PROTOCOL_VERSIONS),
-    );
-    let json = serde_json::to_string(&frame).unwrap();
-    let decoded: ServerHandshakeFrame = serde_json::from_str(&json).unwrap();
-
-    assert!(json.contains("\"status\":\"rejected\""));
-    assert!(json.contains("\"code\":\"incompatible_protocol\""));
-    assert!(!json.contains("currentProtocolVersion"));
-    match decoded {
-      ServerHandshakeFrame::Rejected(rejection) => {
-        assert_eq!(rejection.runtime_id(), "runtime-1");
-        assert_eq!(rejection.daemon_instance_id(), "instance-1");
-        assert_eq!(
-          rejection.error().request_id.as_ref().map(RequestId::as_str),
-          Some("hello-major-2")
-        );
-        assert!(
-          rejection
-            .error()
-            .guidance
-            .as_deref()
-            .is_some_and(|guidance| guidance.contains("Upgrade the older"))
-        );
-      }
-      ServerHandshakeFrame::Accepted(_) => panic!("the incompatible major must be rejected"),
-    }
-
-    let newer_minor = ProtocolVersionRange::exact(ProtocolVersion::new(1, 1).unwrap());
-    let minor_error =
-      ProtocolError::incompatible_protocol_range(SUPPORTED_PROTOCOL_VERSIONS, newer_minor);
-    assert!(minor_error.message.contains("does not overlap"));
-    assert!(
-      minor_error
-        .guidance
-        .as_deref()
-        .is_some_and(|guidance| guidance.contains("Cadder client"))
-    );
-  }
-
-  #[test]
-  fn protocol_handshake_stale_instance_rejection_roundtrips_with_correlation() {
-    let frame = ServerHandshakeFrame::rejected(
-      RequestId::parse("hello-stale-1").unwrap(),
-      "runtime-1",
-      "replacement-instance",
-      ProtocolError::stale_instance(),
-    );
-    let json = serde_json::to_string(&frame).unwrap();
-    let decoded: ServerHandshakeFrame = serde_json::from_str(&json).unwrap();
-
-    let ServerHandshakeFrame::Rejected(rejection) = decoded else {
-      panic!("a stale daemon instance must reject the handshake");
-    };
-    assert_eq!(rejection.runtime_id(), "runtime-1");
-    assert_eq!(rejection.daemon_instance_id(), "replacement-instance");
-    assert_eq!(
-      rejection.error().kind,
-      crate::ProtocolErrorKind::StaleInstance
-    );
-    assert_eq!(rejection.error().code.as_str(), "stale_instance");
-    assert_eq!(
-      rejection.error().request_id.as_ref().map(RequestId::as_str),
-      Some("hello-stale-1")
-    );
-    assert!(rejection.error().retryable);
-    assert!(!rejection.error().has_legacy_version_metadata());
-  }
-}
+mod tests;

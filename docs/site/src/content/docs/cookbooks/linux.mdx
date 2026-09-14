@@ -1,45 +1,13 @@
 ---
 title: Linux
-description: Linux cookbook for Cadder binaries, user PATH setup, cadder.toml, and diagnostics.
+description: Run the portable Cadder release on Linux.
 ---
 
-## Direct use
+Extract `cadder`, `cadderd`, and the `caddy` shim into one user-owned directory, mark them executable, and add the directory to PATH.
 
-From the directory that contains Cadder:
-
-```sh
-./cadder-caddy run
-./cadder tui
+```toml
+[caddy]
+real_path = "/usr/local/bin/caddy-real"
 ```
 
-From any project directory where Cadder is on `PATH`:
-
-```sh
-caddy run
-cadder tui
-```
-
-## cadder.toml
-
-Point Cadder at the real Caddy executable in [cadder.toml](../../user-guide/cadder-toml/). Linux package installs often place Caddy at `/usr/bin/caddy`; manual installs may use another path.
-
-## Optional user PATH setup
-
-Run `cadder setup shim` to create the optional `caddy` alias after a collision check. Keep the real Caddy binary separate and configure its command or absolute path in the portable `cadder.toml`.
-
-## TUI diagnostics
-
-```sh
-cadder tui
-```
-
-Use the TUI for daemon state, domains, logs, diagnostics, and activation toggles.
-
-## Portable runtime directory
-
-Keep `cadderd`, `caddy`, and `cadder` in the same directory. Cadder stores its runtime and durable data beside those executables, not in the current working directory.
-
-## Recover from common failures
-
-- If Cadder cannot find real Caddy, check [cadder.toml](../../user-guide/cadder-toml/) first.
-- If `caddy run` starts real Caddy instead of Cadder, your shell is finding real Caddy before the Cadder shim.
+Run `caddy run` from a project and `cadder tui` from any terminal. Normal operation uses owner-only local IPC and unprivileged listeners without root.

@@ -17,7 +17,7 @@ Use `real_command` for one program name resolved through `PATH`. It is not a she
 real_path = 'C:\Program Files\Caddy\caddy.exe'
 ```
 
-Set exactly one of `real_command` or `real_path`. Do not combine either with the legacy `defaults.real_caddy` key.
+Set exactly one of `real_command` or `real_path`.
 
 Cadder rejects command arguments, relative paths, Windows batch scripts, final symbolic-link substitutions, and its own shim. It does not require custom ACL hardening for a normal Caddy installation.
 
@@ -27,7 +27,7 @@ Cadder uses this order:
 
 1. An absolute `--real-caddy` value supplied when the daemon starts.
 2. `[caddy]` in `cadder.toml` beside the Cadder executables.
-3. `[caddy]` or `defaults.real_caddy` in the standard per-user configuration.
+3. `[caddy]` in the standard per-user configuration.
 4. The same configuration in the administrator-owned system file.
 5. A native `caddy` executable on `PATH` that is not Cadder's shim.
 

@@ -84,7 +84,10 @@ impl DomainName {
 }
 
 pub fn canonicalize_domain(raw: &str) -> String {
-  raw.trim().trim_end_matches('.').to_ascii_lowercase()
+  let domain = raw.trim().trim_end_matches('.');
+  idna::domain_to_ascii(domain)
+    .unwrap_or_else(|_| domain.to_string())
+    .to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

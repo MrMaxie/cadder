@@ -180,10 +180,6 @@ pub struct LogsView {
   pub stream: LogStreamIdentity,
   pub stream_status: LogStreamStatus,
   pub entries: Vec<LogEntry>,
-  pub next_cursor: Option<String>,
-  pub has_gap: bool,
-  pub has_more_before: bool,
-  pub truncated_by_retention: bool,
 }
 
 impl From<QueryLogsResponse> for LogsView {
@@ -192,10 +188,6 @@ impl From<QueryLogsResponse> for LogsView {
       stream: value.stream,
       stream_status: value.stream_status,
       entries: value.entries,
-      next_cursor: value.next_cursor,
-      has_gap: value.has_gap,
-      has_more_before: value.has_more_before,
-      truncated_by_retention: value.truncated_by_retention,
     }
   }
 }

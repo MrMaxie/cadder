@@ -54,13 +54,6 @@ impl IpcClientError {
     self
   }
 
-  pub(crate) fn with_source(mut self, source: BoxError) -> Self {
-    if let Self::Local(error) = &mut self {
-      error.source = Some(source);
-    }
-    self
-  }
-
   /// Returns the stable machine code without erasing whether the daemon or local client produced
   /// it.
   pub fn code(&self) -> &str {
@@ -141,10 +134,7 @@ impl IpcClientError {
   pub fn is_daemon_unavailable(&self) -> bool {
     match self {
       Self::Daemon(_) => false,
-      Self::Local(error) => matches!(
-        error.code(),
-        LocalIpcErrorCode::DaemonUnavailable | LocalIpcErrorCode::DiscoveryUnavailable
-      ),
+      Self::Local(error) => error.code() == LocalIpcErrorCode::DaemonUnavailable,
     }
   }
 
@@ -156,7 +146,7 @@ impl IpcClientError {
     }
   }
 
-  /// Reports that discovery and the connected daemon identified different live instances.
+  /// Reports that the connected daemon does not own the selected runtime endpoint.
   pub fn is_stale_instance(&self) -> bool {
     match self {
       Self::Daemon(error) => error.kind == ProtocolErrorKind::StaleInstance,
@@ -186,11 +176,8 @@ pub enum LocalIpcErrorCode {
   DaemonNotFound,
   DaemonStartFailed,
   DaemonUnavailable,
-  DiscoveryReadFailed,
-  DiscoveryUnavailable,
   Frame,
   IncompatibleProtocol,
-  InvalidDiscovery,
   InvalidEndpoint,
   InvalidInput,
   InvalidRequest,
@@ -212,11 +199,8 @@ impl LocalIpcErrorCode {
       Self::DaemonNotFound => "daemon_not_found",
       Self::DaemonStartFailed => "daemon_start_failed",
       Self::DaemonUnavailable => "daemon_unavailable",
-      Self::DiscoveryReadFailed => "discovery_read_failed",
-      Self::DiscoveryUnavailable => "discovery_unavailable",
       Self::Frame => "frame",
       Self::IncompatibleProtocol => "incompatible_protocol",
-      Self::InvalidDiscovery => "invalid_discovery",
       Self::InvalidEndpoint => "invalid_endpoint",
       Self::InvalidInput => "invalid_input",
       Self::InvalidRequest => "invalid_request",
@@ -244,7 +228,6 @@ impl fmt::Display for LocalIpcErrorCode {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum LocalIpcErrorKind {
-  Discovery,
   Transport,
   Timeout,
 }
@@ -254,8 +237,6 @@ pub enum LocalIpcErrorKind {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum IpcClientPhase {
-  DiscoveryRead,
-  DiscoveryDecode,
   EndpointResolve,
   Connect,
   DaemonLaunch,
@@ -329,20 +310,11 @@ mod tests {
       (LocalIpcErrorCode::DaemonNotFound, "daemon_not_found"),
       (LocalIpcErrorCode::DaemonStartFailed, "daemon_start_failed"),
       (LocalIpcErrorCode::DaemonUnavailable, "daemon_unavailable"),
-      (
-        LocalIpcErrorCode::DiscoveryReadFailed,
-        "discovery_read_failed",
-      ),
-      (
-        LocalIpcErrorCode::DiscoveryUnavailable,
-        "discovery_unavailable",
-      ),
       (LocalIpcErrorCode::Frame, "frame"),
       (
         LocalIpcErrorCode::IncompatibleProtocol,
         "incompatible_protocol",
       ),
-      (LocalIpcErrorCode::InvalidDiscovery, "invalid_discovery"),
       (LocalIpcErrorCode::InvalidEndpoint, "invalid_endpoint"),
       (LocalIpcErrorCode::InvalidInput, "invalid_input"),
       (LocalIpcErrorCode::InvalidRequest, "invalid_request"),

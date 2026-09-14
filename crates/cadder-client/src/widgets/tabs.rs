@@ -1,6 +1,5 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::symbols;
 use ratatui::widgets::{Tabs, Widget};
 
 use crate::widgets::theme::THEME;
@@ -20,7 +19,7 @@ impl Widget for AppTabs {
   fn render(self, area: Rect, buf: &mut Buffer) {
     let tabs = Tabs::new(self.labels)
       .select(self.selected)
-      .divider(symbols::DOT)
+      .divider("|")
       .padding("  ", "  ")
       .style(THEME.inactive_tab())
       .highlight_style(THEME.active_tab());

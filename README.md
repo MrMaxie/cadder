@@ -2,69 +2,51 @@
 
 # Cadder
 
-Cadder coordinates local Caddy reverse proxies that would otherwise fight for the same HTTP and HTTPS ports. Projects can keep using a `caddy run` workflow, while Cadder registers them with one per-user daemon and applies active configs through one real Caddy process.
+Cadder coordinates local Caddy projects that would otherwise compete for the same HTTP and HTTPS listeners. Projects keep the familiar `caddy run` workflow while one per-installation `cadderd` daemon owns the real Caddy process and combines active routes.
 
 Published documentation: <https://maxie.dev/cadder/>
 
-## What's Included
+## Runtime
 
-Cadder v1.0 ships three runtime-facing binaries:
+Cadder 1.0 consists of three version-matched executables:
 
-- `cadderd`: the per-user daemon. It owns local IPC, entrypoint registrations, adapted Caddy config composition, the generated effective runtime config, the real Caddy process it starts, diagnostics, durable history, and bounded log storage.
-- `cadder-caddy`: the Caddy-compatible shim. `cadder setup shim` creates the optional `caddy` alias after checking for collisions. For `caddy run`, the shim attaches to `cadderd`, registers the current project's Caddyfile, keeps that registration alive while the shim process runs, and unregisters on exit. Read-only Caddy commands use the trusted real-Caddy resolver; unsupported mutations fail closed.
-- `cadder`: the operator executable. It provides CLI and TUI workflows for scripts, agents, and operators.
+- `cadderd` owns local IPC, registrations, SQLite state, redacted logs, effective Caddy configuration, and the real Caddy child process.
+- `caddy` is the PATH-facing shim. `caddy run` starts or attaches to `cadderd`, registers the current project, sends heartbeats, and unregisters on exit.
+- `cadder` opens the keyboard-operated TUI for Status, Domains, and Logs, including explicit Start, Stop, and Restart actions.
 
-Native runtime installers are named `cadder-runtime-<version>-<platform>`. Portable runtime archives are named `cadder-<version>-<platform>`. Both contain `cadderd`, `cadder`, `cadder-caddy`, checksums, and a `cadder.toml` configuration template.
+Keep all three executables together. Configure the trusted real Caddy source in `cadder.toml` beside them:
 
-The 1.0 surface contains the runtime daemon, optional PATH alias, operator CLI, and TUI. Web and Tauri GUI surfaces remain outside 1.0 and attach through the same daemon protocol and view-model contracts in later releases.
-
-OpenSpec is the planning source of truth for architecture, requirements, design decisions, and implementation tasks. Project documentation follows accepted OpenSpec specs or active changes.
-
-## Quick Use
-
-1. Download the runtime installer or portable archive for your OS from [GitHub Releases](https://github.com/MrMaxie/cadder/releases).
-2. Copy the `cadder.toml` template to the standard per-user Cadder configuration directory and set an absolute `defaults.real_caddy` path, or place a trusted real `caddy` on `PATH`.
-3. Run `cadder setup shim`, start `cadderd`, then run a project through the optional `caddy` alias.
-4. Use `cadder` for automation-friendly state, log, diagnostics, autostart, daemon lifecycle, and TUI workflows.
-
-## Commands
-
-```sh
-cadderd
-cadder daemon status
-cadder entrypoints list --output json
-cadder domains disable app.localhost --registration shim-1
-cadder logs show --limit 20 domain app.localhost --registration shim-1 --output json
-cadder history show --limit 20 --output json
-cadder autostart status
-cadder tui
-caddy run
+```toml
+[caddy]
+real_path = "C:/Tools/caddy/caddy.exe"
 ```
 
-`caddy run` requires a running Cadder backend. Start `cadderd` directly or run `cadder daemon start` before retrying the shim command.
+Use `real_command` instead when a separately named real Caddy executable is available on PATH. Configure exactly one source.
 
-For a local checkout, run the project checks with:
+## Quick use
+
+1. Download the matching `cadder` archive and SHA-256 file for your platform from [GitHub Releases](https://github.com/MrMaxie/cadder/releases).
+2. Extract its `cadder`, `cadderd`, and `caddy` executables into one user-owned directory.
+3. Copy `cadder.toml.example` to `cadder.toml` and configure real Caddy.
+4. Put the directory on PATH, run `caddy run` in each project, then open `cadder tui`.
+
+Managed `caddy run` starts the matching daemon automatically when it is not already running. Mixed Cadder versions fail the exact protocol handshake before changing runtime state.
+
+## Development
+
+Install [mise](https://mise.jdx.dev/), then use the pinned project environment:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo xtask check
+mise install --locked
+mise tasks
+mise run check
+mise run tui-web
 ```
 
-The repository defines `cargo xtask` in `.cargo/config.toml`; run `cargo xtask --help` to list validation, docs, release, verification, and dev commands.
+`mise run tui-web` launches the TUI through the exact `ttyglass` npm package declared by the project. `just tui-web` is the short convenience entrypoint for the same task.
 
-Use the isolated dev runtime profile for CLI checks with:
-
-```sh
-cargo xtask dev-env --format powershell
-cargo xtask dev-run -- cadder daemon status
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for repository workflow, security reporting, and architecture notes.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 
-Cadder is licensed under the terms in [LICENSE](LICENSE).
+Cadder is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

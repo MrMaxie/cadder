@@ -1,13 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
-  AutostartDiagnostic, AutostartMode, AutostartStatus, GuiStateSnapshot, HistoryRecord,
-  StorageState,
-};
+use crate::GuiStateSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterEntrypointResponse {
+  #[serde(default)]
   pub request_id: String,
   pub accepted: bool,
   pub message: String,
@@ -17,6 +15,7 @@ pub struct RegisterEntrypointResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BasicResponse {
+  #[serde(default)]
   pub request_id: String,
   pub accepted: bool,
   pub message: String,
@@ -25,42 +24,9 @@ pub struct BasicResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryStateResponse {
+  #[serde(default)]
   pub request_id: String,
   pub accepted: bool,
   pub message: String,
   pub snapshot: Option<GuiStateSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryHistoryResponse {
-  pub request_id: String,
-  pub accepted: bool,
-  pub message: String,
-  pub records: Vec<HistoryRecord>,
-  pub storage: Option<StorageState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryAutostartResponse {
-  pub request_id: String,
-  pub accepted: bool,
-  pub message: String,
-  pub mode: AutostartMode,
-  pub status: AutostartStatus,
-  pub target: Option<String>,
-  pub diagnostics: Vec<AutostartDiagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SetAutostartResponse {
-  pub request_id: String,
-  pub accepted: bool,
-  pub message: String,
-  pub mode: AutostartMode,
-  pub status: AutostartStatus,
-  pub target: Option<String>,
-  pub diagnostics: Vec<AutostartDiagnostic>,
 }

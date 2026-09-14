@@ -1,33 +1,26 @@
 use super::*;
 
 impl DaemonState {
-  pub async fn query_logs(&self, request: cadder_ipc::QueryLogsRequest) -> QueryLogsResponse {
+  pub async fn query_logs(&self, request: cadder_ipc::QueryLogsPayload) -> QueryLogsResponse {
     let active = self.stream_is_active(&request.stream).await;
-    let result = self.logs.query(
-      LogQuery {
-        stream: request.stream.clone(),
-        limit: request.limit.unwrap_or(100).clamp(1, 500),
-        after_sequence: request
-          .cursor
-          .as_deref()
-          .and_then(|cursor| cursor.strip_prefix("seq:"))
-          .and_then(|sequence| sequence.parse::<u64>().ok()),
-        minimum_severity: request.minimum_severity,
-      },
-      active,
-    );
+    let result = self
+      .logs
+      .query(
+        LogQuery {
+          stream: request.stream.clone(),
+          limit: request.limit.unwrap_or(100).clamp(1, 200),
+        },
+        active,
+      )
+      .await;
 
     QueryLogsResponse {
-      request_id: request.request_id,
+      request_id: String::new(),
       accepted: true,
       message: "Caddy logs returned.".to_string(),
       stream: request.stream,
       stream_status: result.status,
       entries: result.entries,
-      next_cursor: result.next_cursor,
-      has_gap: result.has_gap,
-      has_more_before: result.has_more_before,
-      truncated_by_retention: result.truncated_by_retention,
     }
   }
 

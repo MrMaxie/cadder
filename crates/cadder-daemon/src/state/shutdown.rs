@@ -1,5 +1,5 @@
 use super::*;
-use tokio::time::{Duration, Instant, sleep, timeout_at};
+use tokio::time::{Instant, timeout_at};
 
 pub(crate) struct ShutdownPreparation {
   pub(crate) response: BasicResponse,
@@ -59,7 +59,7 @@ impl DaemonState {
     }
   }
 
-  pub(crate) async fn contain_runtime(&self) -> anyhow::Result<()> {
+  pub(crate) async fn force_stop_runtime(&self) -> anyhow::Result<()> {
     let _operation = self
       .config_operation
       .acquire()
@@ -69,39 +69,16 @@ impl DaemonState {
       let coordinator = self.coordinator.lock().await;
       coordinator.runtime()
     };
-    runtime.contain().await
+    runtime.force_stop().await
   }
 
-  pub(crate) async fn contain_runtime_fail_stop(&self) {
-    let mut failure_recorded = false;
-    loop {
-      match self.contain_runtime().await {
-        Ok(()) => return,
-        Err(error) => {
-          if !failure_recorded {
-            self.logs.append(
-              LogStreamIdentity::runtime_control(),
-              LogSeverity::Error,
-              format!(
-                "Owned Caddy containment did not complete; Cadder keeps runtime ownership and retries without releasing discovery or the daemon lock: {error:#}"
-              ),
-              LogAttributionKind::RuntimeControl,
-              Some("shutdown-containment".to_string()),
-            );
-            failure_recorded = true;
-          }
-          sleep(Duration::from_millis(250)).await;
-        }
-      }
+  pub(crate) async fn shutdown_storage_until(&self, deadline: Instant) -> anyhow::Result<()> {
+    if let Some(database) = &self.database {
+      timeout_at(deadline, database.clone().close())
+        .await
+        .map_err(|_| anyhow::anyhow!("SQLite database did not close before its deadline"))??;
     }
-  }
-
-  pub(crate) async fn shutdown_storage_until(&self, deadline: Instant) -> anyhow::Result<bool> {
-    self.store.shutdown_until(deadline).await
-  }
-
-  pub(crate) async fn contain_storage_shutdown(&self) -> anyhow::Result<()> {
-    self.store.contain_shutdown().await
+    Ok(())
   }
 
   fn finish_shutdown(&self, result: anyhow::Result<()>) -> BasicResponse {
@@ -111,15 +88,6 @@ impl DaemonState {
         accepted: false,
         message: error.to_string(),
       };
-    }
-    if let Err(error) = self.store.enqueue_history_for_shutdown(
-      HistoryKind::Runtime,
-      "Daemon shutdown requested.",
-      &serde_json::json!({ "accepted": true }),
-    ) {
-      return shutdown_failure(&format!(
-        "Daemon shutdown could not queue its final history record: {error:#}"
-      ));
     }
     self.begin_operation_drain();
     BasicResponse {

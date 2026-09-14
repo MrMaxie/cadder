@@ -53,7 +53,7 @@ impl Widget for HeaderBar {
         self.runtime_status.connection_label(),
         self.runtime_status.is_connected(),
       );
-      buf.set_string(status_x + 20, area.y, " • ", THEME.service_separator());
+      buf.set_string(status_x + 20, area.y, " | ", THEME.service_separator());
       render_service_status(
         buf,
         status_x + 23,

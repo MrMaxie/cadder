@@ -1,43 +1,35 @@
 ---
 title: Getting started
-description: Download Cadder, configure real Caddy, run a project through the shim, and inspect it through CLI or TUI.
+description: Install the three Cadder executables and run your first managed project.
 ---
 
-## What You Need
+## Install
 
-- A real Caddy binary installed somewhere on your machine.
-- A Cadder runtime installer or portable runtime archive for your OS from [GitHub Releases](https://github.com/MrMaxie/cadder/releases/latest).
-- A project with a `Caddyfile`.
+Download the `cadder` archive and matching SHA-256 file for your platform. Extract its `cadder`, `cadderd`, and `caddy` executables into one user-owned directory and add it to PATH.
 
-See [Releases and downloads](../../reference/releases/) if you are deciding between the native runtime installer and portable runtime archive.
+Copy `cadder.toml.example` to `cadder.toml` beside the executables and configure real Caddy:
 
-## Configure Real Caddy
+```toml
+[caddy]
+real_path = "C:/Tools/caddy/caddy.exe"
+```
 
-Edit the provided `cadder.toml` beside the Cadder executables. Set `[caddy].real_command` to the real Caddy command on `PATH`, or `[caddy].real_path` to its absolute path. See [cadder.toml](../../user-guide/cadder-toml/) for syntax.
+On Linux or macOS, use an absolute native path such as `/usr/local/bin/caddy-real`. You may configure `real_command` instead of `real_path`, but never both.
 
-## Run A Project
+## Run projects
+
+From each project containing a Caddyfile, run:
 
 ```sh
-cadder setup shim
-cadderd
-cadder daemon status
 caddy run
 ```
 
-`cadder setup shim` creates the optional `caddy` alias after checking for an existing command. The shim attaches to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running. If the daemon is unavailable, the shim names the `cadder daemon start` recovery action and exits without starting unmanaged Caddy.
+The shim starts or attaches to `cadderd`, registers the project's routes, and keeps the registration alive until the command exits. Start more projects the same way; the daemon composes their non-conflicting domains behind one Caddy runtime.
 
-Inspect Cadder with CLI or TUI:
+Open the operator:
 
 ```sh
-cadder entrypoint list --output json
-cadder logs show --limit 20 domain app.localhost --registration shim-1
 cadder tui
 ```
 
-`cadder tui` starts the interactive operator surface.
-
-## OS Cookbooks
-
-- [Windows](../../cookbooks/windows/overview/)
-- [macOS](../../cookbooks/macos/)
-- [Linux](../../cookbooks/linux/)
+Use Status to start, stop, or restart the daemon, Domains to inspect and toggle routes, and Logs for bounded redacted runtime output.

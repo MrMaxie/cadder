@@ -1,0 +1,35 @@
+config_version = 1
+
+[toml-schema]
+location = "https://mrmaxie.github.io/arcantry/schemas/arcantry-config-v1.tosd"
+version = "1.0.0"
+
+[sources.openspec]
+kind = "openspec"
+path = "openspec"
+management = "manage"
+adapter = "openspec@1"
+
+[sources.todo-root]
+kind = "todo-txt"
+path = "todo.txt"
+management = "manage"
+adapter = "todo-txt@1"
+
+[sources.changelog]
+kind = "changelog"
+path = "CHANGELOG.md"
+management = "manage"
+adapter = "keep-a-changelog@2"
+from = [ "openspec" ]
+
+[release]
+adapter = "openspec-release@1"
+manifests_path = "releases"
+changelog_source = "changelog"
+tag_prefix = "v"
+repository_url = "https://github.com/MrMaxie/cadder"
+
+[[release.version_sources]]
+path = "Cargo.toml"
+adapter = "cargo-workspace@1"

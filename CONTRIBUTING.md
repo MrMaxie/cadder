@@ -1,94 +1,68 @@
-# Contributing to Cadder
+# Contributing
 
-Cadder is a Rust workspace for a per-user Caddy coordinator. The main parts are:
+Cadder is a Rust workspace with a versioned IPC contract, daemon implementation, shared client API, operator TUI, and PATH-facing Caddy shim. OpenSpec is the source of truth for accepted behavior and changes.
 
-- `crates/cadder-ipc`: shared request and response contracts.
-- `crates/cadder-daemon`: daemon state, IPC, Caddy process ownership, durable history, runtime storage, and the `cadderd` binary.
-- `crates/cadder-api`: shared client API used by operator clients.
-- `crates/cadder-client`: package that builds the `cadder` operator executable.
-- `crates/cadder-shim`: PATH-facing `caddy` shim.
-- `xtask`: current validation, coverage, distribution, and packaging tasks; OpenSpec-driven cleanup should shrink or replace custom orchestration with mature tools where practical.
+## Setup
 
-## Development Setup
-
-Use Cargo from the repository root. `.cargo/config.toml` defines the conventional `cargo xtask` alias.
+Install [mise](https://mise.jdx.dev/), then prepare the exact repository toolchain:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo xtask check
+mise install --locked
+mise tasks
 ```
 
-Documentation lives in `docs/site` and uses Bun:
+The lockfile pins Rust and its formatting, lint, and coverage components, Bun, Node, OpenSpec, cargo-llvm-cov, and cargo-dist.
+
+## Validation
+
+Use focused Cargo tests while editing, then run the shared gate:
 
 ```sh
-cargo xtask docs-check
-cargo xtask docs-build
+mise run fmt
+mise run lint
+mise run test
+mise run openspec-check
+mise run docs-check
+mise run check
 ```
 
-## Local Workspace
+Coverage is owned directly by cargo-llvm-cov:
 
-`.local` is private operational workspace. Keep it in `.git/info/exclude`, not in `.gitignore`.
+```sh
+mise run coverage
+```
 
-Repo-local agent skill verification is not part of the v1.0 product contract. CLI commands remain the stable automation surface for people and agents.
+The configured line threshold is 85 percent. Docker-backed Caddy tests remain an explicit job because they require a live container runtime.
 
-## Planning
+## Documentation
 
-OpenSpec is the source of truth for product requirements, design decisions, architecture changes, and implementation plans. New product or architecture work should start as an OpenSpec change, and project documentation should follow accepted specs or active changes.
+Documentation uses Astro and Starlight:
+
+```sh
+mise run docs-check
+mise run docs-build
+```
+
+Keep end-user pages free of private paths, test-only environment variables, and repository-internal workflows.
+
+## Local TUI
+
+Use the mock backend for safe local UI work:
+
+```sh
+mise run dev
+mise run tui-web
+```
+
+The mock backend variable is scoped to those tasks and is not exported to ordinary commands.
 
 ## Releases
 
-The release workflow publishes only tag events whose `v*` version exactly matches the root `[workspace.package]` version. Manual workflow runs build package artifacts without publishing a GitHub Release.
-
-Release binaries use the workspace root release profile. Verify profile and release identity drift before packaging:
+cargo-dist owns release planning, archives, checksums, source tarballs, and the generated GitHub Release workflow:
 
 ```sh
-cargo xtask verify-release-profile
-cargo xtask verify-release-identity
+mise run dist-plan
+mise run dist-build
 ```
 
-Build a local release layout:
-
-```sh
-cargo xtask dist --out target/cadder-dist
-cargo xtask verify-dist --dir target/cadder-dist
-```
-
-The v1.0 portable runtime layout contains:
-
-- `cadderd`
-- `cadder`
-- `caddy`
-- `cadder.toml`
-
-Build a versioned portable archive and checksum:
-
-```sh
-cargo xtask package --out target/cadder-packages --version 1.0.0 --platform windows-x64 --target x86_64-pc-windows-msvc
-```
-
-Build daemon-first native runtime installers:
-
-```sh
-cargo xtask runtime-installer --out target/cadder-runtime-installers --version 1.0.0 --platform windows-x64 --target x86_64-pc-windows-msvc
-cargo xtask verify-runtime-installer-dist --dir target/cadder-runtime-installers --version 1.0.0 --platform windows-x64
-```
-
-Runtime installers are named `cadder-runtime-<version>-<platform>` and include only `cadderd`, `cadder`, `caddy`, and `cadder.toml`. Windows uses WiX, Linux uses `dpkg-deb` and `rpmbuild`, and macOS uses `pkgbuild`.
-
-Before a public release upload, verify the combined artifact set:
-
-```sh
-cargo xtask verify-release-assets --dir target/release-assets --version 1.0.0 --mode dry-run
-```
-
-`verify-release-assets` checks portable archive contents, runtime installer manifests, checksums, and the complete platform matrix.
-
-## Pull Requests
-
-Keep pull requests focused. Include the reason for the change, the behavior that changed, and the commands you ran.
-
-Automated tests should not depend on a globally installed real Caddy binary. Use repository fixtures or explicitly ignored integration tests when a real runtime is required.
-
-See `docs/verification/release-profile.md` for the measurement protocol and release artifact inspection checklist.
+`dist generate --check` verifies that `.github/workflows/release.yml` matches the pinned cargo-dist version. A `v1.0.0` style tag releases all three executable packages in lockstep. Do not publish, tag, or upload from contributor validation.

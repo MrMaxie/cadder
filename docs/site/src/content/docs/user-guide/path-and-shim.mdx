@@ -1,58 +1,12 @@
 ---
-title: PATH and shim strategy
-description: Invoke cadder-caddy directly or manage the optional caddy alias safely.
+title: PATH and the Caddy shim
+description: Use Cadder's caddy executable without recursive delegation.
 ---
 
-`cadder-caddy` is Cadder's compatibility shim. It keeps existing `caddy run` habits available while daemon ownership remains in `cadderd`.
+Place the released `caddy` shim, `cadderd`, and `cadder` in one user-owned directory and add that directory to PATH. Cadder does not install or mutate PATH for you.
 
-Cadder changes PATH-facing behavior only through the explicit `cadder setup shim` command.
+`caddy run` is managed by Cadder. The shim starts or attaches to the daemon and never falls back to an unmanaged real Caddy run.
 
-## Direct invocation
+Read-only real-Caddy commands may be delegated through the trusted resolver. Unsupported state-changing commands fail closed. The resolver excludes the shim by file identity, including aliases, symlinks, and hardlinks, so it cannot recursively execute itself.
 
-Use a direct path when you want to be explicit:
-
-```powershell
-<path-to-cadder>\cadder-caddy run
-```
-
-```sh
-/path/to/cadder/cadder-caddy run
-```
-
-## User-managed PATH
-
-Run `cadder setup shim` to create the optional `caddy` alias in a user-controlled directory. Cadder checks for collisions and records the alias provenance so `cadder setup shim --remove` removes only the alias it created.
-
-The real Caddy binary still needs to be resolvable by Cadder. The recommended place is [cadder.toml](../cadder-toml/).
-
-For `caddy run`, the shim is attach-only. If the Cadder daemon is missing, recovery stays explicit:
-
-1. The shim states that no runtime state changed.
-2. It names `cadder daemon start` as the next action.
-3. It exits without starting real Caddy or a daemon.
-
-The shim does not run `caddy run` as an unmanaged real Caddy fallback. Real Caddy is started only by `cadderd` as the managed execution target after the daemon accepts the registration.
-
-## Command policy
-
-The shim classifies the first Caddy command before it decides what may run:
-
-| Command path | Policy | Result |
-| --- | --- | --- |
-| `run` | Managed | Registers the project with `cadderd`; Cadder owns the effective runtime state. |
-| `adapt`, `build-info`, `environ`, `help`, `list-modules`, `validate`, `version`, `--version` | Read-only inspection | Delegates to the safely resolved real Caddy command when real backend mode is active. |
-| `completion`, `file-server`, `fmt`, `manpage`, `reverse-proxy` | Explicit passthrough | Delegates to real Caddy as an explicit unmanaged command path. |
-| `add-package`, `reload`, `remove-package`, `start`, `stop`, `trust`, `untrust`, `upgrade` | Unsupported | Fails before real Caddy runs because the command can mutate runtime, trust, or binary state outside Cadder ownership. |
-| Any unlisted command | Unsupported | Fails until the command has an explicit Cadder shim policy. |
-
-When a read-only inspection command delegates to real Caddy while `cadderd` is unavailable, the shim writes a stderr notice that the output is real-Caddy inspection, not Cadder runtime state.
-
-## Keep a separate real Caddy path
-
-The practical idea is simple:
-
-- the `caddy` found by your shell is Cadder's shim;
-- the real Caddy executable is somewhere else;
-- the portable `cadder.toml` or trusted PATH entry points to that real executable.
-
-For exact resolver precedence, see [Real Caddy resolution](../../reference/real-caddy-resolution/).
+Configure real Caddy with `real_path` or a distinct `real_command` in the trusted `cadder.toml`. Project files and shim flags cannot replace that selection.

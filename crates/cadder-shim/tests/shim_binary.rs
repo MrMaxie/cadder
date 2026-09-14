@@ -5,7 +5,7 @@ use std::{
 };
 
 fn run_shim(args: &[&str]) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_caddy"))
+  Command::new(env!("CARGO_BIN_EXE_cadder-shim"))
     .args(args)
     .output()
     .unwrap()
@@ -76,7 +76,7 @@ fn shim_info_flag_reports_release_identity_json() {
 
 #[test]
 fn shim_info_flag_ignores_invalid_backend_env() {
-  let output = Command::new(env!("CARGO_BIN_EXE_caddy"))
+  let output = Command::new(env!("CARGO_BIN_EXE_cadder-shim"))
     .arg("--cadder-shim-info")
     .env("CADDER_CADDY_BACKEND", "invalid")
     .output()

@@ -16,7 +16,6 @@ const CREATE_ATTEMPTS: usize = 8;
 #[derive(Debug)]
 pub(crate) struct StagedRuntimeConfig {
   candidate_path: PathBuf,
-  generation: String,
   effective_path: PathBuf,
   promoted: bool,
 }
@@ -45,10 +44,6 @@ impl StagedRuntimeConfig {
 
   pub(crate) fn path(&self) -> &Path {
     &self.candidate_path
-  }
-
-  pub(crate) fn generation(&self) -> &str {
-    &self.generation
   }
 
   pub(crate) fn promote(&mut self) -> Result<()> {
@@ -143,13 +138,12 @@ fn create_candidate(
   effective_path: PathBuf,
 ) -> Result<(StagedRuntimeConfig, File)> {
   for _ in 0..CREATE_ATTEMPTS {
-    let (generation, candidate_path) = candidate_path(paths)?;
+    let candidate_path = candidate_path(paths)?;
     match create_owner_only_runtime_file(paths, &candidate_path) {
       Ok(file) => {
         return Ok((
           StagedRuntimeConfig {
             candidate_path,
-            generation,
             effective_path,
             promoted: false,
           },
@@ -163,29 +157,10 @@ fn create_candidate(
   bail!("could not allocate a unique staged Caddy config after {CREATE_ATTEMPTS} attempts")
 }
 
-fn candidate_path(paths: &RuntimePaths) -> Result<(String, PathBuf)> {
+fn candidate_path(paths: &RuntimePaths) -> Result<PathBuf> {
   let mut bytes = [0_u8; GENERATION_BYTES];
   getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
   let generation = hex::encode(bytes);
-  let path = candidate_path_for_generation(paths, &generation)?;
-  Ok((generation, path))
-}
-
-pub(crate) fn validated_candidate_path(paths: &RuntimePaths, generation: &str) -> Result<PathBuf> {
-  let path = candidate_path_for_generation(paths, generation)?;
-  validate_owner_only_runtime_file(&path)
-    .with_context(|| format!("validate staged Caddy config {}", path.display()))?;
-  Ok(path)
-}
-
-fn candidate_path_for_generation(paths: &RuntimePaths, generation: &str) -> Result<PathBuf> {
-  anyhow::ensure!(
-    generation.len() == GENERATION_BYTES * 2
-      && generation
-        .bytes()
-        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-    "staged Caddy config generation is invalid"
-  );
   Ok(
     paths
       .runtime_dir()
@@ -265,7 +240,7 @@ fn finalize_owner_only_file(destination: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn install_owner_only_file(temporary: &Path, destination: &Path) -> io::Result<()> {
-  crate::ipc_windows_security::install_discovery_file(temporary, destination)
+  crate::ipc_windows_security::install_owner_only_file(temporary, destination)
 }
 
 #[cfg(windows)]
@@ -307,110 +282,4 @@ fn finalize_removed_file(_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[tokio::test]
-  async fn dropped_candidate_does_not_change_effective_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    paths.ensure_dirs().unwrap();
-    fs::write(paths.effective_config_path(), b"previous").unwrap();
-
-    let staged = StagedRuntimeConfig::stage(&paths, b"candidate")
-      .await
-      .unwrap();
-    let candidate_path = staged.path().to_path_buf();
-
-    assert_eq!(
-      fs::read(paths.effective_config_path()).unwrap(),
-      b"previous"
-    );
-    assert_eq!(fs::read(&candidate_path).unwrap(), b"candidate");
-    drop(staged);
-    assert!(!candidate_path.exists());
-    assert_eq!(
-      fs::read(paths.effective_config_path()).unwrap(),
-      b"previous"
-    );
-  }
-
-  #[tokio::test]
-  async fn promotion_atomically_replaces_effective_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    paths.ensure_dirs().unwrap();
-    fs::write(paths.effective_config_path(), b"previous").unwrap();
-
-    let mut staged = StagedRuntimeConfig::stage(&paths, b"candidate")
-      .await
-      .unwrap();
-    let candidate_path = staged.path().to_path_buf();
-    staged.promote().unwrap();
-
-    assert!(!candidate_path.exists());
-    assert_eq!(
-      fs::read(paths.effective_config_path()).unwrap(),
-      b"candidate"
-    );
-
-    #[cfg(windows)]
-    crate::ipc_windows_security::validate_owner_only_runtime_file(&paths.effective_config_path())
-      .unwrap();
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs::PermissionsExt;
-      assert_eq!(
-        fs::metadata(paths.effective_config_path())
-          .unwrap()
-          .permissions()
-          .mode()
-          & 0o777,
-        0o600
-      );
-    }
-  }
-
-  #[tokio::test]
-  async fn validated_candidate_path_accepts_only_the_exact_staged_generation() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    paths.ensure_dirs().unwrap();
-    let staged = StagedRuntimeConfig::stage(&paths, b"candidate")
-      .await
-      .unwrap();
-
-    assert_eq!(
-      validated_candidate_path(&paths, staged.generation()).unwrap(),
-      staged.path()
-    );
-    for invalid in [
-      "00112233445566778899aabbccddeef",
-      "00112233445566778899AABBCCDDEEFF",
-      "../../effective-caddy.json",
-    ] {
-      assert!(validated_candidate_path(&paths, invalid).is_err());
-    }
-  }
-
-  #[test]
-  fn cleanup_removes_only_validated_exact_candidate_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-    paths.ensure_dirs().unwrap();
-    let stale = paths
-      .runtime_dir()
-      .join(".effective-caddy.00112233445566778899aabbccddeeff.tmp");
-    let unrelated = paths
-      .runtime_dir()
-      .join(".effective-caddy.not-a-generation.tmp");
-    let stale_file = create_owner_only_runtime_file(&paths, &stale).unwrap();
-    drop(stale_file);
-    fs::write(&unrelated, b"keep").unwrap();
-
-    cleanup_stale_config_candidates(&paths).unwrap();
-
-    assert!(!stale.exists());
-    assert!(unrelated.exists());
-  }
-}
+mod tests;

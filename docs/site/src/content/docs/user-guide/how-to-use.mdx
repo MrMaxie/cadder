@@ -1,65 +1,12 @@
 ---
-title: How to use
-description: Use the Cadder runtime, caddy shim, CLI, and TUI.
+title: How to use Cadder
+description: Managed project and operator workflows.
 ---
 
-The runtime installer and portable runtime archive contain:
+Run `caddy run` in every local project that should participate in the shared runtime. Each live shim owns one registration and renews it periodically. Exiting the command removes that live registration.
 
-- `caddy`
-- `cadderd`
-- `cadder`
-- `cadder.toml`
+Open `cadder tui` to inspect Status, Domains, and Logs. Domain ownership is exclusive: if two active projects request the same canonical domain, Cadder keeps the existing owner and rejects the conflicting change.
 
-The `caddy` command is Cadder's shim. Use it for project `caddy run` workflows that should be coordinated by Cadder. The real Caddy binary stays separate and is configured through [cadder.toml](../cadder-toml/).
+The daemon may restore desired activation from SQLite after restart, but it never treats old leases or process identities as live. A project becomes live only after a current shim registers it.
 
-## Basic Flow
-
-1. Get either the runtime installer or the portable runtime archive for your operating system from [GitHub Releases](https://github.com/MrMaxie/cadder/releases/latest).
-2. Point Cadder at the real Caddy binary with [cadder.toml](../cadder-toml/).
-3. Start the Cadder backend:
-
-```sh
-cadderd
-```
-
-4. Run your project through Cadder:
-
-```sh
-caddy run
-```
-
-5. Inspect or operate the daemon:
-
-```sh
-cadder daemon status
-cadder domains list --output json
-cadder tui
-```
-
-Use `cadder` when you want stable machine-readable output, non-interactive toggles, log queries, autostart, daemon lifecycle commands, or interactive TUI operation.
-
-## Updates
-
-Cadder v1.0 does not include an in-app updater or background update checks. To update, download a newer runtime installer or portable runtime archive from [GitHub Releases](https://github.com/MrMaxie/cadder/releases/latest), then install or replace the matching artifact manually.
-
-## Direct Or PATH-Based Use
-
-Both styles are valid.
-
-Use a direct path when you want to be explicit about which binary runs. Put the Cadder shim on `PATH` when you want `caddy run` to mean "run this project through Cadder" from any project directory.
-
-The practical setup is:
-
-- keep the real Caddy binary away from the `PATH` entry used for Cadder;
-- configure its path in [cadder.toml](../cadder-toml/);
-- expose Cadder's `caddy` shim globally only if that matches your workflow.
-
-## Check The Shim
-
-This command confirms that `caddy` is Cadder's shim:
-
-```sh
-caddy --cadder-shim-info
-```
-
-If it prints real Caddy output instead, your shell is finding real Caddy before Cadder's shim.
+To upgrade, stop the daemon from Status, replace all three executables from one release, and start the next managed project or use Start in the TUI.

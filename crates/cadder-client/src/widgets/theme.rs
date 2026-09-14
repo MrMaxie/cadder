@@ -188,3 +188,47 @@ impl Theme {
       .add_modifier(Modifier::BOLD)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn theme_exposes_consistent_semantic_styles() {
+    let theme = Theme::cadder();
+    assert_eq!(theme.domains_accent(), theme.settings_accent());
+    assert_eq!(theme.inactive_tab().fg, Some(theme.colors.text_muted));
+    assert_eq!(theme.active_tab().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.active_tab().bg, Some(theme.colors.surface_selected));
+    assert_eq!(theme.shortcut_key().fg, Some(theme.colors.mint_soft));
+    assert_eq!(
+      theme.shortcut_description().fg,
+      Some(theme.colors.text_muted)
+    );
+    assert_eq!(theme.footer().bg, Some(theme.colors.backdrop));
+    assert_eq!(theme.header().bg, Some(theme.colors.backdrop));
+    assert_eq!(theme.header_title().fg, Some(theme.colors.text));
+    assert_eq!(theme.service_online().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.service_offline().fg, Some(theme.colors.dim));
+    assert_eq!(theme.service_separator().fg, Some(theme.colors.text_muted));
+    assert_eq!(theme.dim_background().fg, Some(theme.colors.dim));
+    assert_eq!(theme.table().bg, Some(theme.colors.surface));
+    assert_eq!(theme.table_border().fg, Some(theme.colors.border));
+    assert_eq!(theme.table_row().fg, Some(theme.colors.text_soft));
+    assert_eq!(theme.table_disabled_row().fg, Some(theme.colors.text_muted));
+    assert_eq!(theme.table_header().fg, Some(theme.colors.mint_soft));
+    assert!(
+      theme
+        .table_highlight(Color::Red)
+        .add_modifier
+        .contains(Modifier::BOLD)
+    );
+    assert_eq!(theme.selected_marker().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.disabled_marker().fg, Some(theme.colors.text_muted));
+    assert_eq!(theme.overlay().bg, Some(theme.colors.surface_elevated));
+    assert_eq!(theme.overlay_border().fg, Some(theme.colors.border_strong));
+    assert_eq!(theme.overlay_title().fg, Some(theme.colors.mint_soft));
+    assert_eq!(theme.text().fg, Some(theme.colors.text));
+    assert_eq!(theme.accent_text().fg, Some(theme.colors.mint_soft));
+  }
+}

@@ -11,7 +11,7 @@ The daemon uses this exact order:
 
 1. An absolute `--real-caddy` daemon-start override.
 2. `caddy.real_command` or `caddy.real_path` in `cadder.toml` beside the Cadder executables.
-3. `[caddy]` or `defaults.real_caddy` in the standard per-user file.
+3. `[caddy]` in the standard per-user file.
 4. The same configuration in the system file.
 5. A native executable named `caddy` on `PATH` that is not Cadder's shim.
 
@@ -37,7 +37,7 @@ On Windows, Cadder retains a read-only handle without write or delete sharing fo
 
 PATH fallback ignores empty and relative entries. It checks only the platform-native `caddy` filename and skips candidates that are not native executables. A configured command checks only its configured program name.
 
-Cadder compares operating-system file identity, not just path text, when excluding its shim. A symlink or hardlink to `cadder-caddy` is therefore skipped even when it appears under the name `caddy`.
+Cadder compares operating-system file identity, not just path text, when excluding its shim. A symlink or hardlink to Cadder's `caddy` shim is therefore skipped even when it appears at another path.
 
 ## Shim behavior
 

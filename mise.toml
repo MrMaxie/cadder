@@ -1,0 +1,79 @@
+min_version = "2026.7.16"
+
+[tools]
+rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
+bun = "1.3.8"
+node = "24.18.0"
+"npm:@fission-ai/openspec" = "1.5.0"
+"cargo:cargo-llvm-cov" = "0.8.7"
+"cargo:cargo-dist" = "0.32.0"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Run workspace lints"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run workspace tests"
+run = "cargo test --workspace"
+
+[tasks.openspec-check]
+description = "Validate every OpenSpec artifact strictly"
+run = [
+  "openspec doctor",
+  "openspec validate --all --strict --no-interactive",
+]
+
+[tasks.docs-check]
+description = "Install and validate the documentation site"
+dir = "docs/site"
+run = [
+  "bun install --frozen-lockfile",
+  "bun run check",
+]
+
+[tasks.docs-build]
+description = "Build the documentation site"
+dir = "docs/site"
+run = [
+  "bun install --frozen-lockfile",
+  "bun run build",
+]
+
+[tasks.coverage]
+description = "Enforce the 85 percent workspace line coverage gate"
+run = "cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/coverage-summary.lcov --fail-under-lines 85"
+
+[tasks.check]
+description = "Run the complete local validation gate"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
+  "openspec doctor",
+  "openspec validate --all --strict --no-interactive",
+  { task = "docs-check" },
+  "dist generate --check",
+  "dist plan",
+]
+
+[tasks.dev]
+description = "Run the TUI with the local mock Caddy backend"
+env = { CADDER_CADDY_BACKEND = "mock" }
+run = "cargo run --package cadder --bin cadder -- tui"
+
+[tasks.tui-web]
+description = "Open the current TUI in ttyglass"
+env = { CADDER_CADDY_BACKEND = "mock" }
+run = "npx --yes --package ttyglass@1.0.1 -c \"ttyglass --open -- cargo run --quiet --package cadder --bin cadder -- tui\""
+
+[tasks.dist-plan]
+description = "Create a non-publishing cargo-dist release plan"
+run = ["dist generate --check", "dist plan"]
+
+[tasks.dist-build]
+description = "Build non-publishing cargo-dist artifacts"
+run = "dist build"

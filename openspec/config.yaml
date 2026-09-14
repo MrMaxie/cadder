@@ -29,11 +29,15 @@ rules:
     - "Describe the problem, user value, scope, non-goals, and success criteria before proposing implementation details."
     - "Keep each proposal focused on one coherent change; split unrelated goals into separate changes."
     - "Distinguish confirmed facts from assumptions, and cite current specs or code evidence when scope depends on them."
+    - "Name the existing user journey the change preserves and the smallest end-to-end capability it delivers next."
+    - "Name the concepts or custom code paths expected to be removed; do not use line count alone as evidence of simplification."
   design:
     - "Separate product surfaces from implementation crates and library modules."
     - "Record ownership, permissions, failure modes, and trust boundaries for every integration or privilege boundary."
     - "Prefer mature external tools and libraries over custom orchestration when they fit the job."
     - "Define test seams, fakes, and verification strategy before describing implementation details."
+    - "For a new abstraction or dependency, compare the standard library, a focused library, and a framework by net concepts, code, maintenance, and migration risk."
+    - "Classify information as product, operational, diagnostic, or local, and keep local tools, mock backends, private paths, and hidden flags out of public contracts."
   tasks:
     - "Break work into independently verifiable slices."
     - "Keep cleanup and implementation tasks separate when cleanup has migration risk."

@@ -1,48 +1,19 @@
 ---
 title: Runtime and configuration
-description: Portable runtime files, daemon state, and real-Caddy configuration.
+description: Installation identity, SQLite state, and trusted real-Caddy selection.
 ---
 
-Cadder is portable: its runtime directory is the directory containing the executable that starts it. `cadderd`, `caddy`, and `cadder` must therefore be kept together in one installation directory. Cadder does not use the current working directory for runtime state.
+Cadder derives one runtime identity from the directory containing its executables. Keep `cadder`, `cadderd`, and `caddy` together. Separate installation directories remain independent; there is no profile selector.
 
-## Runtime files
+The runtime writes `effective-caddy.json` and the owner-protected `data/cadder.sqlite3` database beneath the installation directory. SQLite stores desired activation and bounded redacted logs. Live leases and process ownership remain memory-only.
 
-The installation directory contains daemon coordination and persistent Cadder data:
+## Trusted configuration
 
-- `cadder.lock`, the daemon ownership lock;
-- `cadder-ipc.json`, the daemon endpoint metadata used by clients;
-- `effective-caddy.json`, the generated Caddy configuration;
-- `data/`, durable manifests, generations, plans, secrets, recovery data, and `storage.lock`.
+The daemon loads one immutable configuration snapshot at startup. Selection order is an explicit foreground daemon override, `cadder.toml` beside the executables, standard per-user configuration, standard system configuration, then safe native PATH discovery.
 
-The IPC socket name is derived from that directory. Moving the portable installation moves its Cadder state with it.
-
-## Development
-
-For development without starting real Caddy, use the mock backend:
-
-```sh
-CADDER_CADDY_BACKEND=mock cadderd
+```toml
+[caddy]
+real_path = "/usr/local/bin/caddy-real"
 ```
 
-The repository also provides repeatable helpers:
-
-```sh
-cargo xtask dev-env --format powershell
-cargo xtask dev-run -- cadder tui
-```
-
-## Real Caddy configuration
-
-Cadder resolves real Caddy through:
-
-- an absolute daemon-start override;
-- `caddy.real_command` or `caddy.real_path` in `cadder.toml` beside the Cadder executables;
-- `[caddy]` or `defaults.real_caddy` in the standard per-user `cadder.toml`;
-- the same configuration in the administrator-owned system `cadder.toml`;
-- a trusted native `caddy` on `PATH`.
-
-`CADDER_CADDY_REAL_COMMAND` and `CADDER_CADDY__REAL_COMMAND` do not select an executable. Project processes and shim invocations cannot replace the daemon's trusted real-Caddy source through inherited environment variables.
-
-## Autostart
-
-Autostart launches the portable `cadderd` executable directly. Keep the installation directory in place while autostart is enabled.
+Use `real_command` instead when needed. Unknown keys, conflicting selectors, unsafe configuration files, and non-native executable targets fail before readiness. Changes take effect after Restart.

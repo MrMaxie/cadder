@@ -1,6 +1,7 @@
 //! Filesystem validation and identity checks for executable images and Caddy configuration.
 
 use anyhow::{Context, Result, ensure};
+use same_file::is_same_file;
 use std::{
   fs::{self, File},
   path::{Path, PathBuf},
@@ -24,10 +25,6 @@ impl CaddyConfigFile {
 
 pub(crate) fn validate_caddy_executable(path: &Path) -> Result<PathBuf> {
   validate_native_executable(path, "Caddy executable")
-}
-
-pub(crate) fn validate_runtime_guard_executable(path: &Path) -> Result<PathBuf> {
-  validate_native_executable(path, "runtime-guard executable")
 }
 
 fn validate_native_executable(path: &Path, description: &str) -> Result<PathBuf> {
@@ -80,7 +77,13 @@ pub(crate) fn open_caddy_config(path: &Path) -> Result<CaddyConfigFile> {
 pub(crate) fn same_file_identity(left: &Path, right: &Path) -> Result<bool> {
   let left = canonicalize_absolute(left, "first identity path")?;
   let right = canonicalize_absolute(right, "second identity path")?;
-  platform::same_file_identity(&left, &right)
+  is_same_file(&left, &right).with_context(|| {
+    format!(
+      "compare identity of {} with {}",
+      left.display(),
+      right.display()
+    )
+  })
 }
 
 fn canonicalize_absolute(path: &Path, description: &str) -> Result<PathBuf> {
@@ -104,20 +107,6 @@ fn reject_windows_command_script(path: &Path, description: &str) -> Result<()> {
     "{description} must be a native executable, not a batch script"
   );
   Ok(())
-}
-
-#[cfg(unix)]
-mod platform {
-  use anyhow::{Context, Result};
-  use std::{fs, os::unix::fs::MetadataExt, path::Path};
-
-  pub(super) fn same_file_identity(left: &Path, right: &Path) -> Result<bool> {
-    let left = fs::metadata(left)
-      .with_context(|| format!("inspect first file identity {}", left.display()))?;
-    let right = fs::metadata(right)
-      .with_context(|| format!("inspect second file identity {}", right.display()))?;
-    Ok(left.dev() == right.dev() && left.ino() == right.ino())
-  }
 }
 
 #[cfg(windows)]
@@ -154,18 +143,6 @@ mod platform {
       path.display()
     );
     Ok(())
-  }
-
-  pub(super) fn same_file_identity(left: &Path, right: &Path) -> Result<bool> {
-    let left = open_path(left, false)?;
-    let right = open_path(right, false)?;
-    let left = file_information(&left)?;
-    let right = file_information(&right)?;
-    Ok(
-      left.dwVolumeSerialNumber == right.dwVolumeSerialNumber
-        && left.nFileIndexHigh == right.nFileIndexHigh
-        && left.nFileIndexLow == right.nFileIndexLow,
-    )
   }
 
   fn open_path(path: &Path, inspect_reparse_point: bool) -> Result<OwnedHandle> {
@@ -217,207 +194,5 @@ mod platform {
   }
 }
 
-#[cfg(not(any(unix, windows)))]
-mod platform {
-  use anyhow::{Result, bail};
-  use std::path::Path;
-
-  pub(super) fn same_file_identity(_left: &Path, _right: &Path) -> Result<bool> {
-    bail!("file identity is unsupported on this platform")
-  }
-}
-
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use std::{env, fs};
-
-  #[test]
-  fn trusted_caddy_source_requires_absolute_executable_path() {
-    let error = validate_caddy_executable(Path::new("caddy")).unwrap_err();
-
-    assert!(error.to_string().contains("absolute path"));
-  }
-
-  #[test]
-  fn runtime_guard_source_requires_absolute_executable_path() {
-    let error = validate_runtime_guard_executable(Path::new("cadderd")).unwrap_err();
-
-    assert!(error.to_string().contains("absolute path"));
-  }
-
-  #[test]
-  fn trusted_caddy_source_same_file_identity_detects_hardlink() {
-    let temp = tempfile::tempdir().unwrap();
-    let original = temp.path().join("caddy.exe");
-    let alias = temp.path().join("caddy-alias.exe");
-    fs::write(&original, b"fixture").unwrap();
-    fs::hard_link(&original, &alias).unwrap();
-
-    assert!(same_file_identity(&original, &alias).unwrap());
-  }
-
-  #[test]
-  fn trusted_caddy_source_same_file_identity_distinguishes_files() {
-    let temp = tempfile::tempdir().unwrap();
-    let first = temp.path().join("first.exe");
-    let second = temp.path().join("second.exe");
-    fs::write(&first, b"first").unwrap();
-    fs::write(&second, b"second").unwrap();
-
-    assert!(!same_file_identity(&first, &second).unwrap());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn trusted_caddy_source_windows_rejects_batch_script() {
-    let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("caddy.CMD");
-    fs::write(&script, b"@exit /b 0").unwrap();
-
-    let error = validate_caddy_executable(&script).unwrap_err();
-
-    assert!(error.to_string().contains("batch script"));
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn runtime_guard_source_windows_rejects_batch_script() {
-    let temp = tempfile::tempdir().unwrap();
-    let script = temp.path().join("cadderd.cmd");
-    fs::write(&script, b"@exit /b 0").unwrap();
-
-    let error = validate_runtime_guard_executable(&script).unwrap_err();
-
-    assert!(error.to_string().contains("batch script"));
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn trusted_caddy_source_windows_accepts_system_executable() {
-    let executable = PathBuf::from(env::var_os("SystemRoot").unwrap())
-      .join("System32")
-      .join("where.exe");
-
-    let canonical = validate_caddy_executable(&executable).unwrap();
-
-    assert_eq!(canonical, fs::canonicalize(executable).unwrap());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn trusted_caddy_source_windows_accepts_user_writable_config() {
-    let temp = tempfile::tempdir().unwrap();
-    let config = temp.path().join("config.toml");
-    fs::write(&config, "[defaults]").unwrap();
-
-    let config_file = open_caddy_config(&config).unwrap();
-
-    assert_eq!(
-      config_file.canonical_path(),
-      fs::canonicalize(config).unwrap()
-    );
-    assert!(config_file.into_file().metadata().unwrap().is_file());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn trusted_caddy_source_windows_accepts_user_writable_ancestor() {
-    let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("caddy.exe");
-    fs::write(&executable, b"fixture").unwrap();
-
-    let canonical = validate_caddy_executable(&executable).unwrap();
-
-    assert_eq!(canonical, fs::canonicalize(executable).unwrap());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn runtime_guard_source_windows_accepts_user_writable_ancestor() {
-    let executable = env::current_exe().unwrap();
-
-    let canonical = validate_runtime_guard_executable(&executable).unwrap();
-
-    assert_eq!(canonical, fs::canonicalize(executable).unwrap());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn trusted_caddy_source_windows_rejects_final_reparse_point() {
-    use std::os::windows::fs::symlink_file;
-
-    let home = PathBuf::from(env::var_os("USERPROFILE").unwrap());
-    let temp = tempfile::Builder::new()
-      .prefix("cadder-path-trust-")
-      .tempdir_in(home)
-      .unwrap();
-    let target = temp.path().join("real-caddy.exe");
-    let alias = temp.path().join("caddy.exe");
-    fs::write(&target, b"fixture").unwrap();
-    symlink_file(&target, &alias).expect("create Windows symlink fixture");
-
-    let error = validate_caddy_executable(&alias).unwrap_err();
-
-    assert!(error.to_string().contains("reparse point"));
-  }
-
-  #[cfg(unix)]
-  fn executable_fixture() -> (tempfile::TempDir, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("executable");
-    fs::write(&executable, b"fixture").unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    (temp, executable)
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn trusted_caddy_source_unix_accepts_executable() {
-    let (_temp, executable) = executable_fixture();
-
-    let canonical = validate_caddy_executable(&executable).unwrap();
-
-    assert_eq!(canonical, fs::canonicalize(executable).unwrap());
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn trusted_caddy_source_unix_rejects_non_executable_file() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let (_temp, executable) = executable_fixture();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
-
-    let error = validate_caddy_executable(&executable).unwrap_err();
-
-    assert!(error.to_string().contains("not executable"));
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn runtime_guard_source_unix_accepts_writable_ancestor() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let (temp, executable) = executable_fixture();
-    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o770)).unwrap();
-
-    let canonical = validate_runtime_guard_executable(&executable).unwrap();
-
-    assert_eq!(canonical, fs::canonicalize(executable).unwrap());
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn trusted_caddy_source_unix_same_file_identity_follows_symlink() {
-    use std::os::unix::fs::symlink;
-
-    let (_temp, executable) = executable_fixture();
-    let alias = executable.with_file_name("caddy-alias");
-    symlink(&executable, &alias).unwrap();
-
-    assert!(same_file_identity(&executable, &alias).unwrap());
-  }
-}
+mod tests;

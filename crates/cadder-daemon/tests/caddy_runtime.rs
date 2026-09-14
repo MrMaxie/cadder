@@ -139,7 +139,7 @@ async fn process_runtime_starts_reports_running_reloads_and_stops() {
     paths,
     RuntimeTimeouts {
       start_check: Duration::from_millis(150),
-      reload: Duration::from_secs(1),
+      reload: Duration::from_secs(3),
       graceful_stop: Duration::from_secs(1),
       stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
@@ -180,7 +180,7 @@ async fn coordinator_apply_tracks_runtime_success_failure_and_idle_stop() {
     paths,
     RuntimeTimeouts {
       start_check: Duration::from_millis(150),
-      reload: Duration::from_secs(1),
+      reload: Duration::from_secs(3),
       graceful_stop: Duration::from_secs(1),
       stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
@@ -249,11 +249,12 @@ enum FakeMode {
 
 fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeMode) -> PathBuf {
   let stop_file = dir.join("fake-caddy.stop");
+  let first_reload_file = dir.join("fake-caddy.first-reload");
   #[cfg(windows)]
   {
     let path = dir.join("fake-caddy.cmd");
     let reload_behavior = if matches!(mode, FakeMode::FailReload) {
-      "echo reload failed 1>&2\r\n  exit /b 7"
+      "if not exist \"{first_reload_file}\" (\r\n    echo ready> \"{first_reload_file}\"\r\n    exit /b 0\r\n  )\r\n  echo reload failed 1>&2\r\n  exit /b 7"
     } else {
       "exit /b 0"
     };
@@ -294,7 +295,10 @@ exit /b 0
 "#,
         command_log = command_log.display(),
         stop_file = stop_file.display(),
-        reload_behavior = reload_behavior,
+        reload_behavior = reload_behavior.replace(
+          "{first_reload_file}",
+          &first_reload_file.display().to_string()
+        ),
         adapt_behavior = adapt_behavior,
       ),
     )
@@ -307,7 +311,7 @@ exit /b 0
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-caddy");
     let reload_behavior = if matches!(mode, FakeMode::FailReload) {
-      "printf '%s\n' 'reload failed' >&2\n  exit 7"
+      "if [ ! -f '{first_reload_file}' ]; then : > '{first_reload_file}'; exit 0; fi\n  printf '%s\n' 'reload failed' >&2\n  exit 7"
     } else {
       "exit 0"
     };
@@ -346,7 +350,10 @@ exit 0
 "#,
         command_log = command_log.display(),
         stop_file = stop_file.display(),
-        reload_behavior = reload_behavior,
+        reload_behavior = reload_behavior.replace(
+          "{first_reload_file}",
+          &first_reload_file.display().to_string()
+        ),
         adapt_behavior = adapt_behavior,
       ),
     )

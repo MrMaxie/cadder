@@ -1,7 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{error::Error, fmt, str::FromStr};
 
-const MAX_CAPABILITY_ID_BYTES: usize = 64;
 const MAX_ERROR_CODE_BYTES: usize = 64;
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
@@ -25,79 +24,6 @@ impl fmt::Display for IdentifierError {
 }
 
 impl Error for IdentifierError {}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-/// A validated capability name such as `state-subscription`.
-///
-/// Capability IDs use lowercase ASCII letters, digits, and internal hyphens and are at most 64
-/// bytes long.
-pub struct CapabilityId(Box<str>);
-
-impl CapabilityId {
-  /// Validates and owns a capability ID.
-  pub fn parse(value: impl Into<String>) -> Result<Self, IdentifierError> {
-    let value = value.into();
-    validate_capability_id(&value)?;
-    Ok(Self(value.into_boxed_str()))
-  }
-
-  /// Returns the validated wire value.
-  pub fn as_str(&self) -> &str {
-    &self.0
-  }
-
-  pub(crate) fn known(value: &'static str) -> Self {
-    debug_assert!(validate_capability_id(value).is_ok());
-    Self(value.into())
-  }
-}
-
-impl AsRef<str> for CapabilityId {
-  fn as_ref(&self) -> &str {
-    self.as_str()
-  }
-}
-
-impl fmt::Display for CapabilityId {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-    formatter.write_str(self.as_str())
-  }
-}
-
-impl FromStr for CapabilityId {
-  type Err = IdentifierError;
-
-  fn from_str(value: &str) -> Result<Self, Self::Err> {
-    Self::parse(value)
-  }
-}
-
-impl TryFrom<String> for CapabilityId {
-  type Error = IdentifierError;
-
-  fn try_from(value: String) -> Result<Self, Self::Error> {
-    Self::parse(value)
-  }
-}
-
-impl Serialize for CapabilityId {
-  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-  where
-    S: Serializer,
-  {
-    serializer.serialize_str(self.as_str())
-  }
-}
-
-impl<'de> Deserialize<'de> for CapabilityId {
-  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-  where
-    D: Deserializer<'de>,
-  {
-    let value = String::deserialize(deserializer)?;
-    Self::parse(value).map_err(de::Error::custom)
-  }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// A validated stable machine code carried by [`crate::ProtocolError`].
@@ -245,32 +171,6 @@ impl<'de> Deserialize<'de> for RequestId {
   }
 }
 
-fn validate_capability_id(value: &str) -> Result<(), IdentifierError> {
-  if value.is_empty() || value.len() > MAX_CAPABILITY_ID_BYTES {
-    return Err(IdentifierError::new(
-      "capability ID",
-      "length must be between 1 and 64 bytes",
-    ));
-  }
-  let bytes = value.as_bytes();
-  if !bytes[0].is_ascii_lowercase() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
-    return Err(IdentifierError::new(
-      "capability ID",
-      "must start with a lowercase letter and end with a lowercase letter or digit",
-    ));
-  }
-  if bytes
-    .iter()
-    .any(|byte| !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-'))
-  {
-    return Err(IdentifierError::new(
-      "capability ID",
-      "may contain only lowercase ASCII letters, digits, and hyphens",
-    ));
-  }
-  Ok(())
-}
-
 fn validate_request_id(value: &str) -> Result<(), IdentifierError> {
   if value.is_empty() || value.len() > MAX_REQUEST_ID_BYTES {
     return Err(IdentifierError::new(
@@ -330,14 +230,9 @@ mod tests {
 
   #[test]
   fn protocol_identifiers_validate_text_and_serde_input() {
-    let capability = CapabilityId::parse("state-subscription").unwrap();
     let error_code = ProtocolErrorCode::parse("incompatible_protocol").unwrap();
     let request = RequestId::parse("request:01.test_value").unwrap();
 
-    assert_eq!(
-      serde_json::to_string(&capability).unwrap(),
-      "\"state-subscription\""
-    );
     assert_eq!(
       serde_json::to_string(&request).unwrap(),
       "\"request:01.test_value\""
@@ -346,13 +241,69 @@ mod tests {
       serde_json::to_string(&error_code).unwrap(),
       "\"incompatible_protocol\""
     );
-    assert!(CapabilityId::parse("State").is_err());
-    assert!(CapabilityId::parse("state-").is_err());
     assert!(RequestId::parse("request value").is_err());
     assert!(RequestId::parse("unknown").is_err());
     assert!(ProtocolErrorCode::parse("Invalid-Code").is_err());
-    assert!(serde_json::from_str::<CapabilityId>("\"bad/value\"").is_err());
     assert!(serde_json::from_str::<RequestId>("\"\"").is_err());
     assert!(serde_json::from_str::<ProtocolErrorCode>("\"bad-code\"").is_err());
+  }
+
+  #[test]
+  fn identifier_traits_and_all_validation_boundaries_are_explicit() {
+    let request = "request-1".parse::<RequestId>().unwrap();
+    assert_eq!(request.as_ref(), "request-1");
+    assert_eq!(request.to_string(), "request-1");
+    assert_eq!(
+      RequestId::try_from("request-2".to_string())
+        .unwrap()
+        .as_str(),
+      "request-2"
+    );
+    assert_eq!(String::from(request.clone()), "request-1");
+    assert_eq!(
+      serde_json::from_str::<RequestId>("\"request-1\"").unwrap(),
+      request
+    );
+
+    for invalid in [
+      "".to_string(),
+      "x".repeat(MAX_REQUEST_ID_BYTES + 1),
+      "unknown".to_string(),
+      "_leading".to_string(),
+      "request/value".to_string(),
+      "żądanie".to_string(),
+    ] {
+      let error = RequestId::parse(invalid).unwrap_err();
+      assert!(error.to_string().starts_with("invalid request ID:"));
+      assert!(std::error::Error::source(&error).is_none());
+    }
+
+    let code = "storage_error".parse::<ProtocolErrorCode>().unwrap();
+    assert_eq!(code.as_ref(), "storage_error");
+    assert_eq!(code.to_string(), "storage_error");
+    assert_eq!(
+      ProtocolErrorCode::try_from("error2".to_string()).unwrap(),
+      "error2".parse().unwrap()
+    );
+    assert_eq!(
+      serde_json::from_str::<ProtocolErrorCode>("\"storage_error\"").unwrap(),
+      code
+    );
+
+    for invalid in [
+      "".to_string(),
+      "x".repeat(MAX_ERROR_CODE_BYTES + 1),
+      "_leading".to_string(),
+      "trailing_".to_string(),
+      "Uppercase".to_string(),
+      "bad-code".to_string(),
+    ] {
+      let error = ProtocolErrorCode::parse(invalid).unwrap_err();
+      assert!(
+        error
+          .to_string()
+          .starts_with("invalid protocol error code:")
+      );
+    }
   }
 }

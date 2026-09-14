@@ -1,63 +1,15 @@
-# Windows Sandbox Smoke Checklist
+# Windows Sandbox Smoke Test
 
-Cadder system-facing behavior should be smoke-tested in Windows Sandbox before it is trusted on a host workstation. The sandbox pass is intentionally focused on OS effects that are hard to validate safely in normal unit or integration tests.
+Use a disposable Windows Sandbox to verify the released Windows x64 archives without relying on repository-only settings.
 
-## Scope
+1. Verify the three archive SHA-256 files.
+2. Extract `cadder.exe`, `cadderd.exe`, and `caddy.exe` into one user-owned directory.
+3. Place a valid `cadder.toml` beside the executables.
+4. Add the directory to the sandbox user's PATH.
+5. Run `caddy run` in two projects with distinct domains and confirm one daemon serves both registrations.
+6. Open `cadder tui` and inspect Status, Domains, and Logs.
+7. Confirm Stop and Restart require confirmation and terminate only the Cadder-owned Caddy child.
+8. Replace one executable with a different version and confirm the exact handshake rejects it without mutating state.
+9. Restore the matched executable set and confirm the runtime reconnects.
 
-Run this checklist for the v1.0 runtime topology:
-
-- `cadderd` per-user daemon.
-- `caddy` PATH-facing shim.
-- `cadder` operator executable, including CLI and TUI.
-
-Use the same v1.0 package layout as release verification: `cadderd.exe`, `cadder.exe`, `caddy.exe`, and `cadder.toml`.
-
-## Sandbox Inputs
-
-Prepare a disposable package that contains only:
-
-- `cadderd.exe`
-- `caddy.exe`
-- `cadder.exe`
-- sample `cadder.toml`
-- optional mock real-Caddy fixture for deterministic shim tests
-- smoke script and cleanup script
-
-Use a clean sandbox image for each release candidate. Prefer mock backend tests first, then a real Caddy binary when validating resolver and process behavior.
-
-## Smoke Steps
-
-1. Install the package into a disposable directory under the sandbox user profile.
-2. Put the Cadder shim directory before real Caddy on the user `PATH`.
-3. Run `cadder daemon status` and confirm unavailable-daemon guidance is actionable.
-4. Run `cadder daemon start` and confirm the daemon is detached from the launching shell.
-5. Run `cadder daemon status` and confirm runtime, storage, and Caddy resolver state.
-6. Run `caddy run` from a disposable project and confirm the shim does not recursively execute itself.
-7. Open `cadder tui` and confirm it works from a normal user shell.
-8. Use the TUI to inspect daemon status, entrypoints, domains, logs, diagnostics, history, autostart, and settings.
-9. Enable daemon autostart through `cadder autostart set daemon`.
-10. Restart the sandbox session or simulate logon where possible, then confirm the daemon autostart target is present and valid.
-11. Disable autostart through `cadder autostart set disabled` and confirm the target is removed.
-12. Run `cadder daemon shutdown` and confirm the daemon exits without killing unrelated Caddy processes.
-13. Run uninstall or cleanup and confirm binaries, runtime state, and autostart entries are removed.
-
-## Pass Criteria
-
-- All shipped binaries run from the sandbox package without requiring repository sources.
-- The package contains exactly the v1.0 runtime files listed above.
-- The daemon owns only the real Caddy process it starts.
-- The shim never resolves itself as real Caddy.
-- Autostart enable and disable are reversible.
-- Cleanup leaves no Cadder PATH, autostart, or runtime residue in the sandbox.
-
-## Evidence To Capture
-
-Capture the following for release review:
-
-- `cadder daemon status` before and after daemon startup.
-- `cadder diagnostics` after shim registration.
-- `cadder logs --limit 50`.
-- `cadder history --limit 50`.
-- screenshot of `cadder tui` on the connected state.
-- autostart query output after enable and after disable.
-- cleanup script output.
+Record archive names, checksums, executable versions, the configured real-Caddy source, and the observed TUI state. Do not include personal paths or secrets in published evidence.

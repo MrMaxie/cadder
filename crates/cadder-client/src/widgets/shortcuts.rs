@@ -5,12 +5,14 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::widgets::theme::THEME;
 
-pub const MAIN_SHORTCUTS: [Shortcut; 7] = [
+pub const MAIN_SHORTCUTS: [Shortcut; 9] = [
   Shortcut::new("Tab/Left/Right", "switch view"),
   Shortcut::new("Up/Down", "select row"),
   Shortcut::new("Space", "request toggle"),
   Shortcut::new("Enter", "details"),
   Shortcut::new("r", "refresh"),
+  Shortcut::new("x", "stop"),
+  Shortcut::new("R", "restart"),
   Shortcut::new("Esc", "quit"),
   Shortcut::new("Ctrl+C", "quit"),
 ];

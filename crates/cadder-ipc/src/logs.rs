@@ -1,3 +1,4 @@
+use crate::{OperationPayload, message_types, operation_payload_sealed};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -95,25 +96,25 @@ pub struct LogEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct QueryLogsRequest {
-  pub request_id: String,
+pub struct QueryLogsPayload {
   pub stream: LogStreamIdentity,
   pub limit: Option<usize>,
-  pub cursor: Option<String>,
-  pub minimum_severity: Option<LogSeverity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryLogsResponse {
+  #[serde(default)]
   pub request_id: String,
   pub accepted: bool,
   pub message: String,
   pub stream: LogStreamIdentity,
   pub stream_status: LogStreamStatus,
   pub entries: Vec<LogEntry>,
-  pub next_cursor: Option<String>,
-  pub has_gap: bool,
-  pub has_more_before: bool,
-  pub truncated_by_retention: bool,
+}
+
+impl operation_payload_sealed::Sealed for QueryLogsPayload {}
+
+impl OperationPayload for QueryLogsPayload {
+  const OPERATION: &'static str = message_types::QUERY_LOGS_REQUEST;
 }

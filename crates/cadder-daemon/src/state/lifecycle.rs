@@ -2,23 +2,16 @@ use super::*;
 
 impl DaemonState {
   pub fn new(coordinator: CaddyConfigCoordinator) -> Self {
-    let (events, _) = broadcast::channel(256);
     Self {
       inner: Arc::new(Mutex::new(DaemonInner {
         registrations: BTreeMap::new(),
-        sequence: 0,
       })),
       coordinator: Arc::new(Mutex::new(coordinator)),
       config_operation: Arc::new(Semaphore::new(1)),
-      publish_operation: Arc::new(Mutex::new(())),
-      events,
       logs: CaddyLogStore::default(),
-      store: RuntimeStore::memory(),
-      autostart: AutostartManager::disabled(),
+      database: None,
       shutdown_signal: ShutdownSignal::default(),
       operation_fences: OperationFenceAuthority::default(),
-      #[cfg(test)]
-      registration_publish_hook: None,
     }
   }
 
@@ -27,15 +20,11 @@ impl DaemonState {
     paths: RuntimePaths,
   ) -> Result<Self> {
     crate::runtime_file::cleanup_stale_config_candidates(&paths)?;
-    let store = RuntimeStore::try_open(paths.storage_paths())?;
+    let database = Database::open(paths.storage_paths()).await?;
     let mut state = Self::new(coordinator);
-    state.store = store;
-    state.autostart = AutostartManager::new(&paths);
+    state.logs = CaddyLogStore::with_database(database.clone());
+    state.database = Some(database);
     Ok(state)
-  }
-
-  pub fn subscribe(&self) -> broadcast::Receiver<StateChangedEvent> {
-    self.events.subscribe()
   }
 
   pub(crate) fn shutdown_signal(&self) -> ShutdownSignal {
@@ -50,17 +39,28 @@ impl DaemonState {
     self.operation_fences.begin_drain()
   }
 
-  #[cfg(test)]
-  pub(crate) fn set_registration_publish_hook(&mut self, hook: RegistrationPublishTestHook) {
-    self.registration_publish_hook = Some(hook);
-  }
-
-  #[cfg(test)]
-  pub(crate) fn set_runtime_store_for_test(&mut self, store: RuntimeStore) {
-    self.store = store;
-  }
-
   pub fn logs(&self) -> CaddyLogStore {
     self.logs.clone()
+  }
+
+  pub(crate) fn storage_state(&self) -> cadder_ipc::StorageState {
+    let mut state = self
+      .database
+      .as_ref()
+      .map(Database::state)
+      .unwrap_or_else(|| cadder_ipc::StorageState {
+        backend: "memory".to_string(),
+        path: None,
+        schema_version: 0,
+        diagnostics: Vec::new(),
+      });
+    if let Some(message) = self.logs.durability_diagnostic() {
+      state.diagnostics.push(cadder_ipc::RuntimeDiagnostic {
+        code: "log-durability-failed".to_string(),
+        message,
+        operation: Some("persist-log".to_string()),
+      });
+    }
+    state
   }
 }
