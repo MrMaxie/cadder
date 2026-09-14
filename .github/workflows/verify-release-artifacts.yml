@@ -1,0 +1,140 @@
+name: Verify release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify-release-artifacts (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            archive: cadder-x86_64-pc-windows-msvc.zip
+            executable_suffix: .exe
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive: cadder-x86_64-unknown-linux-gnu.tar.xz
+            executable_suffix: ""
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive: cadder-x86_64-apple-darwin.tar.xz
+            executable_suffix: ""
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: cadder-aarch64-apple-darwin.tar.xz
+            executable_suffix: ""
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLAN: ${{ inputs.plan }}
+      TARGET: ${{ matrix.target }}
+      ARCHIVE_NAME: ${{ matrix.archive }}
+      EXECUTABLE_SUFFIX: ${{ matrix.executable_suffix }}
+    steps:
+      - name: Download target archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: artifacts
+      - name: Download checksums
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: artifacts-build-global
+          path: artifacts
+      - name: Verify archive outside the checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $plan = $env:PLAN | ConvertFrom-Json
+          $tag = [string]$plan.announcement_tag
+          if ($tag -notmatch '(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Could not derive a SemVer version from cargo-dist tag '$tag'."
+          }
+          $version = $Matches.version
+
+          $archive = Join-Path $PWD "artifacts/$env:ARCHIVE_NAME"
+          $checksum = "$archive.sha256"
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            throw "Missing archive $env:ARCHIVE_NAME."
+          }
+          if (-not (Test-Path -LiteralPath $checksum -PathType Leaf)) {
+            throw "Missing checksum $env:ARCHIVE_NAME.sha256."
+          }
+
+          $expectedHash = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($actualHash -ne $expectedHash) {
+            throw "SHA-256 mismatch for $env:ARCHIVE_NAME."
+          }
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "cadder-$env:TARGET-$([guid]::NewGuid().ToString('N'))"
+          New-Item -ItemType Directory -Path $extractRoot | Out-Null
+          if ($env:ARCHIVE_NAME.EndsWith('.zip')) {
+            Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot
+          } else {
+            & tar -xf $archive -C $extractRoot
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not extract $env:ARCHIVE_NAME."
+            }
+          }
+
+          $readmes = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File -Filter README.md)
+          if ($readmes.Count -ne 1) {
+            throw "Expected exactly one README.md in the extracted archive."
+          }
+          $allExtractedFiles = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -File)
+          if ($allExtractedFiles.Count -ne 7) {
+            throw "Expected exactly seven files in the extracted archive."
+          }
+          $allExtractedDirectories = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -Directory)
+          if ($allExtractedDirectories.Count -ne 0) {
+            throw "Archive directory structure differs from the portable layout."
+          }
+          $contentRoot = $readmes[0].Directory.FullName
+          $expectedFiles = @(
+            "cadder$env:EXECUTABLE_SUFFIX",
+            "cadderd$env:EXECUTABLE_SUFFIX",
+            "caddy$env:EXECUTABLE_SUFFIX",
+            "README.md",
+            "CHANGELOG.md",
+            "LICENSE",
+            "cadder.toml.example"
+          ) | Sort-Object
+          $actualFiles = @(Get-ChildItem -LiteralPath $contentRoot -File | ForEach-Object Name | Sort-Object)
+          $nestedDirectories = @(Get-ChildItem -LiteralPath $contentRoot -Directory)
+          $difference = @(Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $actualFiles)
+          if ($difference.Count -ne 0 -or $nestedDirectories.Count -ne 0) {
+            throw "Archive contents differ from the accepted seven-file portable layout."
+          }
+
+          foreach ($binaryName in @("cadder", "cadderd", "caddy")) {
+            $binary = Join-Path $contentRoot "$binaryName$env:EXECUTABLE_SUFFIX"
+            if (-not $IsWindows) {
+              & /usr/bin/test -x $binary
+              if ($LASTEXITCODE -ne 0) {
+                throw "$binaryName is not executable."
+              }
+            }
+
+            $versionOutput = (& $binary --version 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch "^$binaryName $([regex]::Escape($version))$") {
+              throw "$binaryName --version did not report $version. Output: $versionOutput"
+            }
+
+            & $binary --help *> $null
+            if ($LASTEXITCODE -ne 0) {
+              throw "$binaryName --help failed."
+            }
+          }
+
+          Write-Host "Verified $env:ARCHIVE_NAME for Cadder $version."

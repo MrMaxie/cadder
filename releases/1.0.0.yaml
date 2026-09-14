@@ -1,0 +1,15 @@
+version: 1.0.0
+date: 2026-09-14
+changes:
+  - add-operator-inspection-cli
+  - adopt-arcantry-project-workflow
+  - align-v1-to-core-tui
+  - clarify-shutdown-fail-stop-containment
+  - clarify-windows-ipc-authentication
+  - define-cadder-v1-contract
+  - prepare-cadder-1-0-release
+  - replace-custom-storage-with-sqlite
+  - replace-sqlite-with-file-storage
+  - replace-xtask-with-mise
+  - reset-cadder-architecture
+  - simplify-v1-foundation

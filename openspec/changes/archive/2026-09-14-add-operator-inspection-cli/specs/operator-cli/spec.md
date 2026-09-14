@@ -1,8 +1,5 @@
-# Operator CLI
+## MODIFIED Requirements
 
-## Purpose
-Define the intentionally small command surface of the operator executable.
-## Requirements
 ### Requirement: CLI-001: The operator exposes focused developer workflows
 `cadder` MUST support help, version, `tui`, daemon lifecycle and status, project listing and activation, domain listing and activation, port inspection and guarded process termination, Caddyfile inspection, explicit diagnostics, and bounded redacted log reads. It MUST reject profile, machine-output, history, export, continuous tail, watch, and autostart commands.
 
@@ -33,3 +30,8 @@ Define the intentionally small command surface of the operator executable.
 #### Scenario: Removed command
 - **WHEN** a user invokes a profile, machine-output, history, export, continuous tail, watch, or autostart command
 - **THEN** Cadder rejects it as unsupported CLI input
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: CLI-001: The operator exposes only the TUI`
+- TO: `### Requirement: CLI-001: The operator exposes focused developer workflows`

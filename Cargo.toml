@@ -101,6 +101,23 @@ unix-archive = ".tar.xz"
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".zip"
 # Extra static files to include in each App (path relative to this Cargo.toml's dir)
-include = ["LICENSE", "cadder.toml.example"]
+include = ["cadder.toml.example"]
 # Which actions to run on pull requests
-pr-run-mode = "plan"
+pr-run-mode = "upload"
+# Create the GitHub Release only after the host verification gate succeeds
+github-release = "announce"
+# Verify the complete tagged artifact set immediately before the announce phase
+publish-jobs = ["./verify-release-artifacts"]
+# Attest every public release asset during the final announce phase
+github-attestations = true
+github-attestations-phase = "announce"
+github-attestations-filters = ["*.zip", "*.tar.xz", "*.sha256", "*.tar.gz", "sha256.sum", "dist-manifest.json"]
+# The verification-only publish hook must not inherit publisher credentials
+github-custom-job-permissions = { "verify-release-artifacts" = { contents = "read" } }
+
+[workspace.metadata.dist.github-action-commits]
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6"
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"swatinem/rust-cache" = "6323deb102c322ba6fcbdcafc7e3dddab59af2b6"

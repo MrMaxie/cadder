@@ -1,7 +1,7 @@
 # Observability
 
 ## Purpose
-Define bounded redacted logs for the retained operator journey.
+Define bounded, redacted diagnostic logs exposed through the operator CLI.
 
 ## Requirements
 
@@ -22,6 +22,6 @@ The runtime SHALL retain at most 1,000 events per canonical stream and 5,000 eve
 ### Requirement: OBS-003: Queries are bounded and ordered
 A query MUST select one runtime, entrypoint, or domain stream and return at most 200 newest matching rows in ascending sequence order without cursors, paging, tailing, subscriptions, history, or export.
 
-#### Scenario: TUI refreshes Logs
-- **WHEN** the TUI requests a limit within 1 through 200
-- **THEN** the daemon returns the newest bounded rows in stable ascending order
+#### Scenario: A diagnostic client requests logs
+- **WHEN** a client requests a limit within 1 through 200 for one canonical stream
+- **THEN** the daemon returns the newest redacted rows in stable ascending order
