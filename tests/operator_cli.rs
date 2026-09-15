@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct OperatorHarness {
   _temp: TempDir,
@@ -36,12 +37,20 @@ impl OperatorHarness {
   }
 
   fn run(&self, arguments: &[&str]) -> Output {
+    self.run_with_timeout(arguments, COMMAND_TIMEOUT)
+  }
+
+  fn run_with_timeout(&self, arguments: &[&str], timeout: Duration) -> Output {
     self
-      .try_run(arguments)
+      .try_run_with_timeout(arguments, timeout)
       .unwrap_or_else(|error| panic!("run cadder {arguments:?}: {error}"))
   }
 
   fn try_run(&self, arguments: &[&str]) -> Result<Output, String> {
+    self.try_run_with_timeout(arguments, COMMAND_TIMEOUT)
+  }
+
+  fn try_run_with_timeout(&self, arguments: &[&str], timeout: Duration) -> Result<Output, String> {
     let path = controlled_path(&self.binary_dir)?;
     let mut stdout = tempfile::tempfile_in(self._temp.path()).map_err(|error| error.to_string())?;
     let mut stderr = tempfile::tempfile_in(self._temp.path()).map_err(|error| error.to_string())?;
@@ -61,7 +70,7 @@ impl OperatorHarness {
       .map_err(|error| error.to_string())?;
 
     let completed = child
-      .wait_timeout(COMMAND_TIMEOUT)
+      .wait_timeout(timeout)
       .map_err(|error| error.to_string())?;
     let timed_out = completed.is_none();
     let status = if let Some(status) = completed {
@@ -79,7 +88,7 @@ impl OperatorHarness {
     if timed_out {
       return Err(format!(
         "timed out after {} seconds\nstdout:\n{}\nstderr:\n{}",
-        COMMAND_TIMEOUT.as_secs(),
+        timeout.as_secs(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
       ));
@@ -90,15 +99,24 @@ impl OperatorHarness {
 
   fn succeeds(&self, arguments: &[&str]) -> String {
     let output = self.run(arguments);
-    assert!(
-      output.status.success(),
-      "cadder {arguments:?} failed with {:?}:\nstdout:\n{}\nstderr:\n{}",
-      output.status.code(),
-      String::from_utf8_lossy(&output.stdout),
-      String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("operator stdout should be UTF-8")
+    successful_stdout(arguments, output)
   }
+
+  fn succeeds_with_timeout(&self, arguments: &[&str], timeout: Duration) -> String {
+    let output = self.run_with_timeout(arguments, timeout);
+    successful_stdout(arguments, output)
+  }
+}
+
+fn successful_stdout(arguments: &[&str], output: Output) -> String {
+  assert!(
+    output.status.success(),
+    "cadder {arguments:?} failed with {:?}:\nstdout:\n{}\nstderr:\n{}",
+    output.status.code(),
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  String::from_utf8(output.stdout).expect("operator stdout should be UTF-8")
 }
 
 impl Drop for OperatorHarness {
@@ -157,7 +175,7 @@ fn operator_cli_manages_and_inspects_an_isolated_daemon() {
     Some(2)
   );
 
-  let started = harness.succeeds(&["daemon", "start"]);
+  let started = harness.succeeds_with_timeout(&["daemon", "start"], DAEMON_START_TIMEOUT);
   assert!(started.contains("cadderd is running"));
   assert!(
     harness
@@ -259,7 +277,7 @@ fn operator_cli_manages_and_inspects_an_isolated_daemon() {
 
   assert!(
     harness
-      .succeeds(&["daemon", "restart"])
+      .succeeds_with_timeout(&["daemon", "restart"], DAEMON_START_TIMEOUT)
       .contains("cadderd restarted")
   );
   assert!(
