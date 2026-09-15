@@ -298,7 +298,10 @@ impl ProcessRuntime {
     yield_now().await;
     match timeout(self.timeouts.start_check, child.wait()).await {
       Ok(Ok(status)) => {
-        anyhow::bail!("real Caddy runtime exited immediately with status {status}");
+        let exit = status
+          .code()
+          .map_or_else(|| status.to_string(), |code| format!("exit code {code}"));
+        anyhow::bail!("real Caddy runtime exited immediately with {exit}");
       }
       Ok(Err(error)) => return Err(error).context("inspect started real Caddy runtime"),
       Err(_) => {}

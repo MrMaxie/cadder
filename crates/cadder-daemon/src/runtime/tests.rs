@@ -245,8 +245,7 @@ async fn apply_config_reports_start_failure_without_publishing_candidate() {
 
   let error_chain = format!("{error:#}");
   assert!(
-    error_chain.contains("real Caddy runtime exited")
-      && error_chain.contains("status exit code: 7"),
+    error_chain.contains("real Caddy runtime exited immediately with exit code 7"),
     "{error_chain}"
   );
   assert_eq!(std_fs::read(effective_path).unwrap(), b"previous");

@@ -23,6 +23,7 @@ test('removes only the PATH entry whose caddy command targets the npm launcher',
       await writeFile(join(ownBin, 'caddy.cmd'), `@node "%~dp0\\${relativeLauncher}" %*\n`);
       await writeFile(join(upstreamBin, 'caddy.exe'), 'not a real executable\n');
     } else {
+      await chmod(launcherPath, 0o755);
       await symlink(launcherPath, join(ownBin, 'caddy'));
       await writeFile(join(upstreamBin, 'caddy'), '#!/bin/sh\nexit 0\n');
       await chmod(join(upstreamBin, 'caddy'), 0o755);
