@@ -7,7 +7,9 @@ import { parse } from 'yaml';
 const npmDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const projectDirectory = resolve(npmDirectory, '..');
 const workflowPath = resolve(projectDirectory, '.github', 'workflows', 'npm.yml');
+const ciWorkflowPath = resolve(projectDirectory, '.github', 'workflows', 'ci.yml');
 const source = await readFile(workflowPath, 'utf8');
+const ciSource = await readFile(ciWorkflowPath, 'utf8');
 const stageSource = await readFile(resolve(npmDirectory, 'scripts', 'stage-release.js'), 'utf8');
 const workflow = parse(source);
 
@@ -30,6 +32,30 @@ assert.equal(source.includes('npm publish '), false, 'The npm workflow must not 
 
 for (const jobName of ['prepare', 'verify-native', 'stage']) {
   assert.ok(workflow.jobs[jobName], `Missing ${jobName} job.`);
+}
+
+const setupNodeAction = 'actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903';
+const nubInstallCommand = 'npm install --global @nubjs/nub@0.7.5';
+
+for (const [workflowName, workflowSource, expectedSetupCount, expectedNubInstallCount] of [
+  ['CI', ciSource, 1, 1],
+  ['npm distribution', source, 3, 1],
+]) {
+  assert.equal(
+    workflowSource.includes('nubjs/setup-nub@'),
+    false,
+    `${workflowName} must not depend on an action rejected by the repository allowlist.`,
+  );
+  assert.equal(
+    workflowSource.split(setupNodeAction).length - 1,
+    expectedSetupCount,
+    `${workflowName} must pin the expected Node setup action.`,
+  );
+  assert.equal(
+    workflowSource.split(nubInstallCommand).length - 1,
+    expectedNubInstallCount,
+    `${workflowName} must install the pinned Nub CLI only where it is used.`,
+  );
 }
 
 for (const match of source.matchAll(/uses:\s+([^\s#]+)/g)) {

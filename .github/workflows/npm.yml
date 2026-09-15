@@ -37,12 +37,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
         with:
           persist-credentials: false
-      - name: Set up Node.js and Nub
-        uses: nubjs/setup-nub@21b317c170eee658503996209cf87b63481be35a # v0
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 24.18.0
-          nub-version: 0.7.5
-          package-manager-cache: false
+      - name: Install Nub CLI
+        run: npm install --global @nubjs/nub@0.7.5
       - name: Pin npm CLI
         run: npm install --global npm@12.0.2 --ignore-scripts
       - name: Verify toolchain
@@ -108,12 +108,10 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
         with:
           persist-credentials: false
-      - name: Set up Node.js and Nub
-        uses: nubjs/setup-nub@21b317c170eee658503996209cf87b63481be35a # v0
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 24.18.0
-          nub-version: 0.7.5
-          package-manager-cache: false
       - name: Pin npm CLI
         run: npm install --global npm@12.0.2 --ignore-scripts
       - name: Download npm tarballs
@@ -139,12 +137,10 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
         with:
           persist-credentials: false
-      - name: Set up Node.js and Nub
-        uses: nubjs/setup-nub@21b317c170eee658503996209cf87b63481be35a # v0
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
           node-version: 24.18.0
-          nub-version: 0.7.5
-          package-manager-cache: false
       - name: Pin npm CLI
         run: npm install --global npm@12.0.2 --ignore-scripts
       - name: Download verified npm tarballs
