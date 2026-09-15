@@ -249,6 +249,8 @@ enum FakeMode {
 
 fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeMode) -> PathBuf {
   let stop_file = dir.join("fake-caddy.stop");
+  #[cfg(windows)]
+  let ready_file = dir.join("fake-caddy.ready");
   let first_reload_file = dir.join("fake-caddy.first-reload");
   #[cfg(windows)]
   {
@@ -279,6 +281,7 @@ if "%1"=="adapt" (
   {adapt_behavior}
 )
 if "%1"=="reload" (
+  if not exist "{ready_file}" exit /b 7
   {reload_behavior}
 )
 if "%1"=="stop" (
@@ -286,15 +289,15 @@ if "%1"=="stop" (
   exit /b 0
 )
 if "%1"=="run" (
-  :run_loop
-  if exist "{stop_file}" exit /b 0
-  powershell -NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 100" >nul
-  goto run_loop
+  set "CADDER_FAKE_CADDY_READY_FILE={ready_file}"
+  set "CADDER_FAKE_CADDY_STOP_FILE={stop_file}"
+  powershell -NoProfile -NonInteractive -Command "New-Item -ItemType File -Path $env:CADDER_FAKE_CADDY_READY_FILE -Force | Out-Null; while (-not (Test-Path -LiteralPath $env:CADDER_FAKE_CADDY_STOP_FILE)) {{ Start-Sleep -Milliseconds 100 }}"
 )
 exit /b 0
 "#,
         command_log = command_log.display(),
         stop_file = stop_file.display(),
+        ready_file = ready_file.display(),
         reload_behavior = reload_behavior.replace(
           "{first_reload_file}",
           &first_reload_file.display().to_string()
