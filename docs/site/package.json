@@ -11,7 +11,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.9",
-    "@astrojs/starlight": "0.40.0",
+    "@astrojs/starlight": "0.42.0",
     "@fontsource-variable/fira-code": "5.3.0",
     "@fontsource-variable/space-grotesk": "5.3.0",
     "@fortawesome/free-solid-svg-icons": "7.3.1",
