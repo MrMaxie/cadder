@@ -45,7 +45,7 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: coverage-lcov-windows-msvc
-          path: target/llvm-cov/coverage-summary.lcov
+          path: target/coverage-summary.lcov
           if-no-files-found: ignore
           retention-days: 14
 

@@ -44,7 +44,7 @@ run = [
 
 [tasks.coverage]
 description = "Enforce the 85 percent workspace line coverage gate"
-run = "cargo llvm-cov --workspace --all-features --lcov --output-path target/llvm-cov/coverage-summary.lcov --fail-under-lines 85"
+run = "cargo llvm-cov --workspace --all-features --lcov --output-path target/coverage-summary.lcov --fail-under-lines 85"
 
 [tasks.check]
 description = "Run the complete local validation gate"
