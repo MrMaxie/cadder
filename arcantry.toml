@@ -33,3 +33,23 @@ repository_url = "https://github.com/MrMaxie/cadder"
 [[release.version_sources]]
 path = "Cargo.toml"
 adapter = "cargo-workspace@1"
+
+[[release.version_sources]]
+path = "npm/package.json"
+adapter = "json-package@1"
+
+[[release.version_sources]]
+path = "npm/packages/win32-x64/package.json"
+adapter = "json-package@1"
+
+[[release.version_sources]]
+path = "npm/packages/linux-x64-gnu/package.json"
+adapter = "json-package@1"
+
+[[release.version_sources]]
+path = "npm/packages/darwin-x64/package.json"
+adapter = "json-package@1"
+
+[[release.version_sources]]
+path = "npm/packages/darwin-arm64/package.json"
+adapter = "json-package@1"

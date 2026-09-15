@@ -1,6 +1,7 @@
 version: 1.0.0
-date: 2026-09-14
+date: 2026-09-15
 changes:
+  - add-npm-distribution
   - add-operator-inspection-cli
   - adopt-arcantry-project-workflow
   - align-v1-to-core-tui

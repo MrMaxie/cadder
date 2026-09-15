@@ -30,9 +30,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
+      - uses: nubjs/setup-nub@21b317c170eee658503996209cf87b63481be35a
+        with:
+          node-version: 24.18.0
+          nub-version: 0.7.5
+          package-manager-cache: false
       - uses: jdx/mise-action@v4.2.3
       - run: mise run openspec-check
       - run: mise run docs-check
+      - run: mise run npm-check
 
   coverage:
     name: Coverage (Windows MSVC)

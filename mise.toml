@@ -42,6 +42,14 @@ run = [
   "npm run build",
 ]
 
+[tasks.npm-check]
+description = "Validate the Node and Nub npm distribution workspace"
+dir = "npm"
+run = [
+  "nub ci",
+  "nub run check",
+]
+
 [tasks.coverage]
 description = "Enforce the 85 percent workspace line coverage gate"
 run = "cargo llvm-cov --workspace --all-features --lcov --output-path target/coverage-summary.lcov --fail-under-lines 85"
@@ -55,6 +63,7 @@ run = [
   "openspec doctor",
   "openspec validate --all --strict --no-interactive",
   { task = "docs-check" },
+  { task = "npm-check" },
   "dist generate --check",
   "dist plan",
 ]

@@ -243,7 +243,12 @@ async fn apply_config_reports_start_failure_without_publishing_candidate() {
     .await
     .unwrap_err();
 
-  assert!(error.to_string().contains("exited immediately"));
+  let error_chain = format!("{error:#}");
+  assert!(
+    error_chain.contains("real Caddy runtime exited")
+      && error_chain.contains("status exit code: 7"),
+    "{error_chain}"
+  );
   assert_eq!(std_fs::read(effective_path).unwrap(), b"previous");
   assert!(!has_runtime_config_candidate(
     fixture.runtime.paths.runtime_dir()

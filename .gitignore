@@ -5,6 +5,7 @@ target/
 artifacts/
 dist/
 publish/
+node_modules/
 *.log
 *.tmp
 
