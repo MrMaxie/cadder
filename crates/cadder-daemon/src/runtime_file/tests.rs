@@ -4,8 +4,9 @@ use super::*;
 async fn dropped_candidate_does_not_change_effective_config() {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-  paths.ensure_dirs().unwrap();
-  fs::write(paths.effective_config_path(), b"previous").unwrap();
+  restore_effective_config(&paths, Some(b"previous"))
+    .await
+    .unwrap();
 
   let staged = StagedRuntimeConfig::stage(&paths, b"candidate")
     .await
@@ -29,8 +30,9 @@ async fn dropped_candidate_does_not_change_effective_config() {
 async fn promotion_atomically_replaces_effective_config() {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-  paths.ensure_dirs().unwrap();
-  fs::write(paths.effective_config_path(), b"previous").unwrap();
+  restore_effective_config(&paths, Some(b"previous"))
+    .await
+    .unwrap();
 
   let mut staged = StagedRuntimeConfig::stage(&paths, b"candidate")
     .await

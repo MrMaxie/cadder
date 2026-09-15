@@ -217,7 +217,9 @@ async fn apply_config_reports_reload_failure_for_running_runtime() {
 async fn apply_config_reports_start_failure_without_publishing_candidate() {
   let fixture = runtime_fixture(FakeRuntimeMode::FailRun);
   let effective_path = fixture.runtime.paths.effective_config_path();
-  std_fs::write(&effective_path, b"previous").unwrap();
+  restore_effective_config(&fixture.runtime.paths, Some(b"previous"))
+    .await
+    .unwrap();
 
   let error = fixture
     .runtime
