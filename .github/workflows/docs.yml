@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: jdx/mise-action@v4.3.0
+      - uses: jdx/mise-action@v4.2.3
       - run: mise run docs-check
       - run: mise run docs-build
       - if: github.event_name != 'pull_request'

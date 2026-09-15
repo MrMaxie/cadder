@@ -60,6 +60,8 @@ updates:
           - "*"
     # cargo-dist owns these references in the generated release workflow.
     ignore:
+      # Repository Actions policy allows this exact reviewed version.
+      - dependency-name: jdx/mise-action
       - dependency-name: actions/attest
       - dependency-name: actions/checkout
       - dependency-name: actions/download-artifact
