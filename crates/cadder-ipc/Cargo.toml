@@ -1,0 +1,15 @@
+[package]
+name = "cadder-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = { version = "=0.4.45", features = ["serde"] }
+idna = "=1.1.0"
+schemars = { version = "=1.2.1", features = ["chrono04"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_ignored = "=0.1.14"
+serde_json = { version = "=1.0.150", features = ["raw_value"] }
+uuid = { version = "=1.23.3", features = ["v4", "serde"] }

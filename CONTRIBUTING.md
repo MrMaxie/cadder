@@ -1,64 +1,68 @@
-# Contributing to Cadder
+# Contributing
 
-Thanks for taking the time to improve Cadder.
+Cadder is a Rust workspace with a versioned IPC contract, daemon implementation, shared client API, operator TUI, and PATH-facing Caddy shim. OpenSpec is the source of truth for accepted behavior and changes.
 
-Cadder is a Rust workspace for a per-user Caddy coordinator. The main parts are:
+## Setup
 
-- `crates/cadder-protocol`: shared request and response contracts.
-- `crates/cadder-daemon`: daemon state, IPC, Caddy process ownership, and runtime storage.
-- `crates/cadderd`: daemon binary.
-- `crates/cadder-shim`: PATH-facing `caddy` shim.
-- `crates/cadder-tui`: terminal UI.
-- `xtask`: validation, coverage, distribution, and packaging tasks.
-
-## Development setup
-
-Use Cargo from the repository root.
+Install [mise](https://mise.jdx.dev/), then prepare the exact repository toolchain:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo run -p xtask -- check
+mise install --locked
+mise tasks
 ```
 
-Documentation lives in `docs/site` and uses Bun:
+The lockfile pins Rust and its formatting, lint, and coverage components, Node.js, OpenSpec, cargo-llvm-cov, and cargo-dist. npm is provided by the pinned Node.js distribution.
+
+## Validation
+
+Use focused Cargo tests while editing, then run the shared gate:
 
 ```sh
-cd docs/site
-bun install --frozen-lockfile
-bun run check
-bun run build
+mise run fmt
+mise run lint
+mise run test
+mise run openspec-check
+mise run docs-check
+mise run check
 ```
 
-## Pull requests
+Coverage is owned directly by cargo-llvm-cov:
 
-Keep pull requests focused. Include the reason for the change, the behavior that changed, and the commands you ran.
+```sh
+mise run coverage
+```
 
-Automated tests should not depend on a globally installed real Caddy binary. Use repository fixtures or explicitly ignored integration tests when a real runtime is required.
+The configured line threshold is 85 percent. Docker-backed Caddy tests remain an explicit job because they require a live container runtime.
+
+## Documentation
+
+Documentation uses Astro and Starlight:
+
+```sh
+mise run docs-check
+mise run docs-build
+```
+
+Keep end-user pages free of private paths, test-only environment variables, and repository-internal workflows.
+
+## Local TUI
+
+Use the mock backend for safe local UI work:
+
+```sh
+mise run dev
+mise run tui-web
+```
+
+The mock backend variable is scoped to those tasks and is not exported to ordinary commands.
 
 ## Releases
 
-Cadder does not publish GitHub Releases before 1.0.0. The release workflow rejects `v0.*` tags before publishing.
-
-To build a local release layout, run:
+cargo-dist owns release planning, archives, checksums, source tarballs, and the generated GitHub Release workflow:
 
 ```sh
-cargo run -p xtask -- dist --out target/cadder-dist
+mise run dist-plan
+mise run dist-build
 ```
 
-The layout contains `cadderd`, `cadder-tui`, the `caddy` shim, and `cadder.toml`. On Windows the binaries use the `.exe` suffix.
-
-Verify an existing layout with:
-
-```sh
-cargo run -p xtask -- verify-dist --dir target/cadder-dist
-```
-
-Build a versioned portable archive and checksum with:
-
-```sh
-cargo run -p xtask -- package --out target/cadder-packages --version 1.0.0 --platform windows-x64 --target x86_64-pc-windows-msvc
-```
-
-The package command writes a platform archive next to a `.sha256` checksum file. Windows packages are `.zip`; Linux and macOS packages are `.tar.gz`.
+`dist generate --check` verifies that `.github/workflows/release.yml` matches the pinned cargo-dist version. A `v1.0.0` style tag releases all three executable packages in lockstep. Do not publish, tag, or upload from contributor validation.

@@ -1,59 +1,91 @@
 ---
-title: Cadder documentation
-description: Run local Caddy reverse proxies through one coordinated Caddy runtime.
+title: Cadder
+description: Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared web server and reverse proxy.
+template: splash
+hero:
+  title: Stable addresses for every local app.
+  tagline: "Cadder coordinates Caddy across your local projects. Caddy is the web server and reverse proxy that connects each local address to the port where an app is running. With Cadder, routes from different repositories are served together by one Caddy process."
+  actions:
+    - text: Set up your first route
+      link: /cadder/quick-start/getting-started/
+      variant: primary
+    - text: How it works
+      link: '#how-it-works'
+      variant: secondary
 ---
 
-import banner from '../../assets/banner.webp';
-import { Icon } from '@astrojs/starlight/components';
+import CadderTuiPreview from '../../components/CadderTuiPreview.astro';
 
-<img src={banner.src} alt="Cadder banner" class="cadder-hero-banner" />
+<section class="cadder-home-section" id="how-it-works">
 
-Cadder coordinates local Caddy projects that would otherwise fight for the same HTTP and HTTPS ports. Each project can still use a familiar `caddy run` workflow, but Cadder registers those projects with one per-user daemon and applies them through one real Caddy process.
+<div class="cadder-section-layout">
+  <div class="cadder-section-copy">
+    <p class="cadder-kicker">The Cadder view</p>
 
-That makes local reverse-proxy setups easier to run side by side. Cadder can compose active project Caddyfiles, report domain conflicts before reload, and show the current state in a terminal dashboard.
+## See every route in one place.
 
-## Features
+`cadder tui` shows which project owns each address, where requests go, and whether Cadder and Caddy are running. Select a project or route to enable or disable it without touching the others.
 
-- One local Caddy runtime can serve domains from many project Caddyfiles.
-- The `caddy` shim keeps `caddy run` usable for project workflows.
-- `cadder.toml` points Cadder at the real Caddy binary without replacing it.
-- `cadder-tui` shows entrypoints, domains, logs, diagnostics, and toggles.
-- Domains can be enabled or disabled without killing unrelated project sessions.
-- Cadder avoids owning Caddy processes it did not start.
-
-## Binaries
-
-- `caddy` is the Caddy-compatible shim. For `caddy run`, it starts or connects to `cadderd`, registers the current project, and unregisters on exit. Other Caddy commands are delegated to the real Caddy binary.
-- `cadderd` is the daemon. It owns registrations, generated Caddy config, the real Caddy process it starts, diagnostics, and bounded logs.
-- `cadder-tui` is the terminal UI for inspecting domains, entrypoints, diagnostics, logs, filters, toggles, and daemon shutdown.
-
-Each binary supports `--help` and `--version`.
-
-## Download
-
-<div class="cadder-downloads">
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="windows-x64">
-    <span class="cadder-windows-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
-    <span>Windows x64</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="macos-arm64">
-    <Icon name="apple" />
-    <span>macOS Apple Silicon</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="macos-x64">
-    <Icon name="apple" />
-    <span>macOS Intel</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/Cadder/releases/latest" data-cadder-asset="linux-x64">
-    <Icon name="linux" />
-    <span>Linux x64</span>
-  </a>
+    <a class="cadder-section-action" href="/cadder/user-guide/cadder/">Explore the TUI and CLI</a>
+  </div>
+  <CadderTuiPreview />
 </div>
 
-<script src="cadder-downloads.js"></script>
+</section>
 
-1. Download the release for your operating system.
-2. Create `cadder.toml` with the path to the real Caddy binary. See [cadder.toml](user-guide/cadder-toml/) for the supported forms.
-3. Run Cadder's `caddy` shim instead of the real `caddy` command.
+<section class="cadder-home-section">
 
-Open `cadder-tui` whenever you want to inspect active projects, domains, logs, or diagnostics.
+<p class="cadder-kicker">Clear responsibilities</p>
+
+## What Cadder adds around Caddy.
+
+<div class="cadder-capabilities">
+  <article>
+    <span>01</span>
+    <div><h3>Collect project routes.</h3><p>Each Caddyfile stays in its repository. <code>caddy run</code> registers it with Cadder.</p></div>
+  </article>
+  <article>
+    <span>02</span>
+    <div><h3>Reject collisions.</h3><p>Cadder checks route ownership and blocks conflicting active addresses before applying a change.</p></div>
+  </article>
+  <article>
+    <span>03</span>
+    <div><h3>Inspect the whole runtime.</h3><p>The CLI and TUI connect domains, ports, Caddyfiles, projects, logs, and Caddy state.</p></div>
+  </article>
+  <article>
+    <span>04</span>
+    <div><h3>Change one route at a time.</h3><p>Enable or disable one domain while unrelated local routes stay active.</p></div>
+  </article>
+</div>
+
+</section>
+
+<section class="cadder-home-section cadder-home-start">
+
+<p class="cadder-kicker">First route</p>
+
+## Keep the Caddyfile. Let Cadder run the shared runtime.
+
+Each repository keeps its own Caddyfile. The Cadder `caddy` shim registers it with `cadderd`, which combines active routes and applies them through one real Caddy process.
+
+```txt
+shop.localhost {
+  reverse_proxy localhost:3000
+}
+```
+
+Run the same command inside that project:
+
+```sh frame="none"
+caddy run
+```
+
+The route appears in `cadder tui`, where you can inspect its owner, target, and activation state.
+
+<nav class="cadder-home-links" aria-label="Learn Cadder">
+  <a class="primary" href="/cadder/quick-start/getting-started/">Install Cadder</a>
+  <a href="/cadder/user-guide/how-to-use/">Read the daily workflow</a>
+  <a href="/cadder/user-guide/cadder/">Open the CLI and TUI reference</a>
+</nav>
+
+</section>

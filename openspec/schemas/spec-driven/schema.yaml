@@ -1,0 +1,73 @@
+name: spec-driven
+version: 1
+description: Proposal, specifications, design, release story, and implementation tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Initial proposal document outlining the change
+    template: proposal.md
+    instruction: |
+      Create the proposal document that establishes WHY this change is needed.
+
+      Sections:
+      - **Why**: 1-2 sentences on the problem or opportunity.
+      - **What Changes**: Specific new capabilities, modifications, or removals.
+      - **Capabilities**: Existing or new OpenSpec capabilities affected by the change.
+      - **Impact**: Affected code, APIs, dependencies, or systems.
+
+      Keep it concise and focus on the outcome. Implementation details belong in design.md.
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: Detailed specifications for the change
+    template: spec.md
+    instruction: |
+      Create one delta specification per capability listed in the proposal.
+
+      Use ADDED, MODIFIED, REMOVED, or RENAMED requirement sections. A MODIFIED
+      requirement MUST contain the complete updated requirement. Every requirement
+      MUST include at least one scenario using a four-hash heading and WHEN/THEN steps.
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: Technical design document with implementation details
+    template: design.md
+    instruction: |
+      Explain HOW the change will be implemented, including context, goals,
+      non-goals, decisions, risks, migration, and unresolved questions.
+    requires:
+      - proposal
+
+  - id: release
+    generates: release.md
+    description: Consumer-facing release outcome and release metadata
+    template: release.md
+    instruction: |
+      Record the release impact and audience in YAML frontmatter, then describe
+      consumer-visible outcomes under Keep a Changelog headings. Use changelog:
+      omit for internal-only work. Do not expose local paths, private context,
+      implementation details, commit lists, or planned behavior as shipped.
+    requires:
+      - proposal
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with trackable tasks
+    template: tasks.md
+    instruction: |
+      Break the implementation into ordered, verifiable checkbox tasks grouped
+      under numbered headings. Every task MUST use `- [ ] X.Y Description`.
+    requires:
+      - specs
+      - design
+      - release
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    Read context files, work through pending tasks, mark complete as you go.
+    Pause if you hit blockers or need clarification.

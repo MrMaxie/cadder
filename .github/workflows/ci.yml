@@ -2,139 +2,59 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   pull_request:
-    branches:
-      - master
+    branches: [master]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  rust:
-    name: Rust (${{ matrix.os }})
+  check:
+    name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
-
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v6.0.3
+      - uses: jdx/mise-action@v4.2.3
+      - run: mise run fmt
+      - run: mise run lint
+      - run: mise run test
 
-      - name: Cache Cargo registry and target
-        uses: actions/cache@v5.0.5
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: cargo-${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-rust-
-            cargo-${{ runner.os }}-
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Check lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --workspace
-
-  project-check:
-    name: Project validation
+  project-contracts:
+    name: Project contracts
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.3
-
-      - name: Cache Cargo registry and target
-        uses: actions/cache@v5.0.5
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: cargo-${{ runner.os }}-project-check-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-project-check-
-            cargo-${{ runner.os }}-
-
-      - name: Run project check
-        run: cargo run -p xtask -- check
+      - uses: actions/checkout@v6.0.3
+      - uses: jdx/mise-action@v4.2.3
+      - run: mise run openspec-check
+      - run: mise run docs-check
 
   coverage:
     name: Coverage (Windows MSVC)
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.3
-
-      - name: Cache Cargo registry and target
-        uses: actions/cache@v5.0.5
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: cargo-${{ runner.os }}-msvc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-msvc-
-            cargo-${{ runner.os }}-
-
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        run: cargo +stable-x86_64-pc-windows-msvc install cargo-llvm-cov --version 0.8.7 --locked
-
-      - name: Run coverage gate
-        run: cargo +stable-x86_64-pc-windows-msvc run -p xtask -- coverage
-
-      - name: Upload coverage summary
-        if: always()
+      - uses: actions/checkout@v6.0.3
+      - uses: jdx/mise-action@v4.2.3
+      - run: mise run coverage
+      - if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: coverage-summary-windows-msvc
-          path: target/llvm-cov/coverage-summary.json
+          name: coverage-lcov-windows-msvc
+          path: target/coverage-summary.lcov
           if-no-files-found: ignore
           retention-days: 14
 
   docker-e2e:
     name: Docker E2E (Ubuntu)
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.3
-
-      - name: Cache Cargo registry and target
-        uses: actions/cache@v5.0.5
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target
-          key: cargo-${{ runner.os }}-docker-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-docker-e2e-
-            cargo-${{ runner.os }}-
-
-      - name: Check Docker
-        run: docker version
-
-      - name: Build Cadder binaries
-        run: cargo build -p cadderd -p cadder-shim
-
-      - name: Run Testcontainers end-to-end suite
-        run: cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
+      - uses: actions/checkout@v6.0.3
+      - uses: jdx/mise-action@v4.2.3
+      - run: docker version
+      - run: cargo build --package cadder --bin cadderd --bin caddy
+      - run: cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1

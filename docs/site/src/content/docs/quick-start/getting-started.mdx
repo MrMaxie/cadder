@@ -1,40 +1,86 @@
 ---
 title: Getting started
-description: Download Cadder, configure real Caddy, run a project through the shim, and inspect it in the TUI.
+description: Install Cadder, connect real Caddy, and run your first managed project.
 ---
 
-## What you need
+import { Steps } from '@astrojs/starlight/components';
 
-- A real Caddy binary installed somewhere on your machine.
-- A Cadder release for your OS from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases/latest).
-- A project with a `Caddyfile`.
+By the end of this guide, one project will be registered with Cadder and visible from both the terminal and the TUI.
 
-## Configure real Caddy
+<div class="cadder-note">
+  <strong>Keep the release together.</strong> Use <code>cadder</code>, <code>cadderd</code>, and the <code>caddy</code> shim from the same release. Cadder rejects mixed versions before changing runtime state.
+</div>
 
-Create `cadder.toml` next to the Cadder binaries and set the real Caddy command there. See [cadder.toml](../../user-guide/cadder-toml/) for Windows path syntax, project overrides, environment aliases, and the full set of supported command forms.
+<Steps>
 
-## Choose how commands are found
+1. **Download Cadder.**
 
-The cleanest setup is to keep real Caddy out of the `PATH` slot used for day-to-day `caddy run`, point Cadder at real Caddy in `cadder.toml`, and expose Cadder's shim as the `caddy` command.
+   Download the release archive and its matching SHA-256 file for your platform. Verify the archive, then extract `cadder`, `cadderd`, and the `caddy` shim into one user-owned directory.
 
-You can also run Cadder by direct path. That is useful for testing or for setups where you do not want to change shell lookup order.
+   See [Releases](../../reference/releases/) for the supported archives and upgrade path.
 
-## Run a project
+2. **Add the Cadder directory to PATH.**
 
-```sh
-caddy run
+   Add the directory containing all three executables to your user PATH. Cadder does not change PATH for you.
+
+3. **Select the real Caddy executable.**
+
+   Copy `cadder.toml.example` to `cadder.toml` beside the executables, then set one real Caddy source.
+
+   Windows:
+
+   ```toml
+   [caddy]
+   real_path = "C:/Tools/caddy/caddy-real.exe"
+   ```
+
+   macOS and Linux:
+
+   ```toml
+   [caddy]
+   real_path = "/usr/local/bin/caddy-real"
+   ```
+
+   You may set `real_command` instead of `real_path`, but never both. See [Configure real Caddy](../../user-guide/cadder-toml/) for the selection order.
+
+4. **Run a managed project.**
+
+   Open a project that contains a Caddyfile and run the command it already uses:
+
+   ```sh frame="none"
+   caddy run
+   ```
+
+   The shim starts or attaches to `cadderd`, registers the project routes, and keeps the registration alive until the command exits. Start other projects the same way.
+
+5. **Confirm the current state.**
+
+   ```sh frame="none"
+   cadder status
+   cadder projects list
+   cadder domains list
+   ```
+
+   These commands show the daemon, real Caddy, registered projects, and registered domains without opening the full-screen interface.
+
+6. **Open the operator.**
+
+   ```sh frame="none"
+   cadder tui
+   ```
+
+   Use Up and Down to select a project or domain. Space and Enter toggle it. Stop and Restart ask for confirmation before changing the runtime.
+
+</Steps>
+
+## If the route is not working
+
+Start with the boundary closest to the problem:
+
+```sh frame="none"
+cadder caddyfile inspect ./Caddyfile
+cadder port inspect 3000
+cadder diagnostics
 ```
 
-The shim starts or connects to `cadderd`, registers the project Caddyfile, and keeps that registration alive while the command is running.
-
-```sh
-cadder-tui
-```
-
-Use the TUI to inspect current state, domains, logs, diagnostics, and toggles.
-
-## OS cookbooks
-
-- [Windows](../../cookbooks/windows/overview/)
-- [macOS](../../cookbooks/macos/)
-- [Linux](../../cookbooks/linux/)
+Use [CLI and TUI](../../user-guide/cadder/) for domain inspection, bounded logs, and the guarded port-owner command.

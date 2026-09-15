@@ -1,16 +1,123 @@
+[package]
+name = "cadder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cadder portable Caddy coordinator"
+publish = false
+
+[package.metadata.dist]
+dist = true
+
+[[bin]]
+name = "cadder"
+path = "crates/cadder-client/src/main.rs"
+test = false
+
+[[bin]]
+name = "cadderd"
+path = "crates/cadder-daemon/src/bin/cadderd.rs"
+test = false
+
+[[bin]]
+name = "caddy"
+path = "crates/cadder-shim/src/main.rs"
+test = false
+
 [workspace]
 members = [
+  "crates/cadder-api",
+  "crates/cadder-client",
   "crates/cadder-daemon",
-  "crates/cadder-protocol",
+  "crates/cadder-ipc",
   "crates/cadder-shim",
-  "crates/cadder-tui",
-  "crates/cadderd",
-  "xtask",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.8.0"
+version = "1.0.0"
 edition = "2024"
-license = "MIT"
-repository = "https://github.com/MrMaxie/Cadder"
+license = "Apache-2.0"
+repository = "https://github.com/MrMaxie/cadder"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = "symbols"
+panic = "unwind"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+[dependencies]
+anyhow = "=1.0.102"
+cadder-api = { version = "1.0.0", path = "crates/cadder-api" }
+cadder-daemon = { version = "1.0.0", path = "crates/cadder-daemon" }
+cadder-ipc = { version = "1.0.0", path = "crates/cadder-ipc" }
+chrono = { version = "=0.4.45", features = ["serde"] }
+clap = { version = "=4.6.1", features = ["derive"] }
+color-eyre = "=0.6.5"
+comfy-table = { version = "=8.0.0", default-features = false }
+crossterm = { version = "=0.29.0", features = ["event-stream"] }
+futures-util = "=0.3.32"
+netstat2 = "=0.11.2"
+ratatui = "=0.30.2"
+serde_json = "=1.0.150"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
+tokio = { version = "=1.52.3", features = ["full"] }
+tokio-util = { version = "=0.7.18", features = ["rt"] }
+tracing-subscriber = "=0.3.23"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+wait-timeout = "=0.2.1"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = []
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Checksums to generate for each App
+checksum = "sha256"
+# Generate and dist a source tarball
+source-tarball = true
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.xz"
+# The archive format to use for windows builds (defaults .zip)
+windows-archive = ".zip"
+# Extra static files to include in each App (path relative to this Cargo.toml's dir)
+include = ["cadder.toml.example"]
+# Which actions to run on pull requests
+pr-run-mode = "upload"
+# Create the GitHub Release only after the host verification gate succeeds
+github-release = "announce"
+# Verify the complete tagged artifact set immediately before the announce phase
+publish-jobs = ["./verify-release-artifacts"]
+# Attest every public release asset during the final announce phase
+github-attestations = true
+github-attestations-phase = "announce"
+github-attestations-filters = ["*.zip", "*.tar.xz", "*.sha256", "*.tar.gz", "sha256.sum", "dist-manifest.json"]
+# The verification-only publish hook must not inherit publisher credentials
+github-custom-job-permissions = { "verify-release-artifacts" = { contents = "read" } }
+
+[workspace.metadata.dist.github-action-commits]
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6"
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+"swatinem/rust-cache" = "6323deb102c322ba6fcbdcafc7e3dddab59af2b6"

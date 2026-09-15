@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use cadder_daemon::{CadderClient, RuntimePaths};
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, BasicResponse, ConfigApplyStatus, GuiStateSnapshot, LogStreamIdentity,
-  LogStreamStatus, QueryLogsRequest, QueryLogsResponse, QueryStateRequest, QueryStateResponse,
-  RuntimeStatus, SetDomainEnabledRequest, ShutdownDaemonRequest, message_types, new_request_id,
+  LogStreamStatus, QueryLogsPayload, QueryLogsResponse, QueryStatePayload, QueryStateResponse,
+  RuntimeStatus, SetDomainEnabledPayload, ShutdownDaemonPayload, new_request_id,
 };
+use reqwest::{Client as HttpClient, StatusCode, Url, header::HOST, redirect::Policy};
 use std::{
   env, fs,
   path::{Path, PathBuf},
@@ -18,15 +19,14 @@ use testcontainers::{
   runners::AsyncRunner,
 };
 use tokio::{
-  io::{AsyncReadExt, AsyncWriteExt},
-  net::TcpStream,
+  io::AsyncReadExt,
   process::{Child, Command},
   time::{sleep, timeout},
 };
 
 const CONTAINER_WORKSPACE: &str = "/workspace";
 const CADDY_IMAGE: &str = "caddy";
-const CADDY_TAG: &str = "2.10.0-alpine";
+const CADDY_TAG: &str = "2.11.3-alpine";
 const HTTP_PORT: u16 = 80;
 const ALPHA_HOST: &str = "alpha.cadder-e2e.localhost";
 const BETA_HOST: &str = "beta.cadder-e2e.localhost";
@@ -37,8 +37,18 @@ const INVALID_HOST: &str = "invalid.cadder-e2e.localhost";
 async fn docker_e2e_exercises_real_caddy_container() -> Result<()> {
   let mut harness = E2eHarness::start().await?;
   let scenario = run_scenario(&mut harness).await;
+  let diagnostics = if scenario.is_err() {
+    Some(harness.failure_diagnostics().await)
+  } else {
+    None
+  };
   let cleanup = harness.cleanup().await;
-  scenario?;
+  if let Err(error) = scenario {
+    bail!(
+      "{error:#}\n{}",
+      diagnostics.unwrap_or_else(|| "failure diagnostics unavailable".to_string())
+    );
+  }
   cleanup?;
   Ok(())
 }
@@ -139,39 +149,27 @@ async fn run_scenario(harness: &mut E2eHarness) -> Result<()> {
     "conflict",
     &format!("http://{ALPHA_HOST} {{\n  respond \"conflict from cadder e2e\"\n}}\n"),
   )?;
+  let before_conflict = query_state(&harness.client).await?;
   let mut conflict_shim = harness.spawn_shim(&conflict).await?;
-  let conflict_snapshot = harness
-    .wait_for_state("domain conflict diagnostic", |snapshot| {
-      snapshot.config.status == ConfigApplyStatus::Failed
-        && snapshot
-          .config
-          .diagnostics
-          .iter()
-          .any(|diagnostic| diagnostic.code == "domain-conflict")
-    })
-    .await?;
-  let conflict_diagnostic = conflict_snapshot
-    .config
-    .diagnostics
-    .iter()
-    .find(|diagnostic| diagnostic.code == "domain-conflict")
-    .context("missing domain-conflict diagnostic")?;
+  conflict_shim.wait_for_failure().await?;
+  let after_conflict = query_state(&harness.client).await?;
   ensure_eq_status(
-    conflict_diagnostic.domain_key.as_deref(),
-    Some(ALPHA_HOST),
-    "conflict domain",
+    after_conflict.registrations.len(),
+    before_conflict.registrations.len(),
+    "registration count after conflict",
   )?;
-  ensure_source_paths(
-    &conflict_diagnostic.source_config_paths,
-    &[&alpha.config_path, &conflict.config_path],
+  ensure_eq_status(
+    after_conflict.config.status,
+    ConfigApplyStatus::Applied,
+    "config status after conflict",
   )?;
-  conflict_shim.terminate().await?;
+  ensure_eq_status(
+    after_conflict.config.effective_config_hash,
+    before_conflict.config.effective_config_hash,
+    "effective config after conflict",
+  )?;
   harness
-    .wait_for_state("conflict registration removed", |snapshot| {
-      snapshot.config.status == ConfigApplyStatus::Applied
-        && snapshot.config.diagnostics.is_empty()
-        && registration_id_for_domain(snapshot, ALPHA_HOST).is_ok()
-    })
+    .wait_for_http_ok(ALPHA_HOST, "alpha from cadder e2e")
     .await?;
 
   let invalid = harness.write_project(
@@ -214,11 +212,7 @@ async fn run_scenario(harness: &mut E2eHarness) -> Result<()> {
     "daemon shutdown rejected: {}",
     shutdown.message
   );
-  harness
-    .wait_for_state("runtime stopped after daemon shutdown", |snapshot| {
-      snapshot.runtime.status == RuntimeStatus::Idle
-    })
-    .await?;
+  harness.wait_for_daemon_exit().await?;
   harness.wait_for_proxy_command("stop").await?;
   harness.wait_for_http_not_ok(ALPHA_HOST).await?;
 
@@ -231,22 +225,22 @@ struct E2eHarness {
   container: Option<ContainerAsync<GenericImage>>,
   container_host: String,
   container_port: u16,
-  runtime_dir: PathBuf,
+  http: HttpClient,
   client: CadderClient,
-  daemon_path: PathBuf,
   shim_path: PathBuf,
-  proxy_command: PathBuf,
   proxy_log_path: PathBuf,
   daemon: Option<Child>,
 }
 
 impl E2eHarness {
   async fn start() -> Result<Self> {
-    let daemon_path = cadder_binary("CADDER_E2E_CADDERD", "cadderd")?;
-    let shim_path = cadder_binary("CADDER_E2E_CADDY_SHIM", "caddy")?;
+    let daemon_source = cadder_binary("CADDER_E2E_CADDERD", "cadderd")?;
+    let shim_source = cadder_binary("CADDER_E2E_CADDY_SHIM", "caddy")?;
     let temp = tempfile::tempdir().context("create e2e temp directory")?;
     let runtime_dir = temp.path().join("runtime");
     fs::create_dir_all(&runtime_dir).context("create e2e runtime directory")?;
+    let daemon_path = install_portable_binary(&daemon_source, &runtime_dir)?;
+    let shim_path = install_portable_binary(&shim_source, &runtime_dir)?;
 
     let mount = Mount::bind_mount(temp.path().display().to_string(), CONTAINER_WORKSPACE)
       .with_access_mode(AccessMode::ReadWrite);
@@ -268,11 +262,17 @@ impl E2eHarness {
       .get_host_port_ipv4(HTTP_PORT.tcp())
       .await
       .context("read mapped Caddy container HTTP port")?;
+    let http = HttpClient::builder()
+      .no_proxy()
+      .redirect(Policy::none())
+      .timeout(Duration::from_secs(3))
+      .build()
+      .context("build e2e HTTP client")?;
     let proxy_command = write_caddy_proxy(temp.path(), container.id())?;
     let proxy_log_path = temp.path().join("caddy-proxy.log");
     let paths = RuntimePaths::resolve(Some(runtime_dir.clone()))?;
     let client = CadderClient::new(paths);
-    let mut daemon = spawn_daemon(&daemon_path, &runtime_dir, &proxy_command).await?;
+    let mut daemon = spawn_daemon(&daemon_path, &proxy_command).await?;
     wait_for_daemon(&client, &mut daemon).await?;
 
     Ok(Self {
@@ -280,11 +280,9 @@ impl E2eHarness {
       container: Some(container),
       container_host,
       container_port,
-      runtime_dir,
+      http,
       client,
-      daemon_path,
       shim_path,
-      proxy_command,
       proxy_log_path,
       daemon: Some(daemon),
     })
@@ -302,12 +300,6 @@ impl E2eHarness {
   async fn spawn_shim(&self, project: &Project) -> Result<ManagedChild> {
     let mut command = Command::new(&self.shim_path);
     command
-      .arg("--cadder-runtime-dir")
-      .arg(&self.runtime_dir)
-      .arg("--cadder-daemon-path")
-      .arg(&self.daemon_path)
-      .arg("--cadder-real-caddy-command")
-      .arg(&self.proxy_command)
       .arg("run")
       .arg("--config")
       .arg(&project.config_path)
@@ -329,15 +321,23 @@ impl E2eHarness {
     F: FnMut(&GuiStateSnapshot) -> bool,
   {
     let mut last = None;
+    let mut last_error = None;
     for _ in 0..300 {
-      let snapshot = query_state(&self.client).await?;
-      if condition(&snapshot) {
-        return Ok(snapshot);
+      match query_state(&self.client).await {
+        Ok(snapshot) => {
+          if condition(&snapshot) {
+            return Ok(snapshot);
+          }
+          last = Some(snapshot);
+        }
+        Err(error) => last_error = Some(format!("{error:#}")),
       }
-      last = Some(snapshot);
       sleep(Duration::from_millis(100)).await;
     }
-    bail!("timed out waiting for {label}; last snapshot: {last:#?}");
+    bail!(
+      "timed out waiting for {label}; last snapshot: {last:#?}; last query error: {}",
+      last_error.as_deref().unwrap_or("none")
+    );
   }
 
   async fn set_domain_enabled(
@@ -346,39 +346,47 @@ impl E2eHarness {
     domain_key: &str,
     enabled: bool,
   ) -> Result<BasicResponse> {
-    self
-      .client
-      .request(
-        message_types::SET_DOMAIN_ENABLED_REQUEST,
-        message_types::SET_DOMAIN_ENABLED_RESPONSE,
-        &SetDomainEnabledRequest {
-          request_id: new_request_id("e2e-domain-toggle"),
-          registration_id: registration_id.to_string(),
-          domain_key: domain_key.to_string(),
-          enabled,
-        },
-      )
-      .await
+    Ok(
+      self
+        .client
+        .request(
+          new_request_id("e2e-domain-toggle"),
+          &SetDomainEnabledPayload {
+            registration_id: registration_id.to_string(),
+            domain_key: domain_key.to_string(),
+            enabled,
+          },
+        )
+        .await?,
+    )
   }
 
   async fn shutdown_daemon_runtime(&self) -> Result<BasicResponse> {
-    self
-      .client
-      .request(
-        message_types::SHUTDOWN_DAEMON_REQUEST,
-        message_types::SHUTDOWN_DAEMON_RESPONSE,
-        &ShutdownDaemonRequest {
-          request_id: new_request_id("e2e-shutdown"),
-        },
-      )
+    Ok(
+      self
+        .client
+        .request(
+          new_request_id("e2e-shutdown"),
+          &ShutdownDaemonPayload::default(),
+        )
+        .await?,
+    )
+  }
+
+  async fn wait_for_daemon_exit(&mut self) -> Result<()> {
+    let daemon = self.daemon.as_mut().context("daemon process missing")?;
+    let status = timeout(Duration::from_secs(30), daemon.wait())
       .await
+      .context("daemon did not exit after accepting shutdown")??;
+    ensure!(status.success(), "daemon shutdown exited with {status}");
+    Ok(())
   }
 
   async fn wait_for_http_ok(&self, host: &str, expected_body: &str) -> Result<()> {
     for _ in 0..300 {
       if let Ok(response) = self.http_get(host).await
-        && response.status_code == 200
-        && response.body.contains(expected_body)
+        && response.0 == StatusCode::OK
+        && response.1.contains(expected_body)
       {
         return Ok(());
       }
@@ -390,7 +398,7 @@ impl E2eHarness {
   async fn wait_for_http_not_ok(&self, host: &str) -> Result<()> {
     for _ in 0..300 {
       match self.http_get(host).await {
-        Ok(response) if response.status_code != 200 => return Ok(()),
+        Ok(response) if response.0 != StatusCode::OK => return Ok(()),
         Err(_) => return Ok(()),
         _ => sleep(Duration::from_millis(100)).await,
       }
@@ -406,11 +414,11 @@ impl E2eHarness {
   ) -> Result<()> {
     for _ in 0..300 {
       let blocked_not_ok = match self.http_get(blocked_host).await {
-        Ok(response) => response.status_code != 200,
+        Ok(response) => response.0 != StatusCode::OK,
         Err(_) => false,
       };
       let healthy_ok = match self.http_get(healthy_host).await {
-        Ok(response) => response.status_code == 200 && response.body.contains(healthy_body),
+        Ok(response) => response.0 == StatusCode::OK && response.1.contains(healthy_body),
         Err(_) => false,
       };
       if blocked_not_ok && healthy_ok {
@@ -438,26 +446,24 @@ impl E2eHarness {
     bail!("expected proxy command `{command}` in log:\n{log}");
   }
 
-  async fn http_get(&self, host: &str) -> Result<HttpResponse> {
-    let mut stream = timeout(
-      Duration::from_secs(3),
-      TcpStream::connect((self.container_host.as_str(), self.container_port)),
-    )
-    .await
-    .context("connect timeout")?
-    .with_context(|| {
-      format!(
-        "connect to mapped Caddy port {}:{}",
-        self.container_host, self.container_port
-      )
-    })?;
-    let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).await?;
-    let mut bytes = Vec::new();
-    timeout(Duration::from_secs(3), stream.read_to_end(&mut bytes))
+  async fn http_get(&self, host: &str) -> Result<(StatusCode, String)> {
+    let mut url = Url::parse("http://localhost/").expect("static e2e URL is valid");
+    url
+      .set_host(Some(&self.container_host))
+      .map_err(|_| anyhow::anyhow!("invalid Caddy container host {}", self.container_host))?;
+    url
+      .set_port(Some(self.container_port))
+      .map_err(|_| anyhow::anyhow!("invalid Caddy container port {}", self.container_port))?;
+    let response = self
+      .http
+      .get(url)
+      .header(HOST, host)
+      .send()
       .await
-      .context("read HTTP response timeout")??;
-    parse_http_response(&bytes)
+      .with_context(|| format!("request mapped Caddy endpoint for {host}"))?;
+    let status = response.status();
+    let body = response.text().await.context("read Caddy response body")?;
+    Ok((status, body))
   }
 
   async fn cleanup(&mut self) -> Result<()> {
@@ -469,6 +475,34 @@ impl E2eHarness {
     }
     let _ = self.container.take();
     Ok(())
+  }
+
+  async fn failure_diagnostics(&mut self) -> String {
+    let daemon = match self.daemon.as_mut() {
+      Some(daemon) => match daemon.try_wait() {
+        Ok(Some(status)) => {
+          let mut stderr = String::new();
+          if let Some(mut pipe) = daemon.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr).await;
+          }
+          format!("daemon status: {status}\ndaemon stderr:\n{stderr}")
+        }
+        Ok(None) => "daemon status: running".to_string(),
+        Err(error) => format!("daemon status unavailable: {error}"),
+      },
+      None => "daemon process missing".to_string(),
+    };
+    let proxy = fs::read_to_string(&self.proxy_log_path).unwrap_or_default();
+    let runtime_files = fs::read_dir(self.temp.path().join("runtime"))
+      .map(|entries| {
+        entries
+          .filter_map(|entry| entry.ok())
+          .map(|entry| entry.file_name().to_string_lossy().into_owned())
+          .collect::<Vec<_>>()
+          .join(", ")
+      })
+      .unwrap_or_else(|error| format!("unavailable: {error}"));
+    format!("{daemon}\nproxy commands:\n{proxy}\nruntime files: {runtime_files}")
   }
 }
 
@@ -482,6 +516,15 @@ struct ManagedChild {
 }
 
 impl ManagedChild {
+  async fn wait_for_failure(&mut self) -> Result<()> {
+    let mut child = self.child.take().context("shim process missing")?;
+    let status = timeout(Duration::from_secs(10), child.wait())
+      .await
+      .context("conflicting shim did not exit before timeout")??;
+    ensure!(!status.success(), "conflicting shim exited successfully");
+    Ok(())
+  }
+
   #[cfg(unix)]
   async fn interrupt(&mut self) -> Result<()> {
     if let Some(child) = self.child.as_ref() {
@@ -522,29 +565,41 @@ impl ManagedChild {
   }
 }
 
-struct HttpResponse {
-  status_code: u16,
-  body: String,
-}
-
-async fn spawn_daemon(
-  daemon_path: &Path,
-  runtime_dir: &Path,
-  proxy_command: &Path,
-) -> Result<Child> {
+async fn spawn_daemon(daemon_path: &Path, proxy_command: &Path) -> Result<Child> {
   let mut command = Command::new(daemon_path);
   command
-    .arg("--runtime-dir")
-    .arg(runtime_dir)
-    .arg("--real-caddy-command")
+    .arg("--real-caddy")
     .arg(proxy_command)
+    .env("CADDER_TEST_ALLOW_UNTRUSTED_CADDY", "1")
     .stdin(Stdio::null())
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .kill_on_drop(true);
   command
     .spawn()
     .with_context(|| format!("start cadderd {}", daemon_path.display()))
+}
+
+fn install_portable_binary(source: &Path, runtime_dir: &Path) -> Result<PathBuf> {
+  let file_name = source
+    .file_name()
+    .context("Cadder binary path must include a file name")?;
+  let destination = runtime_dir.join(file_name);
+  fs::copy(source, &destination).with_context(|| {
+    format!(
+      "copy portable Cadder binary from {} to {}",
+      source.display(),
+      destination.display()
+    )
+  })?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(&destination)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&destination, permissions)?;
+  }
+  Ok(destination)
 }
 
 async fn wait_for_daemon(client: &CadderClient, daemon: &mut Child) -> Result<()> {
@@ -553,7 +608,14 @@ async fn wait_for_daemon(client: &CadderClient, daemon: &mut Child) -> Result<()
       return Ok(());
     }
     if let Some(status) = daemon.try_wait()? {
-      bail!("cadderd exited before becoming ready: {status}");
+      let mut stderr = String::new();
+      if let Some(mut pipe) = daemon.stderr.take() {
+        pipe.read_to_string(&mut stderr).await?;
+      }
+      bail!(
+        "cadderd exited before becoming ready: {status}: {}",
+        stderr.trim()
+      );
     }
     sleep(Duration::from_millis(100)).await;
   }
@@ -562,13 +624,7 @@ async fn wait_for_daemon(client: &CadderClient, daemon: &mut Child) -> Result<()
 
 async fn query_state(client: &CadderClient) -> Result<GuiStateSnapshot> {
   let response: QueryStateResponse = client
-    .request(
-      message_types::QUERY_STATE_REQUEST,
-      message_types::QUERY_STATE_RESPONSE,
-      &QueryStateRequest {
-        request_id: new_request_id("e2e-query"),
-      },
-    )
+    .request(new_request_id("e2e-query"), &QueryStatePayload::default())
     .await?;
   response.snapshot.context("missing state snapshot")
 }
@@ -576,14 +632,10 @@ async fn query_state(client: &CadderClient) -> Result<GuiStateSnapshot> {
 async fn ensure_runtime_control_logs(client: &CadderClient) -> Result<()> {
   let logs: QueryLogsResponse = client
     .request(
-      message_types::QUERY_LOGS_REQUEST,
-      message_types::QUERY_LOGS_RESPONSE,
-      &QueryLogsRequest {
-        request_id: new_request_id("e2e-logs"),
+      new_request_id("e2e-logs"),
+      &QueryLogsPayload {
         stream: LogStreamIdentity::runtime_control(),
         limit: Some(20),
-        cursor: None,
-        minimum_severity: None,
       },
     )
     .await?;
@@ -657,23 +709,6 @@ where
   Ok(())
 }
 
-fn parse_http_response(bytes: &[u8]) -> Result<HttpResponse> {
-  let rendered = String::from_utf8_lossy(bytes);
-  let (headers, body) = rendered
-    .split_once("\r\n\r\n")
-    .context("HTTP response did not contain header separator")?;
-  let status_code = headers
-    .lines()
-    .next()
-    .and_then(|line| line.split_whitespace().nth(1))
-    .and_then(|code| code.parse::<u16>().ok())
-    .context("HTTP response did not contain a status code")?;
-  Ok(HttpResponse {
-    status_code,
-    body: body.to_string(),
-  })
-}
-
 fn cadder_binary(env_var: &str, name: &str) -> Result<PathBuf> {
   if let Some(value) = env::var_os(env_var) {
     let path = PathBuf::from(value);
@@ -700,7 +735,7 @@ fn cadder_binary(env_var: &str, name: &str) -> Result<PathBuf> {
   let candidate = target_dir.join(profile).join(exe_name(name));
   ensure!(
     candidate.is_file(),
-    "missing {}. Build e2e binaries first with `cargo build -p cadderd -p cadder-shim`, \
+    "missing {}. Build e2e binaries first with `cargo build --package cadder --bin cadderd --bin caddy`, \
      or set {env_var}. Looked for {}",
     name,
     candidate.display()
@@ -724,146 +759,27 @@ fn exe_name(name: &str) -> String {
   }
 }
 
-#[cfg(windows)]
 fn write_caddy_proxy(root: &Path, container_id: &str) -> Result<PathBuf> {
   let proxy_dir = root.join("bin");
   fs::create_dir_all(&proxy_dir).context("create proxy command directory")?;
   let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-  let log_path = root.join("caddy-proxy.log");
-  write_windows_proxy(&proxy_dir, root, &canonical_root, container_id, &log_path)
-}
-
-#[cfg(not(windows))]
-fn write_caddy_proxy(root: &Path, container_id: &str) -> Result<PathBuf> {
-  let proxy_dir = root.join("bin");
-  fs::create_dir_all(&proxy_dir).context("create proxy command directory")?;
-  let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-  let log_path = root.join("caddy-proxy.log");
-  write_unix_proxy(&proxy_dir, root, &canonical_root, container_id, &log_path)
-}
-
-#[cfg(windows)]
-fn write_windows_proxy(
-  proxy_dir: &Path,
-  root: &Path,
-  canonical_root: &Path,
-  container_id: &str,
-  log_path: &Path,
-) -> Result<PathBuf> {
-  let ps1_path = proxy_dir.join("caddy-proxy.ps1");
-  let cmd_path = proxy_dir.join("caddy-proxy.cmd");
+  let proxy_path = proxy_dir.join(exe_name("caddy-proxy"));
+  fs::copy(env!("CARGO_BIN_EXE_cadder-test-process"), &proxy_path)
+    .with_context(|| format!("copy native Caddy proxy to {}", proxy_path.display()))?;
+  fs::write(proxy_dir.join("cadder-test.mode"), "docker-proxy")?;
+  fs::write(proxy_dir.join("docker-container-id"), container_id)?;
   fs::write(
-    &ps1_path,
-    format!(
-      r#"$ErrorActionPreference = 'Stop'
-$containerId = @'
-{container_id}
-'@
-$hostRoots = @(
-@'
-{root}
-'@,
-@'
-{canonical_root}
-'@
-)
-$containerRoot = '{container_workspace}'
-$logPath = @'
-{log_path}
-'@
-$translated = foreach ($arg in $args) {{
-  $mapped = $arg
-  foreach ($rootPath in $hostRoots) {{
-    $trimmed = $rootPath.TrimEnd('\')
-    if ([string]::Equals($mapped, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)) {{
-      $mapped = $containerRoot
-      break
-    }}
-    $prefix = "$trimmed\"
-    if ($mapped.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {{
-      $relative = $mapped.Substring($prefix.Length).Replace('\', '/')
-      $mapped = "$containerRoot/$relative"
-      break
-    }}
-  }}
-  $mapped
-}}
-Add-Content -LiteralPath $logPath -Value ($translated -join ' ')
-& docker exec $containerId caddy @translated
-exit $LASTEXITCODE
-"#,
-      container_id = container_id,
-      root = root.display(),
-      canonical_root = canonical_root.display(),
-      container_workspace = CONTAINER_WORKSPACE,
-      log_path = log_path.display(),
-    ),
-  )
-  .with_context(|| format!("write PowerShell proxy {}", ps1_path.display()))?;
+    proxy_dir.join("docker-host-root"),
+    root.as_os_str().as_encoded_bytes(),
+  )?;
   fs::write(
-    &cmd_path,
-    r#"@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0caddy-proxy.ps1" %*
-exit /b %ERRORLEVEL%
-"#,
-  )
-  .with_context(|| format!("write cmd proxy {}", cmd_path.display()))?;
-  Ok(cmd_path)
-}
-
-#[cfg(not(windows))]
-fn write_unix_proxy(
-  proxy_dir: &Path,
-  root: &Path,
-  canonical_root: &Path,
-  container_id: &str,
-  log_path: &Path,
-) -> Result<PathBuf> {
-  use std::os::unix::fs::PermissionsExt;
-
-  let proxy_path = proxy_dir.join("caddy-proxy");
+    proxy_dir.join("docker-canonical-root"),
+    canonical_root.as_os_str().as_encoded_bytes(),
+  )?;
+  fs::write(proxy_dir.join("docker-container-root"), CONTAINER_WORKSPACE)?;
   fs::write(
-    &proxy_path,
-    format!(
-      r#"#!/usr/bin/env bash
-set -euo pipefail
-container_id='{container_id}'
-host_root='{root}'
-host_canonical_root='{canonical_root}'
-container_root='{container_workspace}'
-log_path='{log_path}'
-translated=()
-for arg in "$@"; do
-  mapped="$arg"
-  if [[ "$mapped" == "$host_root" ]]; then
-    mapped="$container_root"
-  elif [[ "$mapped" == "$host_root"/* ]]; then
-    mapped="$container_root${{mapped#"$host_root"}}"
-  elif [[ "$mapped" == "$host_canonical_root" ]]; then
-    mapped="$container_root"
-  elif [[ "$mapped" == "$host_canonical_root"/* ]]; then
-    mapped="$container_root${{mapped#"$host_canonical_root"}}"
-  fi
-  translated+=("$mapped")
-done
-printf '%s\n' "${{translated[*]}}" >> "$log_path"
-exec docker exec "$container_id" caddy "${{translated[@]}}"
-"#,
-      container_id = shell_escape(container_id),
-      root = shell_escape(&root.display().to_string()),
-      canonical_root = shell_escape(&canonical_root.display().to_string()),
-      container_workspace = CONTAINER_WORKSPACE,
-      log_path = shell_escape(&log_path.display().to_string()),
-    ),
-  )
-  .with_context(|| format!("write Unix proxy {}", proxy_path.display()))?;
-  let mut permissions = fs::metadata(&proxy_path)?.permissions();
-  permissions.set_mode(0o755);
-  fs::set_permissions(&proxy_path, permissions)?;
+    proxy_dir.join("docker-log-path"),
+    root.join("caddy-proxy.log").as_os_str().as_encoded_bytes(),
+  )?;
   Ok(proxy_path)
-}
-
-#[cfg(not(windows))]
-fn shell_escape(value: &str) -> String {
-  value.replace('\'', r#"'\''"#)
 }

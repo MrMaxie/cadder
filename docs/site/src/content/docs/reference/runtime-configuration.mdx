@@ -1,53 +1,19 @@
 ---
 title: Runtime and configuration
-description: Runtime directories, daemon state files, configuration sources, and environment overrides.
+description: Installation identity, SQLite state, and trusted real-Caddy selection.
 ---
 
-Cadder keeps runtime state per user. Most users never need to choose the runtime directory manually.
+Cadder derives one runtime identity from the directory containing its executables. Keep `cadder`, `cadderd`, and `caddy` together. Separate installation directories remain independent; there is no profile selector.
 
-## Recommended configuration path
+The runtime writes `effective-caddy.json` and the owner-protected `data/cadder.sqlite3` database beneath the installation directory. SQLite stores desired activation and bounded redacted logs. Live leases and process ownership remain memory-only.
 
-For normal use, configure real Caddy in [cadder.toml](../../user-guide/cadder-toml/) next to the Cadder binaries. Use a project-local `cadder.toml` when one project needs a different real Caddy command.
+## Trusted configuration
 
-## Runtime override
+The daemon loads one immutable configuration snapshot at startup. Selection order is an explicit foreground daemon override, `cadder.toml` beside the executables, standard per-user configuration, standard system configuration, then safe native PATH discovery.
 
-Set `CADDER_RUNTIME_DIR` or pass `--runtime-dir` to use a specific directory:
-
-```sh
-cadderd --runtime-dir <runtime-dir>
-cadder-tui --runtime-dir <runtime-dir>
-caddy --cadder-runtime-dir <runtime-dir> run
+```toml
+[caddy]
+real_path = "/usr/local/bin/caddy-real"
 ```
 
-This is useful for tests, demos, and isolated sessions that should not share daemon state with the normal user runtime.
-
-## Runtime files
-
-The daemon runtime directory contains:
-
-- `cadder.lock`, the daemon ownership lock;
-- `daemon.json`, daemon metadata used by clients;
-- `effective-caddy.json`, the generated Caddy config applied to the owned real Caddy process.
-
-The IPC socket name is derived from the runtime directory, so separate runtime directories do not collide.
-
-## Configuration sources
-
-Cadder supports real Caddy resolution through:
-
-- CLI overrides;
-- `cadder.toml` in the project working directory;
-- `cadder.toml` next to the Cadder executable;
-- environment variables;
-- safe `PATH` fallback.
-
-The user-facing TOML format is documented in [cadder.toml](../../user-guide/cadder-toml/).
-
-## Environment aliases
-
-Cadder accepts both environment variable names below for the same value:
-
-- `CADDER_CADDY_REAL_COMMAND`
-- `CADDER_CADDY__REAL_COMMAND`
-
-When both are set, `CADDER_CADDY_REAL_COMMAND` wins. Prefer `cadder.toml` for normal user setups because environment variables are easier to lose across shells and terminals.
+Use `real_command` instead when needed. Unknown keys, conflicting selectors, unsafe configuration files, and non-native executable targets fail before readiness. Changes take effect after Restart.

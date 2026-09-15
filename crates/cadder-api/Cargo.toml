@@ -1,0 +1,20 @@
+[package]
+name = "cadder-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "=1.0.102"
+cadder-daemon = { version = "1.0.0", path = "../cadder-daemon" }
+cadder-ipc = { version = "1.0.0", path = "../cadder-ipc" }
+chrono = { version = "=0.4.45", features = ["serde"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+thiserror = "=2.0.17"
+tokio = { version = "=1.52.3", features = ["time"] }
+
+[dev-dependencies]
+serde_json = "=1.0.150"
+tempfile = "=3.27.0"
+tokio = { version = "=1.52.3", features = ["macros", "rt"] }

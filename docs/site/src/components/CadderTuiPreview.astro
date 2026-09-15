@@ -1,0 +1,208 @@
+<figure class="tui-preview" aria-label="Cadder TUI showing project routes and targets">
+  <div class="tui-screen">
+    <div class="tui-header">
+      <strong>Cadder v1.0.0</strong>
+      <span><b>cadderd</b> <i>running</i> <em>|</em> <b>Caddy</b> <i>running</i></span>
+    </div>
+
+    <div class="tui-table">
+      <div class="tui-row tui-table-header">
+        <span></span>
+        <span>Project / domain</span>
+        <span>Target</span>
+      </div>
+      <div class="tui-row tui-row-selected">
+        <span class="tui-selector">&gt; <i>●</i></span>
+        <strong>~/code/storefront</strong>
+        <span></span>
+      </div>
+      <div class="tui-row">
+        <span class="tui-branch">├─ <i>●</i></span>
+        <span>shop.localhost</span>
+        <span>:3000</span>
+      </div>
+      <div class="tui-row tui-row-muted">
+        <span class="tui-branch">└─ <i>○</i></span>
+        <span>admin.localhost</span>
+        <span>:3001</span>
+      </div>
+      <div class="tui-row">
+        <span class="tui-selector"><i>●</i></span>
+        <strong>~/code/api</strong>
+        <span></span>
+      </div>
+      <div class="tui-row">
+        <span class="tui-branch">└─ <i>●</i></span>
+        <span>api.localhost</span>
+        <span>:4000</span>
+      </div>
+    </div>
+
+    <div class="tui-shortcuts">
+      <span><b>Up/Down</b> select</span>
+      <span><b>Space/Enter</b> enable/disable</span>
+      <span><b>r</b> refresh</span>
+      <span><b>x</b> stop</span>
+      <span><b>R</b> restart</span>
+      <span><b>q</b> quit</span>
+    </div>
+  </div>
+</figure>
+
+<style>
+  .tui-preview {
+    --tui-backdrop: #0a0c0f;
+    --tui-surface: #111418;
+    --tui-selected: #1e242a;
+    --tui-text: #e7ebee;
+    --tui-soft: #c2cbd0;
+    --tui-muted: #7f8a91;
+    --tui-dim: #4f595f;
+    --tui-line: #374047;
+    --tui-accent: #5bdabf;
+
+    min-width: 0;
+    margin: 0;
+    aspect-ratio: 1.95;
+    container-type: inline-size;
+    border: 1px solid var(--tui-line);
+    border-radius: 0.2rem;
+    background: var(--tui-backdrop);
+    overflow: hidden;
+  }
+
+  .tui-preview,
+  .tui-preview * {
+    font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-variant-ligatures: none;
+  }
+
+  .tui-screen {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    box-sizing: border-box;
+    height: 100%;
+    padding: 0.55rem;
+    color: var(--tui-soft);
+    font-size: 0.875rem;
+    letter-spacing: -0.01875px;
+    line-height: 1.315;
+  }
+
+  .tui-header,
+  .tui-table,
+  .tui-row,
+  .tui-shortcuts {
+    margin: 0;
+  }
+
+  .tui-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    background: var(--tui-backdrop);
+    color: var(--tui-text);
+  }
+
+  .tui-header strong,
+  .tui-header b,
+  .tui-row strong {
+    color: var(--tui-text);
+    font-weight: 700;
+  }
+
+  .tui-header i,
+  .tui-selector i,
+  .tui-branch i,
+  .tui-shortcuts b {
+    color: var(--tui-accent);
+    font-style: normal;
+    font-weight: 700;
+  }
+
+  .tui-header em {
+    color: var(--tui-dim);
+    font-style: normal;
+  }
+
+  .tui-table {
+    border: 1px solid var(--tui-line);
+    background: var(--tui-surface);
+    overflow: hidden;
+  }
+
+  .tui-row {
+    display: grid;
+    grid-template-columns: 5ch minmax(12rem, 1fr) minmax(4rem, auto);
+    column-gap: 1ch;
+    min-width: max-content;
+    padding: 0 0.35rem;
+    white-space: nowrap;
+  }
+
+  .tui-row > :last-child {
+    text-align: right;
+  }
+
+  .tui-table-header {
+    margin-bottom: 1.315em;
+    color: var(--tui-soft);
+    font-weight: 700;
+  }
+
+  .tui-row-selected {
+    background: var(--tui-selected);
+    font-weight: 700;
+  }
+
+  .tui-row-selected .tui-selector {
+    color: var(--tui-soft);
+  }
+
+  .tui-selector,
+  .tui-branch {
+    color: var(--tui-dim);
+  }
+
+  .tui-row-muted {
+    color: var(--tui-muted);
+  }
+
+  .tui-shortcuts {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 2ch;
+    overflow: hidden;
+    color: var(--tui-muted);
+    white-space: nowrap;
+  }
+
+  @container (max-width: 28rem) {
+    .tui-shortcuts > :nth-child(n + 3) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 35rem) {
+    .tui-preview {
+      aspect-ratio: auto;
+    }
+
+    .tui-screen {
+      display: block;
+      height: auto;
+      font-size: 0.65rem;
+    }
+
+    .tui-header > span {
+      display: none;
+    }
+
+    .tui-row {
+      grid-template-columns: 5ch minmax(9rem, 1fr) auto;
+      column-gap: 0.5ch;
+      min-width: 0;
+      padding-inline: 0.25rem;
+    }
+  }
+</style>

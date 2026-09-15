@@ -1,0 +1,92 @@
+---
+title: Operator CLI and TUI
+description: Choose a focused command or open the full routes workspace.
+---
+
+Use the CLI for one focused check or change. Open the TUI when you want projects, domains, daemon state, and Caddy state in one view.
+
+## Inspect the runtime
+
+Inspect the current daemon and Caddy state:
+
+```sh frame="none"
+cadder status
+```
+
+List registered projects or domains:
+
+```sh frame="none"
+cadder projects list
+cadder domains list
+```
+
+## Inspect a route
+
+Start from the port, Caddyfile, or domain you already know:
+
+```sh frame="none"
+cadder port inspect 3000
+cadder caddyfile inspect ./Caddyfile
+cadder domains inspect app.localhost
+```
+
+Port inspection works even when `cadderd` is offline. When daemon state is available, Cadder connects the listener and process to the matching project, Caddyfile, domain, and upstream. Caddyfile and domain inspection keep registration, activation, Caddy runtime, applied configuration, and listener ownership as separate facts.
+
+## Change activation
+
+Enable or disable a project by its Caddyfile, or a domain by name:
+
+```sh frame="none"
+cadder projects disable ./Caddyfile
+cadder projects enable ./Caddyfile
+cadder domains disable app.localhost --caddyfile ./Caddyfile
+cadder domains enable app.localhost --caddyfile ./Caddyfile
+```
+
+## Control the daemon
+
+Use lifecycle commands when a shell workflow needs an explicit start, stop, or restart:
+
+```sh frame="none"
+cadder daemon start
+cadder daemon stop
+cadder daemon restart
+```
+
+## Read diagnostics and logs
+
+Detailed runtime information stays behind explicit diagnostic commands:
+
+```sh frame="none"
+cadder diagnostics
+cadder logs runtime --limit 50
+cadder logs project ./Caddyfile --limit 50
+cadder logs domain app.localhost --caddyfile ./Caddyfile --limit 50
+```
+
+Runtime logs contain daemon lifecycle and control events. Project and domain logs contain Caddy entries attributed to that registration or route. Reads return only the newest requested entries, up to the daemon limit of 200, after Cadder redacts sensitive values. The CLI does not provide a continuous tail.
+
+## Terminate a known port owner
+
+Inspect the port first, then copy the observed PID into the guarded command:
+
+```sh frame="none"
+cadder port inspect 3000
+cadder port kill 3000 --pid 12345
+```
+
+Cadder checks that the PID still owns the port immediately before signaling it. It never chooses a process automatically. This command runs in the operator process and does not expand which processes `cadderd` owns.
+
+## Use the TUI
+
+Launch the full-screen operator with:
+
+```sh frame="none"
+cadder tui
+```
+
+The main table groups every registered domain under its project with tree connectors. A filled circle is enabled and an empty circle is disabled. The header reports `cadderd` and Caddy separately without repeating diagnostic state.
+
+Up and Down move through lists of any length. Space and Enter both toggle the selection. Press `x` to stop or `R` to restart; both actions require inline confirmation. When `cadderd` is not running, Enter starts it. Press `q` or Ctrl+C to exit while restoring the terminal.
+
+Loopback upstreams show only the useful port. Project paths emphasize the repository-relative suffix, or the final folder when the path is not inside a Git repository.

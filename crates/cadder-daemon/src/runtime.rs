@@ -1,184 +1,238 @@
-use crate::{logs::CaddyLogStore, paths::RuntimePaths};
+use crate::{
+  logs::CaddyLogStore,
+  paths::RuntimePaths,
+  process_tree::ProcessTreeChild,
+  runtime_file::{
+    StagedRuntimeConfig, read_effective_config, remove_effective_config, restore_effective_config,
+  },
+};
 use anyhow::{Context, Result};
-use cadder_protocol::{
-  LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus,
+use backon::{ExponentialBuilder, Retryable};
+use cadder_ipc::{LogAttributionKind, LogSeverity, LogStreamIdentity, RuntimeState, RuntimeStatus};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+  path::{Path, PathBuf},
+  process::Stdio,
+  sync::{Arc, Mutex as StdMutex},
+  time::Duration,
 };
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
-  fs,
   io::{AsyncBufReadExt, BufReader},
-  process::{Child, Command},
   sync::Mutex,
-  time::timeout,
+  task::yield_now,
+  time::{Instant, timeout, timeout_at},
 };
+use tokio_util::task::TaskTracker;
 
 use crate::caddy::RealCaddyResolver;
 
+const CADDY_ADMIN_ENDPOINT: &str = "localhost:2019";
+const MAX_RUNTIME_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone)]
-pub struct ProcessRuntime {
-  resolver: RealCaddyResolver,
-  paths: RuntimePaths,
-  child: Arc<Mutex<Option<Child>>>,
+pub enum CaddyRuntime {
+  Real(Box<ProcessRuntime>),
+  Mock(MockCaddyRuntime),
 }
 
-impl ProcessRuntime {
-  pub fn new(resolver: RealCaddyResolver, paths: RuntimePaths) -> Self {
-    Self {
-      resolver,
-      paths,
-      child: Arc::new(Mutex::new(None)),
-    }
+impl CaddyRuntime {
+  pub fn real(resolver: RealCaddyResolver, paths: RuntimePaths) -> Self {
+    Self::Real(Box::new(ProcessRuntime::new(resolver, paths)))
+  }
+
+  pub fn mock(paths: RuntimePaths) -> Self {
+    Self::Mock(MockCaddyRuntime::new(paths))
   }
 
   pub async fn inspect(&self) -> RuntimeState {
-    let child = self.child.lock().await;
-    if let Some(child) = child.as_ref() {
-      RuntimeState {
-        status: RuntimeStatus::Running,
-        binary_path: self
-          .resolver
-          .resolve()
-          .ok()
-          .map(|path| path.display().to_string()),
-        version: None,
-        process_id: child.id(),
-        admin_endpoint: Some("localhost:2019".to_string()),
-        diagnostics: Vec::new(),
-      }
-    } else {
-      RuntimeState::idle()
+    match self {
+      Self::Real(runtime) => runtime.inspect().await,
+      Self::Mock(runtime) => runtime.inspect().await,
     }
   }
 
   pub async fn apply_config(&self, rendered: &[u8], logs: &CaddyLogStore) -> Result<()> {
-    let config_path = self.paths.effective_config_path();
-    fs::write(&config_path, rendered)
-      .await
-      .with_context(|| format!("write effective config {}", config_path.display()))?;
-
-    if self.child.lock().await.is_none() {
-      self.start(&config_path, logs).await?;
-    } else {
-      self.reload(&config_path, logs).await?;
+    let attempt = self.begin_apply_config(rendered, logs).await?;
+    let (mut receipt, outcome) = attempt.into_parts();
+    if let Err(error) = outcome {
+      let rollback = receipt.rollback(logs).await;
+      return match rollback {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(error.context(format!(
+          "uncertain runtime apply rollback also failed: {rollback_error:#}"
+        ))),
+      };
+    }
+    if let Err(error) = receipt.accept(logs).await {
+      let rollback = receipt.rollback(logs).await;
+      return match rollback {
+        Ok(()) => Err(error),
+        Err(rollback_error) => Err(error.context(format!(
+          "runtime apply rollback also failed: {rollback_error:#}"
+        ))),
+      };
     }
     Ok(())
   }
 
-  async fn start(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
-    let binary = self.resolver.resolve()?;
-    let mut child = Command::new(binary)
-      .arg("run")
-      .arg("--config")
-      .arg(config_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .spawn()
-      .context("start real Caddy runtime")?;
-
-    if let Some(stdout) = child.stdout.take() {
-      spawn_log_reader(stdout, logs.clone(), "stdout");
-    }
-    if let Some(stderr) = child.stderr.take() {
-      spawn_log_reader(stderr, logs.clone(), "stderr");
-    }
-
-    *self.child.lock().await = Some(child);
-    logs.append(
-      LogStreamIdentity::runtime_control(),
-      LogSeverity::Info,
-      "real Caddy runtime started",
-      LogAttributionKind::RuntimeControl,
-      Some("start".to_string()),
-    );
-    Ok(())
-  }
-
-  async fn reload(&self, config_path: &PathBuf, logs: &CaddyLogStore) -> Result<()> {
-    let binary = self.resolver.resolve()?;
-    let output = Command::new(binary)
-      .arg("reload")
-      .arg("--config")
-      .arg(config_path)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped())
-      .output()
-      .await
-      .context("reload real Caddy runtime")?;
-    if output.status.success() {
-      logs.append(
-        LogStreamIdentity::runtime_control(),
-        LogSeverity::Info,
-        "real Caddy runtime reloaded",
-        LogAttributionKind::RuntimeControl,
-        Some("reload".to_string()),
-      );
-      Ok(())
-    } else {
-      let message = String::from_utf8_lossy(&output.stderr).to_string();
-      logs.append(
-        LogStreamIdentity::runtime_control(),
-        LogSeverity::Error,
-        &message,
-        LogAttributionKind::RuntimeControl,
-        Some("reload".to_string()),
-      );
-      anyhow::bail!("caddy reload failed: {message}");
+  pub(crate) async fn begin_apply_config(
+    &self,
+    rendered: &[u8],
+    logs: &CaddyLogStore,
+  ) -> Result<RuntimeApplyAttempt> {
+    match self {
+      Self::Real(runtime) => {
+        let (receipt, outcome) = runtime.begin_apply_config(rendered, logs).await?;
+        Ok(RuntimeApplyAttempt {
+          receipt: RuntimeApplyReceipt::Real(Box::new(receipt)),
+          outcome,
+        })
+      }
+      Self::Mock(runtime) => Ok(RuntimeApplyAttempt {
+        receipt: RuntimeApplyReceipt::Mock(Box::new(runtime.begin_apply_config(rendered).await?)),
+        outcome: Ok(()),
+      }),
     }
   }
 
   pub async fn stop(&self) -> Result<()> {
-    let mut child = self.child.lock().await;
-    if let Some(mut child) = child.take() {
-      if let Ok(binary) = self.resolver.resolve() {
-        let _ = request_graceful_stop(binary).await;
+    match self {
+      Self::Real(runtime) => runtime.stop().await,
+      Self::Mock(runtime) => runtime.stop().await,
+    }
+  }
+
+  pub(crate) async fn stop_until(&self, deadline: Instant) -> RuntimeStopOutcome {
+    match self {
+      Self::Real(runtime) => runtime.stop_until(deadline).await,
+      Self::Mock(runtime) => RuntimeStopOutcome::new(runtime.stop().await, true),
+    }
+  }
+
+  pub(crate) async fn force_stop(&self) -> Result<()> {
+    match self {
+      Self::Real(runtime) => runtime.force_stop().await,
+      Self::Mock(runtime) => runtime.stop().await,
+    }
+  }
+
+  pub(crate) async fn begin_stop(&self, logs: &CaddyLogStore) -> Result<RuntimeStopAttempt> {
+    match self {
+      Self::Real(runtime) => {
+        let (receipt, outcome) = runtime.begin_stop(logs).await?;
+        Ok(RuntimeStopAttempt {
+          receipt: RuntimeStopReceipt::Real(Box::new(receipt)),
+          outcome,
+        })
       }
-      let _ = child.kill().await;
-      let _ = child.wait().await;
+      Self::Mock(runtime) => Ok(RuntimeStopAttempt {
+        receipt: RuntimeStopReceipt::Mock(Box::new(runtime.begin_stop().await?)),
+        outcome: Ok(()),
+      }),
     }
-    Ok(())
   }
 }
 
-async fn request_graceful_stop(binary: PathBuf) -> Result<()> {
-  let mut command = Command::new(binary);
-  command
-    .arg("stop")
-    .arg("--address")
-    .arg("localhost:2019")
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .kill_on_drop(true);
-  let mut child = command.spawn().context("start caddy stop")?;
-  if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-  }
-  Ok(())
+#[derive(Debug)]
+pub(crate) struct RuntimeApplyAttempt {
+  receipt: RuntimeApplyReceipt,
+  outcome: Result<()>,
 }
 
-fn spawn_log_reader<R>(reader: R, logs: CaddyLogStore, channel: &'static str)
-where
-  R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-  tokio::spawn(async move {
-    let mut reader = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = reader.next_line().await {
-      let severity = if channel == "stderr" {
-        LogSeverity::Error
-      } else {
-        LogSeverity::Info
-      };
-      logs.append(
-        LogStreamIdentity {
-          stream_id: "runtime".to_string(),
-          domain_key: None,
-          channel: channel.to_string(),
-        },
-        severity,
-        line,
-        LogAttributionKind::Runtime,
-        None,
-      );
-    }
-  });
+impl RuntimeApplyAttempt {
+  pub(crate) fn into_parts(self) -> (RuntimeApplyReceipt, Result<()>) {
+    (self.receipt, self.outcome)
+  }
 }
+
+#[derive(Debug)]
+pub(crate) struct RuntimeStopAttempt {
+  receipt: RuntimeStopReceipt,
+  outcome: Result<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeStopOutcome {
+  result: Result<()>,
+  quiescent: bool,
+}
+
+impl RuntimeStopOutcome {
+  fn new(result: Result<()>, quiescent: bool) -> Self {
+    Self { result, quiescent }
+  }
+
+  pub(crate) fn into_parts(self) -> (Result<()>, bool) {
+    (self.result, self.quiescent)
+  }
+}
+
+impl RuntimeStopAttempt {
+  pub(crate) fn into_parts(self) -> (RuntimeStopReceipt, Result<()>) {
+    (self.receipt, self.outcome)
+  }
+}
+
+#[derive(Debug)]
+pub(crate) enum RuntimeStopReceipt {
+  Real(Box<ProcessRuntimeStopReceipt>),
+  Mock(Box<MockRuntimeStopReceipt>),
+}
+
+impl RuntimeStopReceipt {
+  pub(crate) fn accept(&mut self) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.accept(),
+      Self::Mock(receipt) => receipt.accept(),
+    }
+  }
+
+  pub(crate) async fn rollback(self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.rollback(logs).await,
+      Self::Mock(receipt) => receipt.rollback().await,
+    }
+  }
+}
+
+#[derive(Debug)]
+pub(crate) enum RuntimeApplyReceipt {
+  Real(Box<ProcessRuntimeApplyReceipt>),
+  Mock(Box<MockRuntimeApplyReceipt>),
+}
+
+impl RuntimeApplyReceipt {
+  pub(crate) async fn accept(&mut self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.accept(),
+      Self::Mock(receipt) => receipt.accept(logs).await,
+    }
+  }
+
+  pub(crate) async fn rollback(self, logs: &CaddyLogStore) -> Result<()> {
+    match self {
+      Self::Real(receipt) => receipt.rollback(logs).await,
+      Self::Mock(receipt) => receipt.rollback().await,
+    }
+  }
+}
+
+impl From<ProcessRuntime> for CaddyRuntime {
+  fn from(runtime: ProcessRuntime) -> Self {
+    Self::Real(Box::new(runtime))
+  }
+}
+
+mod mock_runtime;
+mod process;
+
+pub use mock_runtime::MockCaddyRuntime;
+use mock_runtime::{MockRuntimeApplyReceipt, MockRuntimeStopReceipt};
+#[cfg(test)]
+use process::*;
+pub use process::{ProcessRuntime, RuntimeTimeouts};
+use process::{ProcessRuntimeApplyReceipt, ProcessRuntimeStopReceipt};
+
+#[cfg(test)]
+mod tests;

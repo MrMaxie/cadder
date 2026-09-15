@@ -1,0 +1,352 @@
+use crate::{ProtocolError, ProtocolResult, ProtocolVersion, RequestId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::DeserializeOwned};
+use serde_json::value::RawValue;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// A closed operation request sent after a successful handshake.
+pub struct RequestEnvelope<T> {
+  protocol_version: ProtocolVersion,
+  operation: Box<str>,
+  request_id: RequestId,
+  payload: T,
+}
+
+pub(crate) mod operation_payload_sealed {
+  pub trait Sealed {}
+}
+
+/// A protocol-owned payload bound to one request operation and extension set.
+///
+/// The trait is sealed so a dispatcher cannot substitute an ad hoc permissive decoder for a
+/// closed wire contract.
+pub trait OperationPayload: operation_payload_sealed::Sealed + DeserializeOwned {
+  /// The only operation that may decode this payload type.
+  const OPERATION: &'static str;
+  /// Identifies an unknown enum or union discriminator without classifying ordinary bad input as
+  /// a version mismatch.
+  fn incompatible_discriminator(_payload: &serde_json::Value) -> Option<String> {
+    None
+  }
+}
+
+impl<T> RequestEnvelope<T>
+where
+  T: OperationPayload,
+{
+  /// Creates a request whose operation and extension header come from its sealed payload type.
+  pub fn new(protocol_version: ProtocolVersion, request_id: RequestId, payload: T) -> Self {
+    Self {
+      protocol_version,
+      operation: T::OPERATION.into(),
+      request_id,
+      payload,
+    }
+  }
+
+  /// Returns the protocol version selected for this request.
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the operation fixed by the sealed payload type.
+  pub fn operation(&self) -> &str {
+    &self.operation
+  }
+
+  /// Returns the request correlation ID.
+  pub fn request_id(&self) -> &RequestId {
+    &self.request_id
+  }
+
+  /// Returns the typed payload.
+  pub fn payload(&self) -> &T {
+    &self.payload
+  }
+}
+
+/// A closed request header that preserves the exact payload until authorization succeeds.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RawRequestEnvelope {
+  protocol_version: ProtocolVersion,
+  operation: Box<str>,
+  request_id: RequestId,
+  payload: Box<RawValue>,
+}
+
+impl RawRequestEnvelope {
+  /// Returns the protocol version selected for this request.
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the exact operation label.
+  pub fn operation(&self) -> &str {
+    &self.operation
+  }
+
+  /// Returns the correlation ID supplied by the client.
+  pub fn request_id(&self) -> &RequestId {
+    &self.request_id
+  }
+
+  pub(crate) fn decode_payload<T>(&self, closed: bool) -> ProtocolResult<T>
+  where
+    T: OperationPayload,
+  {
+    if !closed {
+      return serde_json::from_str(self.payload.get())
+        .map_err(ProtocolError::payload_decode_failed);
+    }
+
+    let payload_value: serde_json::Value =
+      serde_json::from_str(self.payload.get()).map_err(ProtocolError::payload_decode_failed)?;
+    if let Some(path) = T::incompatible_discriminator(&payload_value) {
+      return Err(ProtocolError::incompatible_payload_contract(Some(&path)));
+    }
+
+    let mut first_ignored = None;
+    let mut deserializer = serde_json::Deserializer::from_str(self.payload.get());
+    let decoded = serde_ignored::deserialize(&mut deserializer, |path| {
+      if first_ignored.is_none() {
+        first_ignored = Some(path.to_string());
+      }
+    });
+    let value = match decoded {
+      Ok(value) => value,
+      Err(_) if first_ignored.is_some() => {
+        return Err(ProtocolError::incompatible_payload_contract(
+          first_ignored.as_deref(),
+        ));
+      }
+      Err(error) => return Err(ProtocolError::payload_decode_failed(error)),
+    };
+    if deserializer.end().is_err() {
+      return Err(ProtocolError::incompatible_payload_contract(None));
+    }
+    if let Some(path) = first_ignored {
+      return Err(ProtocolError::incompatible_payload_contract(Some(&path)));
+    }
+    Ok(value)
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+/// The exactly-one result carried by a response envelope.
+pub enum ResponseOutcome<T> {
+  /// The operation completed with a typed result.
+  Success(SuccessOutcome<T>),
+  /// The operation returned a correlated typed error.
+  Failure(FailureOutcome),
+}
+
+impl<T> ResponseOutcome<T> {
+  /// Consumes the outcome without reducing a correlated daemon error to text.
+  pub fn into_result(self) -> ProtocolResult<T> {
+    match self {
+      Self::Success(success) => Ok(success.result),
+      Self::Failure(failure) => Err(failure.error),
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// A successful typed response value.
+pub struct SuccessOutcome<T> {
+  pub result: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// A failed typed response value.
+pub struct FailureOutcome {
+  pub error: ProtocolError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// An additive operation response that preserves version and request correlation.
+///
+/// Fields stay private so callers cannot create a result/error conflict or mismatched error ID.
+pub struct ResponseEnvelope<T> {
+  protocol_version: ProtocolVersion,
+  operation: Box<str>,
+  request_id: RequestId,
+  outcome: ResponseOutcome<T>,
+}
+
+impl<T> Serialize for ResponseEnvelope<T>
+where
+  T: Serialize,
+{
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WireResponse<'a, T> {
+      protocol_version: ProtocolVersion,
+      operation: &'a str,
+      request_id: &'a RequestId,
+      #[serde(skip_serializing_if = "Option::is_none")]
+      result: Option<&'a T>,
+      #[serde(skip_serializing_if = "Option::is_none")]
+      error: Option<&'a ProtocolError>,
+    }
+
+    let (result, error) = match &self.outcome {
+      ResponseOutcome::Success(outcome) => (Some(&outcome.result), None),
+      ResponseOutcome::Failure(outcome) => (None, Some(&outcome.error)),
+    };
+    WireResponse {
+      protocol_version: self.protocol_version,
+      operation: &self.operation,
+      request_id: &self.request_id,
+      result,
+      error,
+    }
+    .serialize(serializer)
+  }
+}
+
+impl<'de, T> Deserialize<'de> for ResponseEnvelope<T>
+where
+  T: Deserialize<'de>,
+{
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", bound(deserialize = "T: Deserialize<'de>"))]
+    struct WireResponse<T> {
+      protocol_version: ProtocolVersion,
+      operation: Box<str>,
+      request_id: RequestId,
+      #[serde(default)]
+      result: Present<T>,
+      #[serde(default)]
+      error: Present<ProtocolError>,
+    }
+
+    let response = WireResponse::deserialize(deserializer)?;
+    let outcome = match (response.result, response.error) {
+      (Present::Value(result), Present::Missing) => {
+        ResponseOutcome::Success(SuccessOutcome { result })
+      }
+      (Present::Missing, Present::Value(error)) => {
+        if error.request_id.as_ref() != Some(&response.request_id) {
+          return Err(de::Error::custom(
+            "the response and protocol error request IDs must match",
+          ));
+        }
+        ResponseOutcome::Failure(FailureOutcome { error })
+      }
+      (Present::Missing, Present::Missing) => {
+        return Err(de::Error::custom(
+          "a response must contain `result` or `error`",
+        ));
+      }
+      (Present::Value(_), Present::Value(_)) => {
+        return Err(de::Error::custom(
+          "a response cannot contain both `result` and `error`",
+        ));
+      }
+    };
+    Ok(Self {
+      protocol_version: response.protocol_version,
+      operation: response.operation,
+      request_id: response.request_id,
+      outcome,
+    })
+  }
+}
+
+#[derive(Default)]
+enum Present<T> {
+  #[default]
+  Missing,
+  Value(T),
+}
+
+impl<'de, T> Deserialize<'de> for Present<T>
+where
+  T: Deserialize<'de>,
+{
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    T::deserialize(deserializer).map(Self::Value)
+  }
+}
+
+impl<T> ResponseEnvelope<T> {
+  /// Returns the negotiated protocol version.
+  pub const fn protocol_version(&self) -> ProtocolVersion {
+    self.protocol_version
+  }
+
+  /// Returns the operation label echoed by the daemon.
+  pub fn operation(&self) -> &str {
+    &self.operation
+  }
+
+  /// Returns the request ID echoed by the daemon.
+  pub fn request_id(&self) -> &RequestId {
+    &self.request_id
+  }
+
+  /// Returns the typed success or failure value.
+  pub fn outcome(&self) -> &ResponseOutcome<T> {
+    &self.outcome
+  }
+
+  /// Consumes the envelope and returns its exactly-one typed outcome.
+  pub fn into_outcome(self) -> ResponseOutcome<T> {
+    self.outcome
+  }
+
+  /// Consumes the envelope while retaining a daemon [`ProtocolError`] as the error value.
+  pub fn into_result(self) -> ProtocolResult<T> {
+    self.outcome.into_result()
+  }
+
+  /// Creates a correlated successful response.
+  pub fn success(
+    protocol_version: ProtocolVersion,
+    operation: impl Into<Box<str>>,
+    request_id: RequestId,
+    result: T,
+  ) -> Self {
+    Self {
+      protocol_version,
+      operation: operation.into(),
+      request_id,
+      outcome: ResponseOutcome::Success(SuccessOutcome { result }),
+    }
+  }
+
+  /// Creates a correlated failure.
+  pub fn failure(
+    protocol_version: ProtocolVersion,
+    operation: impl Into<Box<str>>,
+    request_id: RequestId,
+    error: ProtocolError,
+  ) -> Self {
+    Self {
+      protocol_version,
+      operation: operation.into(),
+      request_id: request_id.clone(),
+      outcome: ResponseOutcome::Failure(FailureOutcome {
+        error: error.for_versioned_response(request_id),
+      }),
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,36 +1,12 @@
 ---
-title: PATH and shim strategy
-description: Use Cadder with direct paths, a user-managed PATH directory, or an explicit shim copy without implying automatic PATH mutation.
+title: PATH and the Caddy shim
+description: Use Cadder's caddy executable without recursive delegation.
 ---
 
-Cadder's `caddy` binary is a compatibility shim. It is useful when you want existing `caddy run` habits to register projects with Cadder.
+Place the released `caddy` shim, `cadderd`, and `cadder` in one user-owned directory and add that directory to PATH. Cadder does not install or mutate PATH for you.
 
-Cadder does not need to own your shell setup. Use direct paths, put the shim on `PATH`, or wrap it in your own tooling.
+`caddy run` is managed by Cadder. The shim starts or attaches to the daemon and never falls back to an unmanaged real Caddy run.
 
-## Direct invocation
+Read-only real-Caddy commands may be delegated through the trusted resolver. Unsupported state-changing commands fail closed. The resolver excludes the shim by file identity, including aliases, symlinks, and hardlinks, so it cannot recursively execute itself.
 
-Use a direct path when you want to be explicit:
-
-```powershell
-<path-to-cadder>\caddy run
-```
-
-```sh
-/path/to/cadder/caddy run
-```
-
-## User-managed PATH
-
-If you want `caddy run` to go through Cadder, copy or symlink the Cadder shim into a directory you control under the name `caddy`, then put that directory before the real Caddy directory on `PATH`.
-
-The real Caddy binary still needs to be resolvable by Cadder. The recommended place is [cadder.toml](../cadder-toml/).
-
-## Keep a separate real Caddy path
-
-The practical idea is simple:
-
-- the `caddy` found by your shell is Cadder's shim;
-- the real Caddy executable is somewhere else;
-- `cadder.toml` points to that real executable.
-
-For exact resolver precedence, see [Real Caddy resolution](../../reference/real-caddy-resolution/).
+Configure real Caddy with `real_path` or a distinct `real_command` in the trusted `cadder.toml`. Project files and shim flags cannot replace that selection.

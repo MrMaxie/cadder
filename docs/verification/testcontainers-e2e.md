@@ -5,14 +5,14 @@ investigating the CI Docker E2E job.
 
 ## Purpose
 
-The suite validates compiled host Cadder binaries against real Caddy in a disposable container. It
+The suite validates compiled Cadder binaries against real Caddy in a disposable container. It
 complements the fast fake-Caddy lifecycle tests and does not replace `cargo test --workspace`.
 
 ## Prerequisites
 
 - Docker daemon is running.
 - Docker CLI is available on `PATH`.
-- The current user can start containers and pull `caddy:2.10.0-alpine`.
+- The current user can start containers and pull `caddy:2.11.3-alpine`.
 - No host-global Caddy installation is required.
 
 ## Command
@@ -20,7 +20,7 @@ complements the fast fake-Caddy lifecycle tests and does not replace `cargo test
 Run from the repository root:
 
 ```sh
-cargo build -p cadderd -p cadder-shim
+cargo build --package cadder --bin cadderd --bin caddy
 cargo test -p cadder-daemon --features docker-e2e --test testcontainers_e2e -- --ignored --test-threads=1
 ```
 
@@ -30,7 +30,7 @@ error.
 
 ## Expected Coverage
 
-- Host `cadderd` and host `caddy` shim binaries run with a unique `CADDER_RUNTIME_DIR`.
+- Host `cadderd` and host `caddy` shim binaries are copied into one temporary portable directory.
 - Testcontainers starts an official Caddy container with dynamic host port mapping.
 - A wrapper command delegates `adapt`, `run`, `reload`, and `stop` to real Caddy in the container.
 - Two shim sessions register with one daemon and serve distinct HTTP responses through the mapped
@@ -39,7 +39,7 @@ error.
 - Shim unregister/exit cleanup removes only the exiting registration.
 - Duplicate domains report `domain-conflict`.
 - Invalid Caddyfiles report `adapt-failed`.
-- Daemon runtime shutdown stops real Caddy while the container is still alive.
+- Daemon shutdown stops real Caddy and terminates `cadderd` while the container is still alive.
 
 ## Run Record
 

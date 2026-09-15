@@ -2,54 +2,51 @@
 
 # Cadder
 
-Cadder coordinates local Caddy reverse proxies that would otherwise fight for the same HTTP and HTTPS ports. Projects can keep using a `caddy run` workflow, while Cadder registers them with one per-user daemon and applies the active configs through one real Caddy process.
+Cadder coordinates local Caddy projects that would otherwise compete for the same HTTP and HTTPS listeners. Projects keep the familiar `caddy run` workflow while one per-installation `cadderd` daemon owns the real Caddy process and combines active routes.
 
-Published documentation: <https://maxie.dev/Cadder/>
+Published documentation: <https://maxie.dev/cadder/>
 
-## What's included
+## Runtime
 
-Cadder ships three executables:
+Cadder 1.0 consists of three version-matched executables:
 
-- `caddy` is the Caddy-compatible shim. For `caddy run`, it starts or connects to `cadderd`, registers the current project's Caddyfile, keeps that registration alive while the shim process runs, and unregisters on exit. Other Caddy commands are delegated to the safely resolved real Caddy binary.
-- `cadderd` is the per-user daemon. It owns local IPC, entrypoint registrations, adapted Caddy config composition, the generated effective runtime config, the real Caddy process it starts, diagnostics, and bounded log storage.
-- `cadder-tui` is the terminal UI. It connects to the daemon, can start it unless `--no-start` is used, and shows overview state, entrypoints, domains, per-domain logs, diagnostics, filters, toggles, log export, and daemon shutdown.
+- `cadderd` owns local IPC, registrations, SQLite state, redacted logs, effective Caddy configuration, and the real Caddy child process.
+- `caddy` is the PATH-facing shim. `caddy run` starts or attaches to `cadderd`, registers the current project, sends heartbeats, and unregisters on exit.
+- `cadder` provides lifecycle, inspection, diagnostics, bounded logs, and a routes-first TUI.
 
-Each executable supports `--help` and `--version`.
+Keep all three executables together. Configure the trusted real Caddy source in `cadder.toml` beside them:
+
+```toml
+[caddy]
+real_path = "C:/Tools/caddy/caddy.exe"
+```
+
+Use `real_command` instead when a separately named real Caddy executable is available on PATH. Configure exactly one source.
 
 ## Quick use
 
-1. Download the latest Cadder release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases).
-2. Create `cadder.toml` next to Cadder with the path to the real Caddy binary.
-3. Run a project through Cadder's `caddy` shim.
-4. Open `cadder-tui` for state, domains, logs, and diagnostics.
+1. Download the matching `cadder` archive and SHA-256 file for your platform from [GitHub Releases](https://github.com/MrMaxie/cadder/releases).
+2. Extract its `cadder`, `cadderd`, and `caddy` executables into one user-owned directory.
+3. Copy `cadder.toml.example` to `cadder.toml` and configure real Caddy.
+4. Put the directory on PATH, run `caddy run` in each project, then use `cadder status` or open `cadder tui`.
 
-Full setup docs:
+Managed `caddy run` starts the matching daemon automatically when it is not already running. Mixed Cadder versions fail the exact protocol handshake before changing runtime state.
 
-- [Getting started](docs/site/src/content/docs/quick-start/getting-started.mdx)
-- [cadder.toml](docs/site/src/content/docs/user-guide/cadder-toml.mdx)
-- [How to use](docs/site/src/content/docs/user-guide/how-to-use.mdx)
-- [Real Caddy resolution](docs/site/src/content/docs/reference/real-caddy-resolution.mdx)
+## Development
 
-## Commands
+Install [mise](https://mise.jdx.dev/), then use the pinned project environment:
 
 ```sh
-caddy run
-cadder-tui
+mise install --locked
+mise tasks
+mise run check
+mise run tui-web
 ```
 
-For a local checkout, run the project checks with:
+`mise run tui-web` launches the TUI through the exact `ttyglass` npm package declared by the project. `just tui-web` is the short convenience entrypoint for the same task.
 
-```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo run -p xtask -- check
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for repository workflow, security reporting, and architecture notes.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 
-Cadder is licensed under the terms in [LICENSE](LICENSE).
+Cadder is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

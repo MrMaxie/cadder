@@ -1,0 +1,319 @@
+---
+import { Icon } from '@astrojs/starlight/components';
+---
+
+<figure class="cadder-map" aria-labelledby="cadder-map-caption">
+  <div class="map-grid">
+    <section class="project-stack" aria-label="Project routes">
+      <div class="map-section-title">
+        <Icon name="document" size="1rem" aria-hidden="true" />
+        <span>Project Caddyfiles</span>
+      </div>
+
+      <article class="project-card">
+        <div>
+          <strong>storefront</strong>
+          <span>shop.localhost</span>
+        </div>
+        <code>:3000</code>
+      </article>
+
+      <article class="project-card project-card-offset">
+        <div>
+          <strong>api</strong>
+          <span>api.localhost</span>
+        </div>
+        <code>:4000</code>
+      </article>
+    </section>
+
+    <div class="map-connector" aria-hidden="true">
+      <span></span>
+      <Icon name="right-arrow" size="1rem" />
+    </div>
+
+    <section class="cadder-hub" aria-label="Cadder coordinates the project routes">
+      <div class="hub-heading">
+        <span class="hub-icon"><Icon name="code-branch" size="1.25rem" aria-hidden="true" /></span>
+        <div>
+          <span>Coordinator</span>
+          <strong>Cadder</strong>
+        </div>
+      </div>
+      <ul>
+        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> combines active routes</li>
+        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> rejects address conflicts</li>
+        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> tracks project ownership</li>
+      </ul>
+      <span class="hub-status"><i></i> one shared runtime</span>
+    </section>
+
+    <div class="map-connector" aria-hidden="true">
+      <span></span>
+      <Icon name="right-arrow" size="1rem" />
+    </div>
+
+    <section class="caddy-runtime" aria-label="One Caddy process serves the combined routes">
+      <div class="runtime-icon"><Icon name="server" size="1.2rem" aria-hidden="true" /></div>
+      <span>Web server and reverse proxy</span>
+      <strong>Caddy</strong>
+      <p>One process serves every active route.</p>
+      <code>running</code>
+    </section>
+  </div>
+
+  <figcaption id="cadder-map-caption">
+    Projects keep their files. <strong>Cadder coordinates them.</strong> Caddy handles the requests.
+  </figcaption>
+</figure>
+
+<style>
+  .cadder-map {
+    margin: 0;
+    border: 1px solid var(--cadder-line);
+    border-radius: 0.5rem;
+    background:
+      linear-gradient(var(--cadder-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--cadder-line) 1px, transparent 1px),
+      var(--cadder-page);
+    background-size: 3rem 3rem;
+    overflow: hidden;
+  }
+
+  .map-grid {
+    display: grid;
+    grid-template-columns: minmax(12rem, 0.95fr) minmax(2rem, 0.2fr) minmax(16rem, 1.25fr) minmax(2rem, 0.2fr) minmax(11rem, 0.8fr);
+    gap: 0.75rem;
+    align-items: center;
+    padding: clamp(1.25rem, 3vw, 2rem);
+    background: color-mix(in srgb, var(--cadder-page) 92%, transparent);
+  }
+
+  .project-stack {
+    display: grid;
+    gap: 0.65rem;
+  }
+
+  .map-section-title {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.2rem;
+    color: var(--cadder-muted);
+    font-family: var(--sl-font-mono);
+    font-size: 0.65rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .project-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-width: 0;
+    padding: 0.85rem 0.95rem;
+    border: 1px solid var(--cadder-line);
+    border-radius: 0.3rem;
+    background: var(--cadder-surface);
+    box-shadow: 0 0.55rem 1.5rem color-mix(in srgb, var(--cadder-page) 70%, transparent);
+  }
+
+  .project-card-offset {
+    margin-left: 1rem;
+  }
+
+  .project-card div {
+    display: grid;
+    min-width: 0;
+  }
+
+  .project-card strong {
+    color: var(--cadder-ink);
+    font-family: var(--sl-font-mono);
+    font-size: 0.76rem;
+  }
+
+  .project-card span {
+    color: var(--cadder-muted);
+    font-size: 0.68rem;
+    overflow-wrap: anywhere;
+  }
+
+  .project-card code {
+    color: var(--cadder-accent-strong);
+    font-family: var(--sl-font-mono);
+    font-size: 0.72rem;
+  }
+
+  .map-connector {
+    display: flex;
+    align-items: center;
+    color: var(--cadder-accent);
+  }
+
+  .map-connector span {
+    height: 1px;
+    flex: 1;
+    background: linear-gradient(90deg, var(--cadder-line), var(--cadder-accent));
+  }
+
+  .cadder-hub {
+    position: relative;
+    display: grid;
+    gap: 1rem;
+    padding: 1.2rem;
+    border: 1px solid var(--cadder-accent);
+    border-radius: 0.4rem;
+    background: color-mix(in srgb, var(--cadder-accent-soft) 88%, var(--cadder-page));
+    box-shadow:
+      0 0 0 0.35rem color-mix(in srgb, var(--cadder-accent) 7%, transparent),
+      0 1.2rem 3rem color-mix(in srgb, var(--cadder-page) 72%, transparent);
+  }
+
+  .hub-heading {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+  }
+
+  .hub-heading > div {
+    display: grid;
+  }
+
+  .hub-heading span:not(.hub-icon),
+  .caddy-runtime > span {
+    color: var(--cadder-muted);
+    font-family: var(--sl-font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .hub-heading strong,
+  .caddy-runtime strong {
+    color: var(--cadder-ink);
+    font-size: 1.2rem;
+    letter-spacing: -0.03em;
+  }
+
+  .hub-icon,
+  .runtime-icon {
+    display: grid;
+    width: 2.5rem;
+    height: 2.5rem;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--cadder-accent) 60%, var(--cadder-line));
+    border-radius: 0.3rem;
+    background: var(--cadder-page);
+    color: var(--cadder-accent);
+  }
+
+  .cadder-hub ul {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    color: var(--cadder-muted);
+    font-size: 0.72rem;
+    list-style: none;
+  }
+
+  .cadder-hub li {
+    display: flex;
+    gap: 0.45rem;
+    align-items: center;
+  }
+
+  .cadder-hub li :global(svg) {
+    flex: 0 0 auto;
+    color: var(--cadder-accent);
+  }
+
+  .hub-status {
+    display: flex;
+    gap: 0.45rem;
+    align-items: center;
+    color: var(--cadder-accent-strong);
+    font-family: var(--sl-font-mono);
+    font-size: 0.64rem;
+  }
+
+  .hub-status i {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: var(--cadder-accent);
+    box-shadow: 0 0 0 0.22rem color-mix(in srgb, var(--cadder-accent) 15%, transparent);
+  }
+
+  .caddy-runtime {
+    display: grid;
+    gap: 0.45rem;
+    padding: 1rem;
+    border: 1px solid var(--cadder-line);
+    border-radius: 0.35rem;
+    background: var(--cadder-surface);
+  }
+
+  .caddy-runtime p {
+    margin: 0;
+    color: var(--cadder-muted);
+    font-size: 0.72rem;
+    line-height: 1.45;
+  }
+
+  .caddy-runtime code {
+    justify-self: start;
+    margin-top: 0.25rem;
+    padding: 0.18rem 0.45rem;
+    border: 1px solid color-mix(in srgb, var(--cadder-accent) 45%, var(--cadder-line));
+    border-radius: 2rem;
+    background: var(--cadder-accent-soft);
+    color: var(--cadder-accent-strong);
+    font-family: var(--sl-font-mono);
+    font-size: 0.62rem;
+  }
+
+  figcaption {
+    margin: 0;
+    padding: 0.85rem 1.1rem;
+    border-top: 1px solid var(--cadder-line);
+    background: var(--cadder-surface);
+    color: var(--cadder-muted);
+    font-size: 0.74rem;
+    text-align: center;
+  }
+
+  figcaption strong {
+    color: var(--cadder-accent-strong);
+  }
+
+  @media (max-width: 52rem) {
+    .map-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .map-connector {
+      min-height: 2rem;
+      flex-direction: column;
+    }
+
+    .map-connector span {
+      width: 1px;
+      min-height: 1.2rem;
+      flex: 1;
+      background: linear-gradient(var(--cadder-line), var(--cadder-accent));
+    }
+
+    .map-connector :global(svg) {
+      transform: rotate(90deg);
+    }
+
+    .project-card-offset {
+      margin-left: 0;
+    }
+  }
+</style>

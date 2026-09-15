@@ -1,51 +1,69 @@
 ---
-title: How to use
-description: Use Cadder releases, the caddy shim, and the TUI without changing Cadder itself.
+title: Daily workflow
+description: Run projects, inspect routes, and change activation without replacing existing Caddyfiles.
 ---
 
-The release contains four files you normally care about:
+import { Steps } from '@astrojs/starlight/components';
 
-- `caddy`
-- `cadderd`
-- `cadder-tui`
-- `cadder.toml`
+The normal Cadder workflow starts in each project and moves to the operator only when you need the shared view.
 
-The `caddy` command is Cadder's shim. Use it for project `caddy run` workflows that should be coordinated by Cadder. The real Caddy binary stays separate and is configured through [cadder.toml](../cadder-toml/).
+<Steps>
 
-## Basic flow
+1. **Start each project from its own directory.**
 
-1. Get the release for your operating system from [GitHub Releases](https://github.com/MrMaxie/Cadder/releases/latest).
-2. Point Cadder at the real Caddy binary with [cadder.toml](../cadder-toml/).
-3. Run your project through Cadder:
+   ```sh frame="none"
+   caddy run
+   ```
 
-```sh
-caddy run
+   Each live shim owns one registration and renews it periodically. Exiting the command removes that live registration.
+
+2. **Check the shared runtime.**
+
+   ```sh frame="none"
+   cadder status
+   ```
+
+   Use `cadder projects list` or `cadder domains list` when you need the registered routes rather than daemon details.
+
+3. **Open the routes workspace when you need to act.**
+
+   ```sh frame="none"
+   cadder tui
+   ```
+
+   The TUI groups domains beneath their projects. Use Space or Enter to toggle the selected row. Cadder keeps the current domain owner when another active project requests the same canonical domain.
+
+4. **Leave the project normally.**
+
+   Exit `caddy run` in the project terminal. Cadder removes the live registration without stopping unrelated projects.
+
+</Steps>
+
+## Inspect one route
+
+Use the boundary you already know:
+
+```sh frame="none"
+cadder port inspect 3000
+cadder caddyfile inspect ./Caddyfile
+cadder domains inspect app.localhost
 ```
 
-4. Inspect the daemon when needed:
+Port inspection works without `cadderd`. When daemon state is available, Cadder connects the listener and process to its project, Caddyfile, domain, and upstream.
 
-```sh
-cadder-tui
+## Change activation from the terminal
+
+Use the Caddyfile to select a project. Add `--caddyfile` when a domain name could belong to more than one registration.
+
+```sh frame="none"
+cadder projects disable ./Caddyfile
+cadder projects enable ./Caddyfile
+cadder domains disable app.localhost --caddyfile ./Caddyfile
+cadder domains enable app.localhost --caddyfile ./Caddyfile
 ```
 
-## Direct or PATH-based use
+## Upgrade all three executables together
 
-Both styles are valid.
+Stop the daemon from the TUI or with `cadder daemon stop`. Replace `cadder`, `cadderd`, and the `caddy` shim from one release, keep `cadder.toml`, then start the next managed project.
 
-Use a direct path when you want to be explicit about which binary runs. Put the Cadder shim on `PATH` when you want `caddy run` to mean "run this project through Cadder" from any project directory.
-
-The practical setup is:
-
-- keep the real Caddy binary away from the `PATH` entry used for Cadder;
-- configure its path in [cadder.toml](../cadder-toml/);
-- expose Cadder's `caddy` shim globally only if that matches your workflow.
-
-## Check the shim
-
-This command confirms that `caddy` is Cadder's shim:
-
-```sh
-caddy --cadder-shim-info
-```
-
-If it prints real Caddy output instead, your shell is finding real Caddy before Cadder's shim.
+Cadder may restore desired activation from SQLite after restart, but a project becomes live only after a current shim registers it. Old leases and process identities never become live state.
