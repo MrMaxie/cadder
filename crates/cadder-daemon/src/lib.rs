@@ -19,6 +19,8 @@ mod process_tree;
 mod runtime;
 mod runtime_file;
 mod state;
+#[cfg(test)]
+mod test_support;
 
 pub use caddy::{
   CaddyBackendMode, CaddyConfigAdapter, CaddyConfigCoordinator, CaddyRegistrationAdapter,

@@ -759,146 +759,27 @@ fn exe_name(name: &str) -> String {
   }
 }
 
-#[cfg(windows)]
 fn write_caddy_proxy(root: &Path, container_id: &str) -> Result<PathBuf> {
   let proxy_dir = root.join("bin");
   fs::create_dir_all(&proxy_dir).context("create proxy command directory")?;
   let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-  let log_path = root.join("caddy-proxy.log");
-  write_windows_proxy(&proxy_dir, root, &canonical_root, container_id, &log_path)
-}
-
-#[cfg(not(windows))]
-fn write_caddy_proxy(root: &Path, container_id: &str) -> Result<PathBuf> {
-  let proxy_dir = root.join("bin");
-  fs::create_dir_all(&proxy_dir).context("create proxy command directory")?;
-  let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-  let log_path = root.join("caddy-proxy.log");
-  write_unix_proxy(&proxy_dir, root, &canonical_root, container_id, &log_path)
-}
-
-#[cfg(windows)]
-fn write_windows_proxy(
-  proxy_dir: &Path,
-  root: &Path,
-  canonical_root: &Path,
-  container_id: &str,
-  log_path: &Path,
-) -> Result<PathBuf> {
-  let ps1_path = proxy_dir.join("caddy-proxy.ps1");
-  let cmd_path = proxy_dir.join("caddy-proxy.cmd");
+  let proxy_path = proxy_dir.join(exe_name("caddy-proxy"));
+  fs::copy(env!("CARGO_BIN_EXE_cadder-test-process"), &proxy_path)
+    .with_context(|| format!("copy native Caddy proxy to {}", proxy_path.display()))?;
+  fs::write(proxy_dir.join("cadder-test.mode"), "docker-proxy")?;
+  fs::write(proxy_dir.join("docker-container-id"), container_id)?;
   fs::write(
-    &ps1_path,
-    format!(
-      r#"$ErrorActionPreference = 'Stop'
-$containerId = @'
-{container_id}
-'@
-$hostRoots = @(
-@'
-{root}
-'@,
-@'
-{canonical_root}
-'@
-)
-$containerRoot = '{container_workspace}'
-$logPath = @'
-{log_path}
-'@
-$translated = foreach ($arg in $args) {{
-  $mapped = $arg
-  foreach ($rootPath in $hostRoots) {{
-    $trimmed = $rootPath.TrimEnd('\')
-    if ([string]::Equals($mapped, $trimmed, [System.StringComparison]::OrdinalIgnoreCase)) {{
-      $mapped = $containerRoot
-      break
-    }}
-    $prefix = "$trimmed\"
-    if ($mapped.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {{
-      $relative = $mapped.Substring($prefix.Length).Replace('\', '/')
-      $mapped = "$containerRoot/$relative"
-      break
-    }}
-  }}
-  $mapped
-}}
-Add-Content -LiteralPath $logPath -Value ($translated -join ' ')
-& docker exec $containerId caddy @translated
-exit $LASTEXITCODE
-"#,
-      container_id = container_id,
-      root = root.display(),
-      canonical_root = canonical_root.display(),
-      container_workspace = CONTAINER_WORKSPACE,
-      log_path = log_path.display(),
-    ),
-  )
-  .with_context(|| format!("write PowerShell proxy {}", ps1_path.display()))?;
+    proxy_dir.join("docker-host-root"),
+    root.as_os_str().as_encoded_bytes(),
+  )?;
   fs::write(
-    &cmd_path,
-    r#"@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0caddy-proxy.ps1" %*
-exit /b %ERRORLEVEL%
-"#,
-  )
-  .with_context(|| format!("write cmd proxy {}", cmd_path.display()))?;
-  Ok(cmd_path)
-}
-
-#[cfg(not(windows))]
-fn write_unix_proxy(
-  proxy_dir: &Path,
-  root: &Path,
-  canonical_root: &Path,
-  container_id: &str,
-  log_path: &Path,
-) -> Result<PathBuf> {
-  use std::os::unix::fs::PermissionsExt;
-
-  let proxy_path = proxy_dir.join("caddy-proxy");
+    proxy_dir.join("docker-canonical-root"),
+    canonical_root.as_os_str().as_encoded_bytes(),
+  )?;
+  fs::write(proxy_dir.join("docker-container-root"), CONTAINER_WORKSPACE)?;
   fs::write(
-    &proxy_path,
-    format!(
-      r#"#!/usr/bin/env bash
-set -euo pipefail
-container_id='{container_id}'
-host_root='{root}'
-host_canonical_root='{canonical_root}'
-container_root='{container_workspace}'
-log_path='{log_path}'
-translated=()
-for arg in "$@"; do
-  mapped="$arg"
-  if [[ "$mapped" == "$host_root" ]]; then
-    mapped="$container_root"
-  elif [[ "$mapped" == "$host_root"/* ]]; then
-    mapped="$container_root${{mapped#"$host_root"}}"
-  elif [[ "$mapped" == "$host_canonical_root" ]]; then
-    mapped="$container_root"
-  elif [[ "$mapped" == "$host_canonical_root"/* ]]; then
-    mapped="$container_root${{mapped#"$host_canonical_root"}}"
-  fi
-  translated+=("$mapped")
-done
-printf '%s\n' "${{translated[*]}}" >> "$log_path"
-exec docker exec "$container_id" caddy "${{translated[@]}}"
-"#,
-      container_id = shell_escape(container_id),
-      root = shell_escape(&root.display().to_string()),
-      canonical_root = shell_escape(&canonical_root.display().to_string()),
-      container_workspace = CONTAINER_WORKSPACE,
-      log_path = shell_escape(&log_path.display().to_string()),
-    ),
-  )
-  .with_context(|| format!("write Unix proxy {}", proxy_path.display()))?;
-  let mut permissions = fs::metadata(&proxy_path)?.permissions();
-  permissions.set_mode(0o755);
-  fs::set_permissions(&proxy_path, permissions)?;
+    proxy_dir.join("docker-log-path"),
+    root.join("caddy-proxy.log").as_os_str().as_encoded_bytes(),
+  )?;
   Ok(proxy_path)
-}
-
-#[cfg(not(windows))]
-fn shell_escape(value: &str) -> String {
-  value.replace('\'', r#"'\''"#)
 }

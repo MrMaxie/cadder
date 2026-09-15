@@ -1,5 +1,9 @@
 use super::*;
-use crate::{paths::RuntimePaths, runtime::RuntimeTimeouts};
+use crate::{
+  paths::RuntimePaths,
+  runtime::RuntimeTimeouts,
+  test_support::{copy_test_process, install_test_process, tempdir},
+};
 use cadder_ipc::{
   ActivationState, EntrypointInstanceIdentity, LogStreamIdentity, OwnerProcessIdentity, SourcePath,
 };
@@ -164,170 +168,6 @@ fn host_collection_and_filtering_walk_nested_values() {
       .unwrap()
       .is_empty()
   );
-}
-
-fn write_fake_caddy(path: &Path) {
-  #[cfg(windows)]
-  fs::write(
-    path,
-    r#"@echo off
-if "%1"=="adapt" (
-echo {"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}
-exit /b 0
-)
-exit /b 1
-"#,
-  )
-  .unwrap();
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(
-      path,
-      r#"#!/bin/sh
-if [ "$1" = "adapt" ]; then
-printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
-exit 0
-fi
-exit 1
-"#,
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-  }
-}
-
-fn write_fake_caddy_with_adapt(path: &Path, adapt_body: &str, exit_code: i32) {
-  #[cfg(windows)]
-  fs::write(
-    path,
-    format!(
-      r#"@echo off
-if "%1"=="adapt" (
-echo {adapt_body}
-exit /b {exit_code}
-)
-exit /b 0
-"#
-    ),
-  )
-  .unwrap();
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(
-      path,
-      format!(
-        r#"#!/bin/sh
-if [ "$1" = "adapt" ]; then
-printf '%s\n' '{adapt_body}'
-exit {exit_code}
-fi
-exit 0
-"#
-      ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-  }
-}
-
-fn write_slow_fake_caddy(path: &Path) {
-  #[cfg(windows)]
-  fs::write(
-    path,
-    r#"@echo off
-if "%1"=="adapt" (
-"%SystemRoot%\System32\ping.exe" -n 60 127.0.0.1 >nul
-echo {"apps":{}}
-exit /b 0
-)
-exit /b 0
-"#,
-  )
-  .unwrap();
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(
-      path,
-      r#"#!/bin/sh
-if [ "$1" = "adapt" ]; then
-/bin/sleep 60
-printf '%s\n' '{"apps":{}}'
-exit 0
-fi
-exit 0
-"#,
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-  }
-}
-
-fn write_runtime_fake_caddy(path: &Path) {
-  #[cfg(windows)]
-  fs::write(
-    path,
-    r#"@echo off
-if "%1"=="adapt" (
-echo {"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}
-exit /b 0
-)
-if "%1"=="reload" exit /b 0
-if "%1"=="stop" (
-ping -n 8 127.0.0.1 >nul
-exit /b 0
-)
-if "%1"=="run" (
-:run_loop
-ping -n 2 127.0.0.1 >nul
-goto run_loop
-)
-exit /b 1
-"#,
-  )
-  .unwrap();
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(
-      path,
-      r#"#!/bin/sh
-case "$1" in
-adapt)
-  printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["project.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
-  exit 0
-  ;;
-reload)
-  exit 0
-  ;;
-stop)
-  sleep 6
-  exit 0
-  ;;
-run)
-  while true; do sleep 1; done
-  ;;
-esac
-exit 1
-"#,
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-  }
 }
 
 #[test]
@@ -631,9 +471,8 @@ async fn mock_coordinator_applies_effective_config_without_real_caddy_process() 
 
 #[tokio::test]
 async fn adapter_uses_canonical_config_path_without_shim_metadata() {
-  let dir = tempfile::tempdir().unwrap();
-  let fake_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_fake_caddy(&fake_caddy);
+  let dir = tempdir("caddy-adapter-");
+  let fake_caddy = install_test_process(dir.path(), "project-adapt");
   let project_cwd = dir.path().join("project");
   fs::create_dir_all(&project_cwd).unwrap();
   let config_path = project_cwd.join("Caddyfile");
@@ -662,9 +501,8 @@ async fn adapter_uses_canonical_config_path_without_shim_metadata() {
 
 #[tokio::test]
 async fn pinned_caddy_image_adapt_prevents_or_rejects_mutation_after_pinning() {
-  let dir = tempfile::tempdir().unwrap();
-  let fake_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_fake_caddy(&fake_caddy);
+  let dir = tempdir("caddy-pinned-image-");
+  let fake_caddy = copy_test_process(dir.path(), "project-adapt");
   let config_path = dir.path().join("Caddyfile");
   fs::write(&config_path, "project.localhost { respond ok }").unwrap();
   let mut registration = registration("project", &[]);
@@ -693,9 +531,8 @@ async fn pinned_caddy_image_adapt_prevents_or_rejects_mutation_after_pinning() {
 
 #[tokio::test]
 async fn prepare_registration_commits_routes_on_success() {
-  let dir = tempfile::tempdir().unwrap();
-  let fake_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_fake_caddy(&fake_caddy);
+  let dir = tempdir("caddy-registration-");
+  let fake_caddy = install_test_process(dir.path(), "project-adapt");
   let config_path = dir.path().join("Caddyfile");
   fs::write(&config_path, "project.localhost { respond ok }").unwrap();
   let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
@@ -752,11 +589,10 @@ async fn adapter_reports_invalid_real_caddy_override() {
 
 #[tokio::test]
 async fn adapter_reports_caddy_adapt_failure_and_invalid_json() {
-  let dir = tempfile::tempdir().unwrap();
+  let dir = tempdir("caddy-adapt-errors-");
   let config_path = dir.path().join("Caddyfile");
   fs::write(&config_path, "app.localhost { respond ok }").unwrap();
-  let failing_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_fake_caddy_with_adapt(&failing_caddy, "adapt failed", 7);
+  let failing_caddy = install_test_process(dir.path(), "project-adapt-fail");
   let adapter = CaddyConfigAdapter::new(RealCaddyResolver::with_executable_path(
     Some(failing_caddy.display().to_string()),
     Some(dir.path().join(exe_name_for_test("cadderd"))),
@@ -773,8 +609,7 @@ async fn adapter_reports_caddy_adapt_failure_and_invalid_json() {
 
   let invalid_dir = dir.path().join("invalid");
   fs::create_dir(&invalid_dir).unwrap();
-  let invalid_caddy = invalid_dir.join(fake_caddy_name_for_test());
-  write_fake_caddy_with_adapt(&invalid_caddy, "not-json", 0);
+  let invalid_caddy = install_test_process(&invalid_dir, "project-adapt-invalid");
   let invalid_adapter = CaddyConfigAdapter::new(RealCaddyResolver::with_executable_path(
     Some(invalid_caddy.display().to_string()),
     Some(dir.path().join(exe_name_for_test("cadderd"))),
@@ -786,11 +621,10 @@ async fn adapter_reports_caddy_adapt_failure_and_invalid_json() {
 
 #[tokio::test]
 async fn adapter_reports_adapt_timeout() {
-  let dir = tempfile::tempdir().unwrap();
+  let dir = tempdir("caddy-adapt-timeout-");
   let config_path = dir.path().join("Caddyfile");
   fs::write(&config_path, "app.localhost { respond ok }").unwrap();
-  let slow_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_slow_fake_caddy(&slow_caddy);
+  let slow_caddy = install_test_process(dir.path(), "project-adapt-slow");
   let adapter = CaddyConfigAdapter::with_command_timeout(
     RealCaddyResolver::with_executable_path(
       Some(slow_caddy.display().to_string()),
@@ -1055,16 +889,6 @@ fn exe_name_for_test(name: &str) -> String {
 #[cfg(not(windows))]
 fn exe_name_for_test(name: &str) -> String {
   name.to_string()
-}
-
-#[cfg(windows)]
-fn fake_caddy_name_for_test() -> &'static str {
-  "fake-caddy.cmd"
-}
-
-#[cfg(not(windows))]
-fn fake_caddy_name_for_test() -> &'static str {
-  "fake-caddy"
 }
 
 struct CoordinatorFixture {
@@ -1341,9 +1165,8 @@ async fn apply_wrapper_handles_current_stop_and_runtime_failure_actions() {
 
 #[tokio::test]
 async fn apply_wrapper_logs_stop_error_when_idling_running_runtime() {
-  let dir = tempfile::tempdir().unwrap();
-  let fake_caddy = dir.path().join(fake_caddy_name_for_test());
-  write_runtime_fake_caddy(&fake_caddy);
+  let dir = tempdir("caddy-runtime-stop-");
+  let fake_caddy = install_test_process(dir.path(), "project-runtime-slow-stop");
   let resolver = RealCaddyResolver::with_executable_path(
     Some(fake_caddy.display().to_string()),
     Some(dir.path().join(exe_name_for_test("cadderd"))),

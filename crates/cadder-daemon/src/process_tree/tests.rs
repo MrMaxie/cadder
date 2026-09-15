@@ -1,13 +1,16 @@
 use super::*;
-use std::{fs, path::Path};
+use crate::test_support::{install_test_process, tempdir};
+#[cfg(unix)]
+use std::fs;
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Instant, sleep};
 
 #[tokio::test]
 async fn kill_terminates_descendants_and_closes_their_pipes() {
-  let temp = tempfile::tempdir().unwrap();
-  let started = temp.path().join("started");
-  let program = write_blocking_process_tree(temp.path(), &started);
+  let temp = tempdir("process-tree-");
+  let started = temp.path().join("process-tree.started");
+  let program = install_test_process(temp.path(), "process-block");
   let mut command = Command::new(program);
   command.stdout(std::process::Stdio::piped());
   command.stderr(std::process::Stdio::piped());
@@ -54,9 +57,9 @@ async fn pinned_caddy_image_metadata_reader_bounds_and_drains_output() {
 #[cfg(unix)]
 #[tokio::test]
 async fn terminate_and_join_cleans_an_orphaned_grandchild() {
-  let temp = tempfile::tempdir().unwrap();
-  let grandchild_started = temp.path().join("grandchild-started");
-  let program = write_orphaned_grandchild_process_tree(temp.path(), &grandchild_started);
+  let temp = tempdir("process-tree-orphan-");
+  let grandchild_started = temp.path().join("process-tree.grandchild-started");
+  let program = install_test_process(temp.path(), "process-orphan-parent");
   let mut command = Command::new(program);
   command.stdout(std::process::Stdio::null());
   command.stderr(std::process::Stdio::null());
@@ -91,9 +94,8 @@ async fn terminate_and_join_cleans_an_orphaned_grandchild() {
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pinned_caddy_image_windows_concurrent_children_are_reaped() {
-  let temp = tempfile::tempdir().unwrap();
-  let fixture = temp.path().join("exit-successfully.cmd");
-  fs::write(&fixture, "@exit /b 0\r\n").unwrap();
+  let temp = tempdir("process-tree-concurrent-");
+  let fixture = install_test_process(temp.path(), "process-exit-success");
   let mut children = tokio::task::JoinSet::new();
 
   for _ in 0..32 {
@@ -185,70 +187,4 @@ fn unix_process_group_is_empty(process_group_id: libc::pid_t) -> io::Result<bool
     Some(libc::EPERM) => Ok(false),
     _ => Err(error),
   }
-}
-
-fn write_blocking_process_tree(dir: &Path, started: &Path) -> std::path::PathBuf {
-  #[cfg(windows)]
-  {
-    let path = dir.join("process-tree.cmd");
-    fs::write(
-      &path,
-      format!(
-        r#"@echo off
-echo started> "{started}"
-"%SystemRoot%\System32\ping.exe" -n 60 127.0.0.1 >nul
-"#,
-        started = started.display()
-      ),
-    )
-    .unwrap();
-    path
-  }
-
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = dir.join("process-tree.sh");
-    fs::write(
-      &path,
-      format!(
-        r#"#!/bin/sh
-: > '{started}'
-/bin/sleep 60
-"#,
-        started = started.display()
-      ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
-    path
-  }
-}
-
-#[cfg(unix)]
-fn write_orphaned_grandchild_process_tree(dir: &Path, started: &Path) -> std::path::PathBuf {
-  use std::os::unix::fs::PermissionsExt;
-
-  let path = dir.join("orphaned-grandchild-process-tree.sh");
-  fs::write(
-    &path,
-    format!(
-      r#"#!/bin/sh
-(
-  /bin/sleep 60 &
-  printf '%s\n' "$!" > '{started}'
-) &
-wait "$!"
-"#,
-      started = started.display()
-    ),
-  )
-  .unwrap();
-  let mut permissions = fs::metadata(&path).unwrap().permissions();
-  permissions.set_mode(0o755);
-  fs::set_permissions(&path, permissions).unwrap();
-  path
 }

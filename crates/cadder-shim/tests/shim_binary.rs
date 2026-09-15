@@ -22,47 +22,6 @@ fn unique_runtime_dir(name: &str) -> PathBuf {
   ))
 }
 
-fn write_fake_real_caddy(name: &str, exit_code: u8) -> PathBuf {
-  let dir = unique_runtime_dir(name);
-  fs::create_dir_all(&dir).unwrap();
-
-  #[cfg(windows)]
-  {
-    let path = dir.join("real-caddy.cmd");
-    fs::write(
-      &path,
-      format!(
-        r#"@echo off
-echo delegated %*
-exit /b {exit_code}
-"#
-      ),
-    )
-    .unwrap();
-    path
-  }
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("real-caddy");
-    fs::write(
-      &path,
-      format!(
-        r#"#!/usr/bin/env sh
-printf '%s\n' "delegated $*"
-exit {exit_code}
-"#
-      ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
-    path
-  }
-}
-
 #[test]
 fn shim_info_flag_reports_release_identity_json() {
   let output = run_shim(&["--cadder-shim-info"]);
@@ -89,9 +48,10 @@ fn shim_info_flag_ignores_invalid_backend_env() {
 
 #[test]
 fn shim_real_caddy_selector_is_rejected() {
+  let selected_executable = env!("CARGO_BIN_EXE_cadder-shim");
   let output = run_shim(&[
     "--cadder-real-caddy-command",
-    "definitely-missing-caddy",
+    selected_executable,
     "version",
   ]);
 
@@ -101,22 +61,6 @@ fn shim_real_caddy_selector_is_rejected() {
     stderr.contains("shim cannot select the executable"),
     "{stderr}"
   );
-}
-
-#[test]
-fn shim_real_caddy_selector_never_executes_the_selected_program() {
-  let fake_caddy = write_fake_real_caddy("delegated-exit", 7);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "version"]);
-
-  assert_eq!(output.status.code(), Some(1));
-  assert!(
-    !String::from_utf8(output.stdout)
-      .unwrap()
-      .contains("delegated version")
-  );
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }
 
 #[test]

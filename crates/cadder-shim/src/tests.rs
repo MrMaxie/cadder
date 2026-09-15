@@ -1,12 +1,10 @@
 use super::*;
-use cadder_api::{
-  CaddyConfigAdapter, CaddyConfigCoordinator, DaemonServer, DaemonState, ProcessRuntime,
-};
+use cadder_api::{CaddyConfigCoordinator, DaemonServer, DaemonState};
 use cadder_ipc::{
   ProtocolError, ProtocolErrorCode, ProtocolErrorKind, QueryStatePayload, message_types,
 };
 use clap::CommandFactory;
-use std::{fs, path::Path, sync::Mutex as StdMutex};
+use std::{fs, sync::Mutex as StdMutex};
 use tokio::{sync::watch, time::sleep};
 
 static TEST_ENV_LOCK: StdMutex<()> = StdMutex::new(());
@@ -225,8 +223,7 @@ async fn run_managed_returns_failure_when_backend_is_unavailable() {
 async fn run_managed_does_not_delegate_to_real_caddy_when_backend_is_missing() {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
-  let fake_caddy = temp.path().join(fake_caddy_name_for_test());
-  write_fake_caddy(&fake_caddy);
+  let fake_caddy = std::env::current_exe().unwrap();
 
   let code = run_managed(ShimArgs {
     daemon_path: Some(temp.path().join(fake_daemon_name_for_test())),
@@ -371,18 +368,12 @@ async fn run_managed_registers_heartbeats_and_unregisters_on_shutdown() {
   let temp = tempfile::tempdir().unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("run"))).unwrap();
   paths.ensure_dirs().unwrap();
-  let fake_caddy = temp.path().join(fake_caddy_name_for_test());
-  write_fake_caddy(&fake_caddy);
   fs::write(
     temp.path().join("Caddyfile"),
     "app.localhost { respond ok }",
   )
   .unwrap();
-  let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
-  let state = DaemonState::new(CaddyConfigCoordinator::new(
-    CaddyConfigAdapter::new(resolver.clone()),
-    ProcessRuntime::new(resolver, paths.clone()),
-  ));
+  let state = DaemonState::new(CaddyConfigCoordinator::new_mock(paths.clone()));
   let server = DaemonServer::new(paths.clone(), state.clone());
   let (shutdown_tx, shutdown_rx) = watch::channel(false);
   tokio::spawn(async move {
@@ -428,16 +419,6 @@ async fn wait_for_backend(paths: &RuntimePaths) {
 }
 
 #[cfg(windows)]
-fn fake_caddy_name_for_test() -> &'static str {
-  "fake-caddy.cmd"
-}
-
-#[cfg(not(windows))]
-fn fake_caddy_name_for_test() -> &'static str {
-  "fake-caddy"
-}
-
-#[cfg(windows)]
 fn fake_daemon_name_for_test() -> &'static str {
   "missing-cadderd.exe"
 }
@@ -445,52 +426,4 @@ fn fake_daemon_name_for_test() -> &'static str {
 #[cfg(not(windows))]
 fn fake_daemon_name_for_test() -> &'static str {
   "missing-cadderd"
-}
-
-fn write_fake_caddy(path: &Path) {
-  #[cfg(windows)]
-  fs::write(
-    path,
-    r#"@echo off
-if "%1"=="adapt" (
-echo {"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["app.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}
-exit /b 0
-)
-if "%1"=="run" (
-ping -n 2 127.0.0.1 >nul
-exit /b 0
-)
-if "%1"=="stop" (
-exit /b 0
-)
-if "%1"=="reload" (
-exit /b 0
-)
-exit /b 0
-"#,
-  )
-  .unwrap();
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    fs::write(
-      path,
-      r#"#!/usr/bin/env sh
-if [ "$1" = "adapt" ]; then
-printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["app.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
-exit 0
-fi
-if [ "$1" = "run" ]; then
-sleep 1
-exit 0
-fi
-exit 0
-"#,
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).unwrap();
-  }
 }

@@ -16,6 +16,13 @@ docker-e2e = []
 name = "cadder-daemon"
 path = "src/bin/cadderd.rs"
 
+[[bin]]
+name = "cadder-test-process"
+path = "tests/fixtures/test_process.rs"
+test = false
+bench = false
+doc = false
+
 [[test]]
 name = "testcontainers_e2e"
 path = "tests/testcontainers_e2e.rs"

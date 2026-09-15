@@ -1,5 +1,6 @@
 use super::*;
 use crate::logs::LogQuery;
+use crate::test_support::{install_test_process, tempdir};
 use std::{fs as std_fs, path::Path};
 use tokio::time::sleep;
 
@@ -13,6 +14,21 @@ enum FakeRuntimeMode {
   NeverReady,
   FailStop,
   SlowStop,
+}
+
+impl FakeRuntimeMode {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::LongRunning => "runtime-long-running",
+      Self::DelayedConfigRead => "runtime-delayed-config-read",
+      Self::ShortRun => "runtime-short-run",
+      Self::FailRun => "runtime-fail-run",
+      Self::FailReload => "runtime-fail-reload",
+      Self::NeverReady => "runtime-never-ready",
+      Self::FailStop => "runtime-fail-stop",
+      Self::SlowStop => "runtime-slow-stop",
+    }
+  }
 }
 
 struct RuntimeFixture {
@@ -34,13 +50,13 @@ fn short_timeouts() -> RuntimeTimeouts {
 }
 
 fn runtime_fixture(mode: FakeRuntimeMode) -> RuntimeFixture {
-  let temp = tempfile::tempdir().unwrap();
+  let temp = tempdir("runtime-");
   let runtime_dir = temp.path().join("run");
   let paths = RuntimePaths::resolve(Some(runtime_dir)).unwrap();
   paths.ensure_dirs().unwrap();
   let command_log = temp.path().join("fake-caddy.log");
   let run_exit_file = temp.path().join("fake-caddy.exit");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, mode);
+  let fake_caddy = install_test_process(temp.path(), mode.as_str());
   let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
   let runtime = ProcessRuntime::with_timeouts(resolver, paths, short_timeouts());
 
@@ -513,9 +529,8 @@ async fn cancelling_stop_until_retains_child_for_explicit_force_stop() {
 
 #[tokio::test]
 async fn request_graceful_stop_times_out_the_stop_command() {
-  let temp = tempfile::tempdir().unwrap();
-  let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::SlowStop);
+  let temp = tempdir("runtime-slow-stop-");
+  let fake_caddy = install_test_process(temp.path(), FakeRuntimeMode::SlowStop.as_str());
   let image = RealCaddyResolver::for_test_fixture(fake_caddy)
     .verify_for_spawn()
     .await
@@ -535,9 +550,9 @@ async fn request_graceful_stop_times_out_the_stop_command() {
 
 #[tokio::test]
 async fn request_graceful_stop_reports_failed_stop_status() {
-  let temp = tempfile::tempdir().unwrap();
+  let temp = tempdir("runtime-fail-stop-");
   let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeRuntimeMode::FailStop);
+  let fake_caddy = install_test_process(temp.path(), FakeRuntimeMode::FailStop.as_str());
   let image = RealCaddyResolver::for_test_fixture(fake_caddy)
     .verify_for_spawn()
     .await
@@ -614,155 +629,4 @@ fn has_runtime_config_candidate(runtime_dir: &Path) -> bool {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with(".effective-caddy.") && name.ends_with(".tmp"))
     })
-}
-
-fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeRuntimeMode) -> PathBuf {
-  let stop_file = dir.join("fake-caddy.stop");
-  let run_exit_file = dir.join("fake-caddy.exit");
-  let config_read_file = dir.join("fake-caddy.config-read");
-  let first_reload_file = dir.join("fake-caddy.first-reload");
-
-  #[cfg(windows)]
-  {
-    let path = dir.join("fake-caddy.cmd");
-    let reload_behavior = if matches!(mode, FakeRuntimeMode::FailReload) {
-      "if not exist \"{first_reload_file}\" (\r\n    echo ready> \"{first_reload_file}\"\r\n    exit /b 0\r\n  )\r\n  echo reload failed 1>&2\r\n  exit /b 7"
-    } else if matches!(mode, FakeRuntimeMode::DelayedConfigRead) {
-      "\"%SystemRoot%\\System32\\ping.exe\" -n 3 127.0.0.1 >nul\r\n  if not exist \"{config_read_file}\" exit /b 7\r\n  exit /b 0"
-    } else if matches!(mode, FakeRuntimeMode::NeverReady) {
-      "echo runtime not ready 1>&2\r\n  exit /b 7"
-    } else {
-      "exit /b 0"
-    };
-    let stop_behavior = if matches!(mode, FakeRuntimeMode::SlowStop) {
-      "\"%SystemRoot%\\System32\\ping.exe\" -n 8 127.0.0.1 >nul\r\n  echo stop> \"{stop_file}\"\r\n  exit /b 0"
-    } else if matches!(mode, FakeRuntimeMode::FailStop) {
-      "echo stop> \"{stop_file}\"\r\n  exit /b 7"
-    } else {
-      "echo stop> \"{stop_file}\"\r\n  exit /b 0"
-    };
-    let run_behavior = if matches!(mode, FakeRuntimeMode::FailRun) {
-      "echo run failed 1>&2\r\n  exit /b 7"
-    } else if matches!(mode, FakeRuntimeMode::ShortRun) {
-      ":short_run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  if exist \"{run_exit_file}\" goto short_run_exit\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto short_run_loop\r\n  :short_run_exit\r\n  del /q \"{run_exit_file}\"\r\n  echo run-exited>> \"{command_log}\"\r\n  exit /b 0"
-    } else if matches!(mode, FakeRuntimeMode::DelayedConfigRead) {
-      "\"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  if not exist \"%3\" (\r\n    echo config missing 1>&2\r\n    exit /b 9\r\n  )\r\n  echo config-read>> \"{command_log}\"\r\n  echo ready> \"{config_read_file}\"\r\n  :run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto run_loop"
-    } else {
-      ":run_loop\r\n  if exist \"{stop_file}\" exit /b 0\r\n  \"%SystemRoot%\\System32\\ping.exe\" -n 2 127.0.0.1 >nul\r\n  goto run_loop"
-    };
-    std_fs::write(
-      &path,
-      format!(
-        r#"@echo off
-echo %*>> "{command_log}"
-if "%1"=="reload" (
-{reload_behavior}
-)
-if "%1"=="stop" (
-{stop_behavior}
-)
-if "%1"=="run" (
-echo fake runtime started
-{run_behavior}
-)
-exit /b 0
-"#,
-        command_log = command_log.display(),
-        reload_behavior = reload_behavior
-          .replace(
-            "{first_reload_file}",
-            &first_reload_file.display().to_string()
-          )
-          .replace(
-            "{config_read_file}",
-            &config_read_file.display().to_string()
-          ),
-        stop_behavior = stop_behavior.replace("{stop_file}", &stop_file.display().to_string()),
-        run_behavior = run_behavior
-          .replace("{stop_file}", &stop_file.display().to_string())
-          .replace("{run_exit_file}", &run_exit_file.display().to_string())
-          .replace(
-            "{config_read_file}",
-            &config_read_file.display().to_string()
-          )
-          .replace("{command_log}", &command_log.display().to_string()),
-      ),
-    )
-    .unwrap();
-    path
-  }
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-caddy");
-    let reload_behavior = if matches!(mode, FakeRuntimeMode::FailReload) {
-      "if [ ! -f '{first_reload_file}' ]; then : > '{first_reload_file}'; exit 0; fi\n  printf '%s\n' 'reload failed' >&2\n  exit 7"
-    } else if matches!(mode, FakeRuntimeMode::DelayedConfigRead) {
-      "/bin/sleep 0.5\n  [ -f '{config_read_file}' ] || exit 7\n  exit 0"
-    } else if matches!(mode, FakeRuntimeMode::NeverReady) {
-      "printf '%s\n' 'runtime not ready' >&2\n  exit 7"
-    } else {
-      "exit 0"
-    };
-    let stop_behavior = if matches!(mode, FakeRuntimeMode::SlowStop) {
-      "sleep 6\n  : > '{stop_file}'\n  exit 0"
-    } else if matches!(mode, FakeRuntimeMode::FailStop) {
-      ": > '{stop_file}'\n  exit 7"
-    } else {
-      ": > '{stop_file}'\n  exit 0"
-    };
-    let run_behavior = if matches!(mode, FakeRuntimeMode::FailRun) {
-      "printf '%s\n' 'run failed' >&2\n  exit 7"
-    } else if matches!(mode, FakeRuntimeMode::ShortRun) {
-      "while [ ! -f '{run_exit_file}' ] && [ ! -f '{stop_file}' ]; do /bin/sleep 0.02; done\n  if [ -f '{run_exit_file}' ]; then /bin/rm -f '{run_exit_file}'; printf '%s\n' 'run-exited' >> '{command_log}'; fi\n  exit 0"
-    } else if matches!(mode, FakeRuntimeMode::DelayedConfigRead) {
-      "/bin/sleep 0.35\n  [ -f \"$3\" ] || { printf '%s\n' 'config missing' >&2; exit 9; }\n  printf '%s\n' 'config-read' >> '{command_log}'\n  : > '{config_read_file}'\n  while [ ! -f '{stop_file}' ]; do /bin/sleep 0.2; done\n  exit 0"
-    } else {
-      "while [ ! -f '{stop_file}' ]; do /bin/sleep 0.2; done\n  exit 0"
-    };
-    std_fs::write(
-      &path,
-      format!(
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> '{command_log}'
-if [ "$1" = "reload" ]; then
-{reload_behavior}
-fi
-if [ "$1" = "stop" ]; then
-{stop_behavior}
-fi
-if [ "$1" = "run" ]; then
-echo fake runtime started
-{run_behavior}
-fi
-exit 0
-        "#,
-        command_log = command_log.display(),
-        reload_behavior = reload_behavior
-          .replace(
-            "{first_reload_file}",
-            &first_reload_file.display().to_string()
-          )
-          .replace(
-            "{config_read_file}",
-            &config_read_file.display().to_string()
-          ),
-        stop_behavior = stop_behavior.replace("{stop_file}", &stop_file.display().to_string()),
-        run_behavior = run_behavior
-          .replace("{stop_file}", &stop_file.display().to_string())
-          .replace("{run_exit_file}", &run_exit_file.display().to_string())
-          .replace(
-            "{config_read_file}",
-            &config_read_file.display().to_string()
-          )
-          .replace("{command_log}", &command_log.display().to_string()),
-      ),
-    )
-    .unwrap();
-    let mut permissions = std_fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std_fs::set_permissions(&path, permissions).unwrap();
-    path
-  }
 }
