@@ -4,14 +4,14 @@ use cadder_daemon::{
   ensure_daemon_running_with_options, run_daemon,
 };
 use clap::Parser;
-use std::{env, path::PathBuf};
+use std::{env, io, path::PathBuf};
 use tokio::sync::watch;
 
 #[derive(Debug, Parser)]
 #[command(
   name = "cadderd",
   version,
-  about = "Cadder portable Caddy coordinator daemon",
+  about = env!("CARGO_PKG_DESCRIPTION"),
   long_about = "Runs the portable Cadder daemon that owns local IPC, project registrations, generated Caddy config, the Cadder-owned real Caddy process, diagnostics, and bounded logs."
 )]
 struct Args {
@@ -49,8 +49,7 @@ async fn main() -> Result<()> {
   let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
   tokio::spawn(async move {
-    let _ = tokio::signal::ctrl_c().await;
-    let _ = shutdown_tx.send(true);
+    request_shutdown_after_ctrl_c(tokio::signal::ctrl_c().await, &shutdown_tx);
   });
 
   run_daemon(
@@ -62,6 +61,12 @@ async fn main() -> Result<()> {
     shutdown_rx,
   )
   .await
+}
+
+fn request_shutdown_after_ctrl_c(ctrl_c_result: io::Result<()>, shutdown_tx: &watch::Sender<bool>) {
+  if ctrl_c_result.is_ok() {
+    let _ = shutdown_tx.send(true);
+  }
 }
 
 async fn launch_background_daemon(args: Args) -> Result<()> {

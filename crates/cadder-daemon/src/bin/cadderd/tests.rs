@@ -59,3 +59,21 @@ fn runtime_selection_options_are_rejected() {
 
   assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
+
+#[test]
+fn ctrl_c_registration_failure_keeps_detached_daemon_running() {
+  let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+  request_shutdown_after_ctrl_c(Err(io::Error::other("no console")), &shutdown_tx);
+
+  assert!(!*shutdown_rx.borrow());
+}
+
+#[test]
+fn ctrl_c_signal_requests_daemon_shutdown() {
+  let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+  request_shutdown_after_ctrl_c(Ok(()), &shutdown_tx);
+
+  assert!(*shutdown_rx.borrow());
+}
