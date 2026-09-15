@@ -47,12 +47,13 @@ async fn main() -> Result<()> {
   }
 
   let (shutdown_tx, shutdown_rx) = watch::channel(false);
+  let signal_shutdown_tx = shutdown_tx.clone();
 
   tokio::spawn(async move {
-    request_shutdown_after_ctrl_c(tokio::signal::ctrl_c().await, &shutdown_tx);
+    request_shutdown_after_ctrl_c(tokio::signal::ctrl_c().await, &signal_shutdown_tx);
   });
 
-  run_daemon(
+  let result = run_daemon(
     DaemonOptions {
       runtime_dir: None,
       real_caddy_override: args.real_caddy_override,
@@ -60,7 +61,9 @@ async fn main() -> Result<()> {
     },
     shutdown_rx,
   )
-  .await
+  .await;
+  drop(shutdown_tx);
+  result
 }
 
 fn request_shutdown_after_ctrl_c(ctrl_c_result: io::Result<()>, shutdown_tx: &watch::Sender<bool>) {

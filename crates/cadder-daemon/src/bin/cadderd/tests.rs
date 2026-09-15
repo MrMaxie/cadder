@@ -60,13 +60,22 @@ fn runtime_selection_options_are_rejected() {
   assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
-#[test]
-fn ctrl_c_registration_failure_keeps_detached_daemon_running() {
-  let (shutdown_tx, shutdown_rx) = watch::channel(false);
+#[tokio::test]
+async fn ctrl_c_registration_failure_keeps_detached_daemon_running() {
+  let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+  let signal_shutdown_tx = shutdown_tx.clone();
 
-  request_shutdown_after_ctrl_c(Err(io::Error::other("no console")), &shutdown_tx);
+  request_shutdown_after_ctrl_c(Err(io::Error::other("no console")), &signal_shutdown_tx);
+  drop(signal_shutdown_tx);
 
   assert!(!*shutdown_rx.borrow());
+  assert!(
+    tokio::time::timeout(std::time::Duration::from_millis(10), shutdown_rx.changed())
+      .await
+      .is_err(),
+    "a ctrl-c registration failure must not close the daemon shutdown channel"
+  );
+  drop(shutdown_tx);
 }
 
 #[test]
