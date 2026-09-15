@@ -26,8 +26,8 @@ use windows_sys::Win32::{
 };
 
 use super::{
-  FORCE_REVERT_FAILURE_MARKER, current_process_sid, is_canonical_sid, open_thread_token,
-  peer_sid_after_preface, receive_authentication_preface,
+  FORCE_REVERT_FAILURE_MARKER, create_owner_only_runtime_directory, current_process_sid,
+  is_canonical_sid, open_thread_token, peer_sid_after_preface, receive_authentication_preface,
   receive_authentication_preface_with_timeout, secure_listener_options,
   secure_owner_only_runtime_directory, send_authentication_preface, sid_to_string,
   validate_owner_sid, wide_path, with_impersonated_peer,
@@ -52,6 +52,16 @@ fn windows_runtime_security_rejects_a_different_owner_sid() {
   let error = validate_owner_sid("S-1-5-21-1", "S-1-5-21-2").unwrap_err();
 
   assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn windows_runtime_security_creates_a_directory_owned_by_the_current_user() {
+  let temp = tempfile::tempdir().unwrap();
+  let path = temp.path().join("runtime");
+
+  create_owner_only_runtime_directory(&path).unwrap();
+
+  secure_owner_only_runtime_directory(&path).unwrap();
 }
 
 #[test]

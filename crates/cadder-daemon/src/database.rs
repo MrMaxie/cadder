@@ -27,7 +27,11 @@ fn secure_owner_only_directory(path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn secure_owner_only_directory(path: &Path) -> Result<()> {
-  fs::create_dir_all(path)?;
+  match crate::ipc_windows_security::create_owner_only_runtime_directory(path) {
+    Ok(()) => {}
+    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+    Err(error) => return Err(error.into()),
+  }
   crate::ipc_windows_security::secure_owner_only_runtime_directory(path)?;
   Ok(())
 }

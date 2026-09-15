@@ -39,11 +39,11 @@ use windows_sys::{
       SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-      BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
-      FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-      FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-      GetFileInformationByHandle, GetFullPathNameW, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-      OPEN_EXISTING, READ_CONTROL, ReplaceFileW, WRITE_DAC,
+      BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
+      FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+      FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+      FILE_SHARE_WRITE, GetFileInformationByHandle, GetFullPathNameW, MOVEFILE_WRITE_THROUGH,
+      MoveFileExW, OPEN_EXISTING, READ_CONTROL, ReplaceFileW, WRITE_DAC,
     },
     System::{
       Pipes::ImpersonateNamedPipeClient,
@@ -190,6 +190,25 @@ pub(crate) fn create_owner_only_runtime_file(path: &Path) -> io::Result<File> {
   }
   // SAFETY: `CreateFileW` returned a fresh owned file handle and `File` closes it exactly once.
   Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// Creates a new runtime directory with the current user as owner and a protected owner-only
+/// DACL. Applying the descriptor during creation avoids inheriting a different default owner from
+/// the process token or parent directory.
+pub(crate) fn create_owner_only_runtime_directory(path: &Path) -> io::Result<()> {
+  let descriptor = owner_only_security_descriptor()?;
+  let security_attributes = SECURITY_ATTRIBUTES {
+    nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+    lpSecurityDescriptor: descriptor.as_ptr(),
+    bInheritHandle: 0,
+  };
+  let path = wide_path(path)?;
+  // SAFETY: `path` is NUL-terminated, and `security_attributes` and its descriptor remain live
+  // for the call. `CreateDirectoryW` fails instead of replacing an existing path.
+  if unsafe { CreateDirectoryW(path.as_ptr(), &security_attributes) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
 }
 
 /// Rejects reparse points and non-files before applying the owner-only DACL.
