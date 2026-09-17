@@ -24,6 +24,11 @@ Run `npx cadder` for one-off operator access or install `cadder` globally to pla
 
 Use focused terminal commands to inspect projects, domains, Caddyfiles, upstream ports, daemon state, diagnostics, and bounded redacted logs. Cadder can also stop a known local port owner after the process identity is explicitly supplied and revalidated. The TUI remains the overview for interactive work.
 
+<!-- openspec: add-tui-start-daemon -->
+#### Start Cadder when opening the TUI
+
+Run `cadder tui --start-daemon` to start or attach to the Cadder daemon in the background and open the interactive operator without an additional key press. Plain `cadder tui` keeps its existing read-first behavior.
+
 <!-- openspec: align-v1-to-core-tui -->
 #### Run project Caddyfiles together
 

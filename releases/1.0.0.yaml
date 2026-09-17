@@ -3,6 +3,7 @@ date: 2026-09-15
 changes:
   - add-npm-distribution
   - add-operator-inspection-cli
+  - add-tui-start-daemon
   - adopt-arcantry-project-workflow
   - align-v1-to-core-tui
   - clarify-shutdown-fail-stop-containment
