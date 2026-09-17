@@ -3,7 +3,7 @@
 - [x] 1.1 `[DIST-004]` Add the archived npm distribution outcome to the untagged 1.0.0 manifest, render the changelog, and verify release consistency without creating a tag. (verification: Arcantry release check passes and no tag exists)
 - [x] 1.2 `[DIST-001] [DIST-002] [QT-003]` Run the complete repository, coverage, cargo-dist planning, and local artifact gates on one source revision, then review the full release diff. (verification: every local gate passes on the same Git revision)
 - [x] 1.3 `[QT-004]` After explicit authorization, commit the reviewed release candidate without unrelated local files. (verification: the staged diff contains only the approved release candidate)
-- [ ] 1.4 `[QT-004]` After separate authorization, push the candidate and open or update its pull request without publishing a release. (verification: the remote pull request points to the approved candidate commit and no release exists)
+- [x] 1.4 `[QT-004]` After separate authorization, push the candidate and open or update its pull request without publishing a release. (verification: the remote pull request points to the approved candidate commit and no release exists)
 - [ ] 1.5 `[DIST-002] [QT-004]` Wait for every pull-request gate and candidate artifact, then verify the exact Windows archive outside the checkout. (verification: all pull-request checks pass and the downloaded archive passes isolated smoke verification)
 
 ## 2. Seal master and publish GitHub assets
