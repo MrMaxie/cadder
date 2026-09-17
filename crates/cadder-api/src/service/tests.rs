@@ -241,7 +241,8 @@ async fn connected_and_unavailable_statuses_include_operator_context() {
   assert_eq!(status.connection_state, ConnectionStateView::NotRunning);
   assert!(status.message.contains("is not running"));
   assert!(status.guidance.as_deref().is_some_and(|guidance| {
-    guidance == "Run `cadder tui` and press Enter to start cadderd, then retry."
+    guidance
+      == "Run `cadder tui --start-daemon` to start cadderd and open the operator, then retry."
   }));
 
   let failed = IpcClientError::Daemon(ProtocolError::new(

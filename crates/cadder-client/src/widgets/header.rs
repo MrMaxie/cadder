@@ -29,19 +29,17 @@ impl Widget for HeaderBar {
     buf.set_style(area, THEME.header());
 
     let status = Line::from(vec![
-      Span::styled("cadderd", THEME.status_name()),
-      Span::raw(" "),
       Span::styled(
-        self.runtime_status.daemon_label(),
+        status_marker(self.runtime_status.daemon_is_running()),
         status_state(self.runtime_status.daemon_is_running()),
       ),
-      Span::styled(" | ", THEME.status_separator()),
-      Span::styled("Caddy", THEME.status_name()),
-      Span::raw(" "),
+      Span::styled(" cadderd", THEME.status_name()),
+      Span::styled(" · ", THEME.status_separator()),
       Span::styled(
-        self.runtime_status.caddy_label(),
+        status_marker(self.runtime_status.caddy_is_running()),
         status_state(self.runtime_status.caddy_is_running()),
       ),
+      Span::styled(" Caddy", THEME.status_name()),
       Span::raw(" "),
     ]);
     let status_width = u16::try_from(status.width()).unwrap_or(u16::MAX);
@@ -63,6 +61,10 @@ impl Widget for HeaderBar {
         .render(Rect::new(status_x, area.y, status_width, 1), buf);
     }
   }
+}
+
+const fn status_marker(running: bool) -> &'static str {
+  if running { "●" } else { "○" }
 }
 
 fn status_state(running: bool) -> ratatui::style::Style {

@@ -6,16 +6,16 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::widgets::theme::THEME;
 
 pub const MAIN_SHORTCUTS: [Shortcut; 6] = [
-  Shortcut::new("Up/Down", "select"),
-  Shortcut::new("Space/Enter", "enable/disable"),
+  Shortcut::new("↑ ↓", "select"),
+  Shortcut::new("enter", "enable/disable"),
   Shortcut::new("r", "refresh"),
   Shortcut::new("x", "stop"),
-  Shortcut::new("R", "restart"),
+  Shortcut::new("shift+r", "restart"),
   Shortcut::new("q", "quit"),
 ];
 
 pub const OFFLINE_SHORTCUTS: [Shortcut; 3] = [
-  Shortcut::new("Enter", "start cadderd"),
+  Shortcut::new("enter", "start cadderd"),
   Shortcut::new("r", "retry"),
   Shortcut::new("q", "quit"),
 ];
@@ -23,8 +23,8 @@ pub const OFFLINE_SHORTCUTS: [Shortcut; 3] = [
 pub const PENDING_SHORTCUTS: [Shortcut; 1] = [Shortcut::new("q", "quit")];
 
 pub const CONFIRMATION_SHORTCUTS: [Shortcut; 3] = [
-  Shortcut::new("Enter", "confirm"),
-  Shortcut::new("Esc", "cancel"),
+  Shortcut::new("enter", "confirm"),
+  Shortcut::new("esc", "cancel"),
   Shortcut::new("q", "quit"),
 ];
 
@@ -52,19 +52,17 @@ impl<'a> ShortcutsBar<'a> {
 
 impl Widget for ShortcutsBar<'_> {
   fn render(self, area: Rect, buf: &mut Buffer) {
-    let shortcut_spans = self
-      .shortcuts
-      .iter()
-      .flat_map(|shortcut| {
-        [
-          Span::styled(shortcut.key, THEME.shortcut_key()),
-          Span::styled(
-            format!(" {}  ", shortcut.description),
-            THEME.shortcut_description(),
-          ),
-        ]
-      })
-      .collect::<Vec<_>>();
+    let mut shortcut_spans = Vec::with_capacity(self.shortcuts.len().saturating_mul(3));
+    for (index, shortcut) in self.shortcuts.iter().enumerate() {
+      if index > 0 {
+        shortcut_spans.push(Span::styled(" · ", THEME.shortcut_separator()));
+      }
+      shortcut_spans.push(Span::styled(shortcut.key, THEME.shortcut_key()));
+      shortcut_spans.push(Span::styled(
+        format!(" {}", shortcut.description),
+        THEME.shortcut_description(),
+      ));
+    }
     Paragraph::new(Line::from(shortcut_spans))
       .style(THEME.footer())
       .render(area, buf);

@@ -26,19 +26,17 @@ fn runtime_status_reports_daemon_and_caddy_independently() {
     connection: ConnectionStatus::Connected,
     caddy_status: ProtocolRuntimeStatus::Running,
   };
-  assert_eq!(running.daemon_label(), "running");
-  assert_eq!(running.caddy_label(), "running");
   assert!(running.daemon_is_running());
   assert!(running.caddy_is_running());
+  assert!(!running.daemon_is_offline());
 
   let offline = RuntimeStatus {
     connection: ConnectionStatus::Offline,
     caddy_status: ProtocolRuntimeStatus::Unknown,
   };
-  assert_eq!(offline.daemon_label(), "not running");
-  assert_eq!(offline.caddy_label(), "not running");
   assert!(!offline.daemon_is_running());
   assert!(!offline.caddy_is_running());
+  assert!(offline.daemon_is_offline());
 }
 
 #[test]
@@ -47,16 +45,36 @@ fn offline_state_exposes_start_without_a_separate_status_view() {
   app.apply_refresh(RefreshOutcome::Unavailable {
     connection: ConnectionStatus::Offline,
     message: "Cadder is not running.".to_string(),
-    guidance: Some("Press Enter to start it.".to_string()),
+    guidance: Some("Run `cadder tui --start-daemon`.".to_string()),
   });
 
   assert!(app.can_start_daemon());
-  assert_eq!(
-    app.notice().as_deref(),
-    Some("Cadder is not running.  Press Enter to start it.")
-  );
+  assert!(app.notice().is_none());
   assert!(app.prepare_start_daemon());
   assert!(app.is_pending());
+}
+
+#[test]
+fn daemon_start_animates_without_repeating_failures_above_shortcuts() {
+  let mut app = App::new();
+  app.apply_refresh(RefreshOutcome::Unavailable {
+    connection: ConnectionStatus::Offline,
+    message: "Cadder is not running.".to_string(),
+    guidance: None,
+  });
+
+  assert!(app.prepare_start_daemon());
+  assert_eq!(app.pending_marker(), Some("⠋"));
+  assert_eq!(app.notice().as_deref(), Some("Starting cadderd..."));
+  app.advance_pending_animation();
+  assert_eq!(app.pending_marker(), Some("⠙"));
+
+  assert!(!app.complete_daemon_start(Err(ActionFailure {
+    message: "Could not start cadderd.".to_string(),
+    guidance: Some("Check the daemon status, then retry.".to_string()),
+  })));
+  assert!(app.pending_marker().is_none());
+  assert_eq!(app.notice().as_deref(), Some("Could not start cadderd."));
 }
 
 #[test]

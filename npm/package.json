@@ -1,0 +1,63 @@
+{
+  "name": "cadder",
+  "version": "1.0.0",
+  "description": "Portable launcher for the Cadder Caddy coordinator.",
+  "keywords": [
+    "caddy",
+    "reverse-proxy",
+    "local-development",
+    "tui"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrMaxie/cadder.git"
+  },
+  "homepage": "https://maxie.dev/cadder/",
+  "bugs": {
+    "url": "https://github.com/MrMaxie/cadder/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "packageManager": "nub@0.7.5",
+  "workspaces": [
+    "packages/*"
+  ],
+  "bin": {
+    "cadder": "bin/cadder.js",
+    "cadderd": "bin/cadderd.js",
+    "caddy": "bin/caddy.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "cadder.toml.example"
+  ],
+  "scripts": {
+    "check": "node --test test/*.test.js && node scripts/check-manifests.js && node scripts/check-workflow.js",
+    "test": "node --test test/*.test.js",
+    "package:check": "node scripts/check-manifests.js",
+    "package:assemble": "node scripts/assemble-release.js",
+    "package:pack": "node scripts/pack-release.js",
+    "bootstrap:prepare": "node scripts/prepare-bootstrap.js",
+    "bootstrap:pack": "node scripts/pack-bootstrap.js"
+  },
+  "optionalDependencies": {
+    "@maxiedev/cadder-darwin-arm64": "1.0.0",
+    "@maxiedev/cadder-darwin-x64": "1.0.0",
+    "@maxiedev/cadder-linux-x64-gnu": "1.0.0",
+    "@maxiedev/cadder-win32-x64": "1.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "devDependencies": {
+    "yaml": "2.8.3"
+  }
+}

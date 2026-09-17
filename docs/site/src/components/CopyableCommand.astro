@@ -1,0 +1,112 @@
+---
+import { Code } from 'astro-expressive-code/components';
+
+interface Props {
+  command: string;
+  label: string;
+}
+
+const { command, label } = Astro.props;
+---
+
+<div class="copyable-command not-content" aria-label={label}>
+  <Code code={command} lang="sh" meta="frame=none" class="cadder-command-code" />
+  <button class="cadder-copy-button" type="button" data-copy-command={command}>Copy</button>
+</div>
+
+<style>
+  .copyable-command {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    width: 100%;
+    border: 1px solid var(--cadder-line);
+    border-radius: 0.2rem;
+    background: var(--cadder-surface);
+  }
+
+  .copyable-command :global(.cadder-command-code) {
+    min-width: 0;
+  }
+
+  .copyable-command :global(.cadder-command-code figure) {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .copyable-command :global(.cadder-command-code pre) {
+    margin: 0;
+    overflow-x: auto;
+    padding: 0.85rem 1rem;
+    border: 0;
+    background: transparent;
+  }
+
+  .copyable-command :global(.cadder-command-code code) {
+    font-size: 0.82rem;
+    white-space: nowrap;
+  }
+
+  .copyable-command :global(.cadder-command-code .ec-line .code::before) {
+    color: var(--cadder-accent);
+    content: '$ ';
+  }
+
+  .copyable-command :global(.cadder-command-code .copy) {
+    display: none;
+  }
+
+  @media (max-width: 27.5rem) {
+    .copyable-command {
+      grid-template-columns: 1fr;
+    }
+
+    .copyable-command :global(.cadder-command-code pre) {
+      padding-inline: 0.75rem;
+    }
+
+    .copyable-command :global(.cadder-command-code code) {
+      font-size: 0.72rem;
+    }
+
+    .cadder-copy-button {
+      justify-self: end;
+    }
+  }
+</style>
+
+<script>
+  async function copyCode(button: HTMLButtonElement): Promise<void> {
+    const sourceId = button.dataset.copyTarget;
+    const source = sourceId ? document.getElementById(sourceId) : null;
+    const command = button.dataset.copyCommand ?? source?.textContent;
+    if (!command) return;
+
+    try {
+      await navigator.clipboard.writeText(command);
+    } catch {
+      return;
+    }
+
+    button.textContent = 'Copied';
+    button.dataset.copied = 'true';
+
+    window.setTimeout(() => {
+      button.textContent = 'Copy';
+      delete button.dataset.copied;
+    }, 1600);
+  }
+
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+
+    const button = target.closest<HTMLButtonElement>('[data-copy-command], [data-copy-target]');
+    if (!button || button.dataset.copied === 'true') return;
+
+    void copyCode(button);
+  });
+</script>

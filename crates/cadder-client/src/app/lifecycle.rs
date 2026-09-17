@@ -2,10 +2,15 @@ use crate::data::MutationTarget;
 
 use super::*;
 
+const PENDING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 impl App {
   pub fn apply_refresh(&mut self, outcome: RefreshOutcome) {
     match outcome {
       RefreshOutcome::Connected { snapshot } => {
+        if self.last_start_failed {
+          self.notice = None;
+        }
         self.last_start_failed = false;
         self.runtime_status = RuntimeStatus {
           connection: ConnectionStatus::Connected,
@@ -45,7 +50,7 @@ impl App {
       return false;
     }
     self.last_start_failed = false;
-    self.begin_action("Starting Cadder...");
+    self.begin_action("Starting cadderd...");
     true
   }
 
@@ -82,13 +87,28 @@ impl App {
     self.pending_message.is_some()
   }
 
+  pub fn pending_marker(&self) -> Option<&'static str> {
+    self
+      .pending_message
+      .map(|_| PENDING_FRAMES[self.pending_frame % PENDING_FRAMES.len()])
+  }
+
+  pub fn advance_pending_animation(&mut self) {
+    if self.is_pending() {
+      self.pending_frame = (self.pending_frame + 1) % PENDING_FRAMES.len();
+    }
+  }
+
   pub fn complete_daemon_start(&mut self, result: Result<(), ActionFailure>) -> bool {
     if let Err(error) = &result {
       self.last_start_failed = true;
       self.connection_message.clone_from(&error.message);
       self.connection_guidance.clone_from(&error.guidance);
     }
-    self.finish_action(result)
+    self.finish_action(result.map_err(|_| ActionFailure {
+      message: "Could not start cadderd.".to_string(),
+      guidance: None,
+    }))
   }
 
   pub fn complete_lifecycle(&mut self, result: Result<(), ActionFailure>) -> bool {
@@ -108,6 +128,9 @@ impl App {
     }
     if let Some(notice) = &self.notice {
       return Some(notice.clone());
+    }
+    if self.runtime_status.connection == ConnectionStatus::Offline {
+      return None;
     }
     if self.runtime_status.connection != ConnectionStatus::Connected {
       return Some(self.connection_guidance.as_deref().map_or_else(
@@ -131,6 +154,7 @@ impl App {
   fn begin_action(&mut self, message: &'static str) {
     self.notice = None;
     self.pending_message = Some(message);
+    self.pending_frame = 0;
   }
 
   fn finish_action(&mut self, result: Result<(), ActionFailure>) -> bool {

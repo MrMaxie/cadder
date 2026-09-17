@@ -1,0 +1,157 @@
+name: npm distribution
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag to verify
+        required: true
+        type: string
+      stage:
+        description: Stage the verified packages for maintainer approval
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-${{ github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare verified npm tarballs
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+      - name: Install Nub CLI
+        run: npm install --global @nubjs/nub@0.7.5
+      - name: Pin npm CLI
+        run: npm install --global npm@12.0.2 --ignore-scripts
+      - name: Verify toolchain
+        run: |
+          test "$(node --version)" = "v24.18.0"
+          nub --version | grep -Fx "v0.7.5"
+          test "$(npm --version)" = "12.0.2"
+      - name: Validate release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Invalid Cadder release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+      - name: Install package workspace
+        working-directory: npm
+        run: nub ci
+      - name: Check package sources and workflow
+        working-directory: npm
+        run: nub run check
+      - name: Download exact GitHub Release assets
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/cadder-assets"
+      - name: Assemble packages from attested release archives
+        run: >-
+          node npm/scripts/assemble-release.js
+          --assets "$RUNNER_TEMP/cadder-assets"
+          --output "$RUNNER_TEMP/cadder-npm-stage"
+          --version "${{ steps.release.outputs.version }}"
+      - name: Pack deterministic npm tarballs
+        run: >-
+          node npm/scripts/pack-release.js
+          --stage "$RUNNER_TEMP/cadder-npm-stage"
+          --output "$RUNNER_TEMP/cadder-npm-tarballs"
+      - name: Upload verified npm tarballs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cadder-npm-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/cadder-npm-tarballs
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-native:
+    name: Verify npm consumer (${{ matrix.target }})
+    needs: prepare
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win32-x64
+            runner: windows-2022
+          - target: linux-x64-gnu
+            runner: ubuntu-22.04
+          - target: darwin-x64
+            runner: macos-15-intel
+          - target: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+      - name: Pin npm CLI
+        run: npm install --global npm@12.0.2 --ignore-scripts
+      - name: Download npm tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7.0.0
+        with:
+          name: cadder-npm-${{ needs.prepare.outputs.version }}
+          path: ${{ runner.temp }}/cadder-npm-tarballs
+      - name: Verify isolated native installation
+        run: node npm/scripts/verify-consumer.js --tarballs "${{ runner.temp }}/cadder-npm-tarballs"
+
+  stage:
+    name: Stage npm packages for 2FA approval
+    needs: [prepare, verify-native]
+    if: github.event_name == 'release' || inputs.stage == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: npm-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.18.0
+      - name: Pin npm CLI
+        run: npm install --global npm@12.0.2 --ignore-scripts
+      - name: Download verified npm tarballs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7.0.0
+        with:
+          name: cadder-npm-${{ needs.prepare.outputs.version }}
+          path: ${{ runner.temp }}/cadder-npm-tarballs
+      - name: Stage platform packages and root package
+        run: node npm/scripts/stage-release.js --tarballs "${{ runner.temp }}/cadder-npm-tarballs"
+      - name: Show approval command
+        run: |
+          echo 'Review the five entries in npm Staged Packages.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Approve the four @maxiedev platform packages before approving cadder.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'CLI alternative: npm stage approve <stage-id>' >> "$GITHUB_STEP_SUMMARY"

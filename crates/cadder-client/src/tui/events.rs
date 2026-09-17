@@ -36,7 +36,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> Option<U
     KeyCode::Up => app.select_previous(),
     KeyCode::Down => app.select_next(),
     KeyCode::Enter if app.prepare_start_daemon() => return Some(UiAction::StartDaemon),
-    KeyCode::Enter | KeyCode::Char(' ') => {
+    KeyCode::Enter => {
       return app.prepare_toggle_current().map(UiAction::Mutate);
     }
     KeyCode::Char('r') => return Some(UiAction::Refresh),
@@ -133,6 +133,8 @@ mod tests {
         storage: None,
       }),
     });
+    assert!(handle_key(KeyCode::Char(' '), KeyModifiers::NONE, &mut toggle).is_none());
+    assert!(!toggle.is_pending());
     assert!(matches!(
       handle_key(KeyCode::Enter, KeyModifiers::NONE, &mut toggle),
       Some(UiAction::Mutate(_))

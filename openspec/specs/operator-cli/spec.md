@@ -4,7 +4,7 @@
 Define the intentionally small command surface of the operator executable.
 ## Requirements
 ### Requirement: CLI-001: The operator exposes focused developer workflows
-`cadder` MUST support help, version, `tui`, daemon lifecycle and status, project listing and activation, domain listing and activation, port inspection and guarded process termination, Caddyfile inspection, explicit diagnostics, and bounded redacted log reads. It MUST reject profile, machine-output, history, export, continuous tail, watch, and autostart commands.
+`cadder` MUST support help, version, `tui`, daemon lifecycle and status, project listing and activation, domain listing and activation, port inspection and guarded process termination, Caddyfile inspection, explicit diagnostics, and bounded redacted log reads. The TUI command MUST support an explicit `--start-daemon` option that reuses the existing attach-first daemon launch contract before opening the operator. It MUST reject profile, machine-output, history, export, continuous tail, watch, and autostart commands.
 
 #### Scenario: Bare invocation
 - **WHEN** a user runs `cadder` without a subcommand
@@ -12,7 +12,12 @@ Define the intentionally small command surface of the operator executable.
 
 #### Scenario: TUI invocation
 - **WHEN** a user runs `cadder tui`
-- **THEN** Cadder opens the interactive operator
+- **THEN** Cadder opens the interactive operator without changing the existing daemon lifecycle
+
+#### Scenario: TUI invocation with daemon startup
+- **WHEN** a user runs `cadder tui --start-daemon`
+- **THEN** Cadder starts or attaches to `cadderd` through the existing bounded launch path
+- **AND** opens the interactive operator after the daemon is ready without requiring another interaction
 
 #### Scenario: General state inspection
 - **WHEN** a user runs `cadder status`, `cadder projects list`, or `cadder domains list`

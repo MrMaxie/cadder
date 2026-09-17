@@ -1,0 +1,45 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      yaml:
+        specifier: 2.8.3
+        version: 2.8.3
+    optionalDependencies:
+      '@maxiedev/cadder-darwin-arm64':
+        specifier: 1.0.0
+        version: link:packages/darwin-arm64
+      '@maxiedev/cadder-darwin-x64':
+        specifier: 1.0.0
+        version: link:packages/darwin-x64
+      '@maxiedev/cadder-linux-x64-gnu':
+        specifier: 1.0.0
+        version: link:packages/linux-x64-gnu
+      '@maxiedev/cadder-win32-x64':
+        specifier: 1.0.0
+        version: link:packages/win32-x64
+
+  packages/darwin-arm64: {}
+
+  packages/darwin-x64: {}
+
+  packages/linux-x64-gnu: {}
+
+  packages/win32-x64: {}
+
+packages:
+
+  yaml@2.8.3:
+    resolution: {integrity: sha512-AvbaCLOO2Otw/lW5bmh9d/WEdcDFdQp2Z2ZUH3pX9U2ihyUY0nvLv7J6TrWowklRGPYbB/IuIMfYgxaCPg5Bpg==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
+snapshots:
+
+  yaml@2.8.3: {}

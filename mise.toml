@@ -42,6 +42,14 @@ run = [
   "npm run build",
 ]
 
+[tasks.npm-check]
+description = "Validate the Node and Nub npm distribution workspace"
+dir = "npm"
+run = [
+  "nub ci",
+  "nub run check",
+]
+
 [tasks.coverage]
 description = "Enforce the 85 percent workspace line coverage gate"
 run = "cargo llvm-cov --workspace --all-features --lcov --output-path target/coverage-summary.lcov --fail-under-lines 85"
@@ -55,6 +63,7 @@ run = [
   "openspec doctor",
   "openspec validate --all --strict --no-interactive",
   { task = "docs-check" },
+  { task = "npm-check" },
   "dist generate --check",
   "dist plan",
 ]
@@ -66,8 +75,7 @@ run = "cargo run --package cadder --bin cadder -- tui"
 
 [tasks.tui-web]
 description = "Open the current TUI in ttyglass"
-env = { CADDER_CADDY_BACKEND = "mock" }
-run = "npx --yes --package ttyglass@1.0.1 -c \"ttyglass --open -- cargo run --quiet --package cadder --bin cadder -- tui\""
+run = "ttyglass -- mise run dev"
 
 [tasks.dist-plan]
 description = "Create a non-publishing cargo-dist release plan"

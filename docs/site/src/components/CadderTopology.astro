@@ -1,14 +1,13 @@
 ---
 import { Icon } from '@astrojs/starlight/components';
+import { siCaddy } from 'simple-icons';
+import cadderLogo from '../assets/logo.png';
 ---
 
-<figure class="cadder-map" aria-labelledby="cadder-map-caption">
+<figure class="cadder-map" aria-label="How Cadder coordinates project Caddyfiles through one Caddy process">
   <div class="map-grid">
-    <section class="project-stack" aria-label="Project routes">
-      <div class="map-section-title">
-        <Icon name="document" size="1rem" aria-hidden="true" />
-        <span>Project Caddyfiles</span>
-      </div>
+    <section class="project-stack" aria-label="Different projects and their Caddyfiles">
+      <p class="stage-description">Projects keep their own <strong class="cadder-key-term">Caddyfiles</strong>.</p>
 
       <article class="project-card">
         <div>
@@ -27,84 +26,80 @@ import { Icon } from '@astrojs/starlight/components';
       </article>
     </section>
 
-    <div class="map-connector" aria-hidden="true">
-      <span></span>
-      <Icon name="right-arrow" size="1rem" />
-    </div>
+    <div class="map-connector" aria-hidden="true"><span></span></div>
 
-    <section class="cadder-hub" aria-label="Cadder coordinates the project routes">
-      <div class="hub-heading">
-        <span class="hub-icon"><Icon name="code-branch" size="1.25rem" aria-hidden="true" /></span>
-        <div>
-          <span>Coordinator</span>
+    <section class="cadder-stage" aria-label="Cadder coordinates the project routes">
+      <p class="stage-description"><strong class="cadder-key-term">Cadder</strong> combines active routes into one synchronized configuration.</p>
+      <div class="system-card cadder-hub">
+        <div class="system-heading">
+          <span class="hub-icon"><img src={cadderLogo.src} alt="" /></span>
           <strong>Cadder</strong>
         </div>
+        <ul>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> combines active routes</li>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> rejects conflicts</li>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> tracks ownership</li>
+        </ul>
       </div>
-      <ul>
-        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> combines active routes</li>
-        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> rejects address conflicts</li>
-        <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> tracks project ownership</li>
-      </ul>
-      <span class="hub-status"><i></i> one shared runtime</span>
     </section>
 
-    <div class="map-connector" aria-hidden="true">
-      <span></span>
-      <Icon name="right-arrow" size="1rem" />
-    </div>
+    <div class="map-connector" aria-hidden="true"><span></span></div>
 
-    <section class="caddy-runtime" aria-label="One Caddy process serves the combined routes">
-      <div class="runtime-icon"><Icon name="server" size="1.2rem" aria-hidden="true" /></div>
-      <span>Web server and reverse proxy</span>
-      <strong>Caddy</strong>
-      <p>One process serves every active route.</p>
-      <code>running</code>
+    <section class="caddy-stage" aria-label="One Caddy process serves the combined routes">
+      <p class="stage-description"><strong class="cadder-key-term">Caddy</strong> serves the combined routes and forwards each request to the right app.</p>
+      <div class="system-card caddy-runtime">
+        <div class="system-heading">
+          <span class="runtime-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d={siCaddy.path}></path></svg>
+          </span>
+          <strong>Caddy</strong>
+        </div>
+        <ul>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> serves active routes</li>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> receives local requests</li>
+          <li><Icon name="approve-check-circle" size="0.9rem" aria-hidden="true" /> forwards requests to apps</li>
+        </ul>
+      </div>
     </section>
   </div>
-
-  <figcaption id="cadder-map-caption">
-    Projects keep their files. <strong>Cadder coordinates them.</strong> Caddy handles the requests.
-  </figcaption>
 </figure>
 
 <style>
   .cadder-map {
     margin: 0;
-    border: 1px solid var(--cadder-line);
-    border-radius: 0.5rem;
-    background:
-      linear-gradient(var(--cadder-line) 1px, transparent 1px),
-      linear-gradient(90deg, var(--cadder-line) 1px, transparent 1px),
-      var(--cadder-page);
-    background-size: 3rem 3rem;
-    overflow: hidden;
   }
 
   .map-grid {
     display: grid;
     grid-template-columns: minmax(12rem, 0.95fr) minmax(2rem, 0.2fr) minmax(16rem, 1.25fr) minmax(2rem, 0.2fr) minmax(11rem, 0.8fr);
     gap: 0.75rem;
-    align-items: center;
-    padding: clamp(1.25rem, 3vw, 2rem);
-    background: color-mix(in srgb, var(--cadder-page) 92%, transparent);
+    align-items: start;
+    padding-block: clamp(0.5rem, 2vw, 1rem);
   }
 
   .project-stack {
     display: grid;
-    gap: 0.65rem;
+    gap: 0.75rem;
   }
 
-  .map-section-title {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    margin-bottom: 0.2rem;
+  .project-stack,
+  .cadder-stage,
+  .caddy-stage {
+    align-content: start;
+  }
+
+  .cadder-stage,
+  .caddy-stage {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .stage-description {
+    min-height: 4rem;
+    margin: 0;
     color: var(--cadder-muted);
-    font-family: var(--sl-font-mono);
-    font-size: 0.65rem;
-    font-weight: 650;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-size: 0.74rem;
+    line-height: 1.5;
   }
 
   .project-card {
@@ -148,51 +143,64 @@ import { Icon } from '@astrojs/starlight/components';
   }
 
   .map-connector {
-    display: flex;
-    align-items: center;
-    color: var(--cadder-accent);
+    display: grid;
+    align-self: center;
+    min-width: 2rem;
+    place-items: center;
+    overflow: visible;
   }
 
   .map-connector span {
+    position: relative;
+    display: block;
+    width: 100%;
     height: 1px;
-    flex: 1;
     background: linear-gradient(90deg, var(--cadder-line), var(--cadder-accent));
   }
 
-  .cadder-hub {
+  .map-connector span::after {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 0.45rem;
+    height: 0.45rem;
+    border-top: 1px solid var(--cadder-accent);
+    border-right: 1px solid var(--cadder-accent);
+    content: '';
+    transform: translateY(-50%) rotate(45deg);
+    transform-origin: center;
+  }
+
+  .system-card {
     position: relative;
     display: grid;
     gap: 1rem;
+    align-content: start;
+    min-height: 11rem;
     padding: 1.2rem;
-    border: 1px solid var(--cadder-accent);
     border-radius: 0.4rem;
+  }
+
+  .cadder-hub {
+    border: 1px solid var(--cadder-accent);
     background: color-mix(in srgb, var(--cadder-accent-soft) 88%, var(--cadder-page));
     box-shadow:
       0 0 0 0.35rem color-mix(in srgb, var(--cadder-accent) 7%, transparent),
       0 1.2rem 3rem color-mix(in srgb, var(--cadder-page) 72%, transparent);
   }
 
-  .hub-heading {
+  .caddy-runtime {
+    border: 1px solid var(--cadder-line);
+    background: var(--cadder-surface);
+  }
+
+  .system-heading {
     display: flex;
     gap: 0.8rem;
     align-items: center;
   }
 
-  .hub-heading > div {
-    display: grid;
-  }
-
-  .hub-heading span:not(.hub-icon),
-  .caddy-runtime > span {
-    color: var(--cadder-muted);
-    font-family: var(--sl-font-mono);
-    font-size: 0.62rem;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  .hub-heading strong,
-  .caddy-runtime strong {
+  .system-heading strong {
     color: var(--cadder-ink);
     font-size: 1.2rem;
     letter-spacing: -0.03em;
@@ -211,7 +219,19 @@ import { Icon } from '@astrojs/starlight/components';
     color: var(--cadder-accent);
   }
 
-  .cadder-hub ul {
+  .hub-icon img {
+    width: 1.7rem;
+    height: 1.7rem;
+    object-fit: contain;
+  }
+
+  .runtime-icon svg {
+    width: 1.35rem;
+    height: 1.35rem;
+    fill: currentColor;
+  }
+
+  .system-card ul {
     display: grid;
     gap: 0.45rem;
     margin: 0;
@@ -221,74 +241,15 @@ import { Icon } from '@astrojs/starlight/components';
     list-style: none;
   }
 
-  .cadder-hub li {
+  .system-card li {
     display: flex;
     gap: 0.45rem;
     align-items: center;
   }
 
-  .cadder-hub li :global(svg) {
+  .system-card li :global(svg) {
     flex: 0 0 auto;
     color: var(--cadder-accent);
-  }
-
-  .hub-status {
-    display: flex;
-    gap: 0.45rem;
-    align-items: center;
-    color: var(--cadder-accent-strong);
-    font-family: var(--sl-font-mono);
-    font-size: 0.64rem;
-  }
-
-  .hub-status i {
-    width: 0.45rem;
-    height: 0.45rem;
-    border-radius: 50%;
-    background: var(--cadder-accent);
-    box-shadow: 0 0 0 0.22rem color-mix(in srgb, var(--cadder-accent) 15%, transparent);
-  }
-
-  .caddy-runtime {
-    display: grid;
-    gap: 0.45rem;
-    padding: 1rem;
-    border: 1px solid var(--cadder-line);
-    border-radius: 0.35rem;
-    background: var(--cadder-surface);
-  }
-
-  .caddy-runtime p {
-    margin: 0;
-    color: var(--cadder-muted);
-    font-size: 0.72rem;
-    line-height: 1.45;
-  }
-
-  .caddy-runtime code {
-    justify-self: start;
-    margin-top: 0.25rem;
-    padding: 0.18rem 0.45rem;
-    border: 1px solid color-mix(in srgb, var(--cadder-accent) 45%, var(--cadder-line));
-    border-radius: 2rem;
-    background: var(--cadder-accent-soft);
-    color: var(--cadder-accent-strong);
-    font-family: var(--sl-font-mono);
-    font-size: 0.62rem;
-  }
-
-  figcaption {
-    margin: 0;
-    padding: 0.85rem 1.1rem;
-    border-top: 1px solid var(--cadder-line);
-    background: var(--cadder-surface);
-    color: var(--cadder-muted);
-    font-size: 0.74rem;
-    text-align: center;
-  }
-
-  figcaption strong {
-    color: var(--cadder-accent-strong);
   }
 
   @media (max-width: 52rem) {
@@ -297,23 +258,31 @@ import { Icon } from '@astrojs/starlight/components';
     }
 
     .map-connector {
+      min-width: 0;
       min-height: 2rem;
-      flex-direction: column;
     }
 
     .map-connector span {
       width: 1px;
-      min-height: 1.2rem;
-      flex: 1;
+      height: 2rem;
       background: linear-gradient(var(--cadder-line), var(--cadder-accent));
     }
 
-    .map-connector :global(svg) {
-      transform: rotate(90deg);
+    .map-connector span::after {
+      top: auto;
+      right: auto;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%) rotate(135deg);
     }
 
     .project-card-offset {
       margin-left: 0;
     }
+
+    .stage-description {
+      min-height: 0;
+    }
+
   }
 </style>

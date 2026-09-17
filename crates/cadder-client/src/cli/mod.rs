@@ -56,7 +56,11 @@ pub(crate) enum Command {
     command: LogsCommand,
   },
   /// Open the full-screen operator.
-  Tui,
+  Tui {
+    /// Start or attach to cadderd before opening the operator.
+    #[arg(long)]
+    start_daemon: bool,
+  },
 }
 
 #[derive(Debug, Subcommand)]

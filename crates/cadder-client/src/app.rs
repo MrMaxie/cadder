@@ -15,6 +15,7 @@ pub struct App {
   confirmation: Option<LifecycleAction>,
   notice: Option<String>,
   pending_message: Option<&'static str>,
+  pending_frame: usize,
   last_start_failed: bool,
   should_quit: bool,
 }
@@ -79,6 +80,7 @@ impl App {
       confirmation: None,
       notice: None,
       pending_message: None,
+      pending_frame: 0,
       last_start_failed: false,
       should_quit: false,
     };
@@ -88,28 +90,16 @@ impl App {
 }
 
 impl RuntimeStatus {
-  pub const fn daemon_label(self) -> &'static str {
-    if self.daemon_is_running() {
-      "running"
-    } else {
-      "not running"
-    }
-  }
-
-  pub const fn caddy_label(self) -> &'static str {
-    if self.caddy_is_running() {
-      "running"
-    } else {
-      "not running"
-    }
-  }
-
   pub const fn daemon_is_running(self) -> bool {
     matches!(self.connection, ConnectionStatus::Connected)
   }
 
   pub const fn caddy_is_running(self) -> bool {
     self.daemon_is_running() && matches!(self.caddy_status, ProtocolRuntimeStatus::Running)
+  }
+
+  pub const fn daemon_is_offline(self) -> bool {
+    matches!(self.connection, ConnectionStatus::Offline)
   }
 }
 

@@ -30,10 +30,35 @@ fn version_returns_success() {
 }
 
 #[test]
-fn tui_command_is_preserved() {
+fn tui_command_preserves_read_first_default() {
   let cli = Cli::try_parse_from(["cadder", "tui"]).expect("TUI should parse");
 
-  assert!(matches!(cli.command, Command::Tui));
+  assert!(matches!(
+    cli.command,
+    Command::Tui {
+      start_daemon: false
+    }
+  ));
+}
+
+#[test]
+fn tui_command_accepts_explicit_daemon_start() {
+  let cli = Cli::try_parse_from(["cadder", "tui", "--start-daemon"])
+    .expect("TUI daemon startup should parse");
+
+  assert!(matches!(cli.command, Command::Tui { start_daemon: true }));
+}
+
+#[test]
+fn tui_help_explains_daemon_start() {
+  let help = Cli::command()
+    .find_subcommand_mut("tui")
+    .expect("TUI command should exist")
+    .render_help()
+    .to_string();
+
+  assert!(help.contains("--start-daemon"));
+  assert!(help.contains("Start or attach to cadderd before opening the operator"));
 }
 
 #[test]

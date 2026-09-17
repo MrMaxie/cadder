@@ -18,14 +18,12 @@ use crate::{
     HostProcessInspector, PortOwner, ProcessInspector, ProcessSignalError, RegistrationIndex,
     RouteMatch, local_upstream,
   },
-  run_tui,
+  tui,
 };
 
 pub(super) async fn execute(command: Command) -> Result<(), CommandFailure> {
   match command {
-    Command::Tui => run_tui()
-      .await
-      .map_err(|error| CommandFailure::ipc(format!("Could not run the Cadder TUI: {error}"))),
+    Command::Tui { start_daemon } => open_tui(start_daemon).await,
     Command::Status => status().await,
     Command::Daemon { command } => daemon(command).await,
     Command::Projects { command } => projects(command).await,
@@ -35,6 +33,16 @@ pub(super) async fn execute(command: Command) -> Result<(), CommandFailure> {
     Command::Diagnostics => diagnostics().await,
     Command::Logs { command } => logs(command).await,
   }
+}
+
+async fn open_tui(start_daemon: bool) -> Result<(), CommandFailure> {
+  let context = context("tui")?;
+  if start_daemon {
+    context.ensure_daemon_running("tui").await?;
+  }
+  tui::run(context)
+    .await
+    .map_err(|error| CommandFailure::ipc(format!("Could not run the Cadder TUI: {error}")))
 }
 
 async fn status() -> Result<(), CommandFailure> {

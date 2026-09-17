@@ -1,0 +1,30 @@
+{
+  "name": "@maxiedev/cadder-linux-x64-gnu",
+  "version": "1.0.0",
+  "description": "Linux x64 glibc native binaries for Cadder.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrMaxie/cadder.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "cadder.toml.example"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

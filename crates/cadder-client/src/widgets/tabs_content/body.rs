@@ -17,11 +17,15 @@ const COLUMN_SPACING: u16 = 1;
 
 pub(crate) struct TableBody {
   rows: Vec<DomainTableRow>,
+  empty_message: &'static str,
 }
 
 impl TableBody {
-  pub const fn new(rows: Vec<DomainTableRow>) -> Self {
-    Self { rows }
+  pub const fn new(rows: Vec<DomainTableRow>, empty_message: &'static str) -> Self {
+    Self {
+      rows,
+      empty_message,
+    }
   }
 }
 
@@ -48,7 +52,7 @@ impl StatefulWidget for TableBody {
       trailing_available_width,
     );
     let table = Table::new(
-      into_rows(self.rows),
+      into_rows(self.rows, self.empty_message),
       [
         Constraint::Length(SELECTOR_COLUMN_WIDTH),
         Constraint::Min(PRIMARY_COLUMN_MIN_WIDTH),
@@ -57,7 +61,7 @@ impl StatefulWidget for TableBody {
     )
     .column_spacing(COLUMN_SPACING)
     .row_highlight_style(THEME.table_highlight())
-    .highlight_symbol("> ")
+    .highlight_symbol("› ")
     .header(
       Row::new(["", "Project / domain", "Target"])
         .style(THEME.table_header())
@@ -93,12 +97,9 @@ fn trailing_column_content_width(rows: &[DomainTableRow]) -> usize {
     .max(Line::from("Target").width())
 }
 
-fn into_rows(rows: Vec<DomainTableRow>) -> Vec<Row<'static>> {
+fn into_rows(rows: Vec<DomainTableRow>, empty_message: &'static str) -> Vec<Row<'static>> {
   if rows.is_empty() {
-    return vec![
-      Row::new(["", "No registered routes. Run caddy run in a project.", ""])
-        .style(THEME.table_disabled_row()),
-    ];
+    return vec![Row::new(["", empty_message, ""]).style(THEME.table_disabled_row())];
   }
   rows.into_iter().map(domain_row).collect()
 }
@@ -350,9 +351,14 @@ mod tests {
     let area = Rect::new(0, 0, 80, 12);
     let mut buffer = Buffer::empty(area);
     let mut state = TableState::default().with_selected(Some(0));
-    TableBody::new(model.domain_rows()).render(area, &mut buffer, &mut state);
+    TableBody::new(
+      model.domain_rows(),
+      "No registered routes. Run caddy run in a project.",
+    )
+    .render(area, &mut buffer, &mut state);
     let text = buffer_text(&buffer);
     assert!(text.contains("Project / domain"));
+    assert!(text.contains('›'), "rendered table:\n{text}");
     assert!(text.contains("├─ ○"), "rendered table:\n{text}");
     assert!(text.contains("└─ ●"), "rendered table:\n{text}");
     assert!(text.contains('●'));
@@ -366,7 +372,11 @@ mod tests {
     let small_area = Rect::new(0, 0, 80, 8);
     let mut small_buffer = Buffer::empty(small_area);
     let mut state = TableState::default().with_selected(Some(4));
-    TableBody::new(model.domain_rows()).render(small_area, &mut small_buffer, &mut state);
+    TableBody::new(
+      model.domain_rows(),
+      "No registered routes. Run caddy run in a project.",
+    )
+    .render(small_area, &mut small_buffer, &mut state);
     assert!(state.offset() > 0);
   }
 

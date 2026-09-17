@@ -20,6 +20,9 @@ const heartPathData = Array.isArray(heartPath) ? heartPath[0] : heartPath;
     </div>
   )}
   {hasSidebar && <Pagination />}
+  <p class="caddy-trademark-note">
+    Caddy is a registered trademark of Stack Holdings GmbH; its logo identifies the upstream Caddy project.
+  </p>
   <div class="site-footer">
     <p class="footer-owner">
       <span>{year}</span>
@@ -109,6 +112,15 @@ const heartPathData = Array.isArray(heartPath) ? heartPath[0] : heartPath;
       gap: 0.5rem 1.1rem;
     }
 
+    .caddy-trademark-note {
+      margin: 0;
+      color: color-mix(in srgb, var(--cadder-muted) 82%, transparent);
+      font-family: var(--sl-font-mono);
+      font-size: 0.64rem;
+      line-height: 1.5;
+      text-wrap: balance;
+    }
+
     .footer-credit {
       gap: 0.3rem;
     }
@@ -159,9 +171,11 @@ const heartPathData = Array.isArray(heartPath) ? heartPath[0] : heartPath;
       color: var(--cadder-muted);
       font-weight: 650;
       text-decoration: none;
+      transition: var(--cadder-interaction-transition);
     }
 
-    .site-footer a:hover {
+    .site-footer a:hover,
+    .site-footer a:focus-visible {
       color: var(--cadder-accent-strong);
     }
 

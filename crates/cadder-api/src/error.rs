@@ -250,7 +250,7 @@ pub fn error_indicates_permission(error: &Error) -> bool {
 }
 
 pub fn start_guidance(_paths: &Path) -> String {
-  "Run `cadder tui` and press Enter to start cadderd, then retry.".to_string()
+  "Run `cadder tui --start-daemon` to start cadderd and open the operator, then retry.".to_string()
 }
 
 #[cfg(test)]

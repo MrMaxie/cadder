@@ -1,15 +1,17 @@
 use anyhow::{Context, Result};
-#[cfg(windows)]
-use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+#[cfg(windows)]
+use process_wrap::tokio::{CreationFlags, JobObject};
 use std::{io, process::Output, time::Duration};
 use tokio::{
   io::AsyncReadExt,
   process::{ChildStderr, ChildStdout, Command},
   time::timeout,
 };
+#[cfg(windows)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,7 +26,10 @@ impl ProcessTreeChild {
     #[cfg(unix)]
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
-    command.wrap(JobObject);
+    {
+      command.wrap(CreationFlags(CREATE_NO_WINDOW));
+      command.wrap(JobObject);
+    }
     command.wrap(KillOnDrop);
     Ok(Self {
       inner: command.spawn()?,
