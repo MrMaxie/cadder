@@ -47,6 +47,10 @@ impl Theme {
     Style::new().fg(self.colors.text_muted)
   }
 
+  pub fn shortcut_separator(self) -> Style {
+    Style::new().fg(self.colors.dim)
+  }
+
   pub fn footer(self) -> Style {
     Style::new().bg(self.colors.backdrop)
   }
@@ -57,7 +61,7 @@ impl Theme {
 
   pub fn header_title(self) -> Style {
     Style::new()
-      .fg(self.colors.text)
+      .fg(self.colors.mint_soft)
       .bg(self.colors.backdrop)
       .add_modifier(Modifier::BOLD)
   }
@@ -135,6 +139,13 @@ impl Theme {
       .bg(self.colors.surface_selected)
   }
 
+  pub fn pending_indicator(self) -> Style {
+    self
+      .notice()
+      .fg(self.colors.mint_soft)
+      .add_modifier(Modifier::BOLD)
+  }
+
   pub fn project_name(self) -> Style {
     Style::new()
       .fg(self.colors.text)
@@ -154,9 +165,10 @@ mod tests {
       theme.shortcut_description().fg,
       Some(theme.colors.text_muted)
     );
+    assert_eq!(theme.shortcut_separator().fg, Some(theme.colors.dim));
     assert_eq!(theme.footer().bg, Some(theme.colors.backdrop));
     assert_eq!(theme.header().bg, Some(theme.colors.backdrop));
-    assert_eq!(theme.header_title().fg, Some(theme.colors.text));
+    assert_eq!(theme.header_title().fg, Some(theme.colors.mint_soft));
     assert_eq!(theme.status_name().fg, Some(theme.colors.text));
     assert_eq!(theme.status_running().fg, Some(theme.colors.mint_soft));
     assert_eq!(theme.status_stopped().fg, Some(theme.colors.dim));
@@ -176,6 +188,7 @@ mod tests {
     assert_eq!(theme.disabled_marker().fg, Some(theme.colors.text_muted));
     assert_eq!(theme.tree_branch().fg, Some(theme.colors.dim));
     assert_eq!(theme.notice().bg, Some(theme.colors.surface_selected));
+    assert_eq!(theme.pending_indicator().fg, Some(theme.colors.mint_soft));
     assert_eq!(theme.project_name().fg, Some(theme.colors.text));
   }
 }

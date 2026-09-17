@@ -79,14 +79,16 @@ Cadder checks that the PID still owns the port immediately before signaling it. 
 
 ## Use the TUI
 
-Launch the full-screen operator with:
+Start or attach to Cadder in the background, then open the full-screen operator:
 
 ```sh frame="none"
-cadder tui
+cadder tui --start-daemon
 ```
+
+Use plain `cadder tui` when you want to inspect the current state without starting an offline daemon. In that mode, press Enter if you decide to start it from the TUI.
 
 The main table groups every registered domain under its project with tree connectors. A filled circle is enabled and an empty circle is disabled. The header reports `cadderd` and Caddy separately without repeating diagnostic state.
 
-Up and Down move through lists of any length. Space and Enter both toggle the selection. Press `x` to stop or `R` to restart; both actions require inline confirmation. When `cadderd` is not running, Enter starts it. Press `q` or Ctrl+C to exit while restoring the terminal.
+Up and Down move through lists of any length. Space and Enter both toggle the selection. Press `x` to stop or `R` to restart; both actions require inline confirmation. Press `q` or Ctrl+C to exit while restoring the terminal.
 
 Loopback upstreams show only the useful port. Project paths emphasize the repository-relative suffix, or the final folder when the path is not inside a Git repository.

@@ -608,11 +608,12 @@ async fn rollback_runtime_transition(
   };
   if let Err(error) = receipt.rollback(&state.logs).await {
     state.begin_operation_drain();
+    state.request_shutdown();
     state.logs.append(
       LogStreamIdentity::runtime_control(),
       LogSeverity::Error,
       format!(
-        "runtime transition rollback failed after rejected registration; Cadder entered read-only drain: {error:#}"
+        "runtime transition rollback failed after rejected registration; Cadder requested shutdown: {error:#}"
       ),
       LogAttributionKind::RuntimeControl,
       Some("registration-rollback".to_string()),
@@ -907,6 +908,26 @@ mod tests {
       conflicting_registration_id: "entry-2".to_string(),
     };
     assert!(!registration_mutation_domain_conflict(conflict).accepted);
+  }
+
+  #[tokio::test]
+  async fn failed_runtime_rollback_requests_daemon_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
+    let coordinator = CaddyConfigCoordinator::new_mock(paths.clone());
+    let runtime = coordinator.runtime();
+    let state = DaemonState::new(coordinator);
+    let attempt = runtime
+      .begin_apply_config(br#"{"apps":{}}"#, &state.logs)
+      .await
+      .unwrap();
+    let (receipt, outcome) = attempt.into_parts();
+    outcome.unwrap();
+    std::fs::create_dir(paths.effective_config_path()).unwrap();
+
+    rollback_runtime_transition(&state, Some(RuntimeTransitionReceipt::Apply(receipt))).await;
+
+    assert!(state.shutdown_signal().started_at().is_some());
   }
 
   #[test]

@@ -530,6 +530,7 @@ dependencies = [
  "tracing-subscriber",
  "which",
  "widestring",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

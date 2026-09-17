@@ -16,6 +16,7 @@ use self::view::render;
 use crate::app::App;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(80);
 
 pub async fn run(context: OperatorContext) -> Result<()> {
   let mut terminal = ratatui::try_init()?;
@@ -32,6 +33,8 @@ async fn run_event_loop(
   let mut events = EventStream::new();
   let mut refresh = tokio::time::interval(REFRESH_INTERVAL);
   refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+  let mut animation = tokio::time::interval(ANIMATION_INTERVAL);
+  animation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
   let mut effects = tokio::task::JoinSet::new();
   let mut refresh_in_flight = true;
   spawn_effect(&mut effects, context.clone(), Effect::Refresh);
@@ -43,6 +46,9 @@ async fn run_event_loop(
       _ = refresh.tick(), if !refresh_in_flight && !app.is_pending() => {
         refresh_in_flight = true;
         spawn_effect(&mut effects, context.clone(), Effect::Refresh);
+      },
+      _ = animation.tick(), if app.is_pending() => {
+        app.advance_pending_animation();
       },
       event = events.next() => {
         match event.transpose()? {
@@ -124,12 +130,27 @@ mod tests {
     app.apply_refresh(crate::app::RefreshOutcome::Unavailable {
       connection: crate::app::ConnectionStatus::Offline,
       message: "Cadder is not running.".to_string(),
-      guidance: Some("Press Enter to start it.".to_string()),
+      guidance: Some("Run `cadder tui --start-daemon`.".to_string()),
     });
 
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Press Enter to start it"));
+    let screen = format!("{}", terminal.backend());
+    assert!(screen.contains("Cadder is not running."));
+    assert!(screen.contains("enter start cadderd · r retry · q quit"));
+    assert!(!screen.contains("--start-daemon"));
+    assert!(!screen.contains("No registered routes"));
+    assert!(screen.contains("○ cadderd · ○ Caddy"));
+
+    assert!(app.prepare_start_daemon());
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let screen = format!("{}", terminal.backend());
+    assert!(
+      screen
+        .lines()
+        .nth(1)
+        .is_some_and(|line| line.contains("⠋ Starting cadderd..."))
+    );
 
     let mut connected = App::new();
     connected.apply_refresh(crate::app::RefreshOutcome::Connected {
@@ -145,7 +166,10 @@ mod tests {
     terminal
       .draw(|frame| render(frame, &mut connected))
       .unwrap();
-    assert!(format!("{}", terminal.backend()).contains("Restart Cadder"));
+    let screen = format!("{}", terminal.backend());
+    assert!(screen.contains("Restart Cadder"));
+    assert!(screen.contains("● cadderd · ○ Caddy"));
+    assert!(screen.contains("enter confirm · esc cancel · q quit"));
 
     let mut tiny = Terminal::new(TestBackend::new(1, 1)).unwrap();
     tiny.draw(|frame| render(frame, &mut App::new())).unwrap();

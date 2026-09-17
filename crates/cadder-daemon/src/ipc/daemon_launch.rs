@@ -80,16 +80,31 @@ impl DaemonProcessConfig {
 }
 
 #[cfg(windows)]
-pub(super) const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-#[cfg(windows)]
-pub(super) const DETACHED_PROCESS: u32 = 0x0000_0008;
-#[cfg(windows)]
 pub(super) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
-const BACKGROUND_DAEMON_CREATION_FLAGS: u32 =
-  CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW;
+// Windows ignores CREATE_NO_WINDOW when DETACHED_PROCESS is also set.
+const BACKGROUND_DAEMON_CREATION_FLAGS: u32 = CREATE_NO_WINDOW;
+
+#[cfg(all(test, windows))]
+mod background_creation_flags_tests {
+  use super::{BACKGROUND_DAEMON_CREATION_FLAGS, CREATE_NO_WINDOW};
+
+  const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+  const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+  #[test]
+  fn background_daemon_flags_request_no_window_without_detaching() {
+    assert_ne!(BACKGROUND_DAEMON_CREATION_FLAGS & CREATE_NO_WINDOW, 0);
+    assert_eq!(
+      BACKGROUND_DAEMON_CREATION_FLAGS & CREATE_NEW_PROCESS_GROUP,
+      0
+    );
+    assert_eq!(BACKGROUND_DAEMON_CREATION_FLAGS & DETACHED_PROCESS, 0);
+  }
+}
 const DAEMON_READY_ATTEMPTS: usize = 300;
 const DAEMON_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DAEMON_READY_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[cfg(unix)]
 fn start_new_unix_session() -> io::Result<()> {
@@ -124,7 +139,7 @@ pub async fn ensure_daemon_running_with_options(
   paths: &RuntimePaths,
   options: DaemonLaunchOptions,
 ) -> IpcClientResult<()> {
-  if daemon_is_ready(paths).await? {
+  if daemon_is_ready_for_launch(paths).await? {
     return Ok(());
   }
 
@@ -194,7 +209,7 @@ async fn wait_for_daemon_ready(
   child: &mut tokio::process::Child,
 ) -> IpcClientResult<()> {
   for _ in 0..DAEMON_READY_ATTEMPTS {
-    if daemon_is_ready(paths).await? {
+    if daemon_is_ready_for_launch(paths).await? {
       return Ok(());
     }
     if child
@@ -238,15 +253,34 @@ pub(super) async fn daemon_is_ready(paths: &RuntimePaths) -> IpcClientResult<boo
   daemon_is_ready_with_deadlines(paths, IpcClientDeadlines::default()).await
 }
 
+async fn daemon_is_ready_for_launch(paths: &RuntimePaths) -> IpcClientResult<bool> {
+  daemon_is_ready_with_deadlines(
+    paths,
+    IpcClientDeadlines {
+      connect: DAEMON_READY_CONNECT_TIMEOUT,
+      ..IpcClientDeadlines::default()
+    },
+  )
+  .await
+}
+
 pub(super) async fn daemon_is_ready_with_deadlines(
   paths: &RuntimePaths,
   deadlines: IpcClientDeadlines,
 ) -> IpcClientResult<bool> {
   match CadderSession::connect_with_deadlines(paths, deadlines).await {
     Ok(_) => Ok(true),
-    Err(error) if error.is_stale_instance() || error.is_daemon_unavailable() => Ok(false),
+    Err(error) if daemon_not_ready_yet(&error) => Ok(false),
     Err(error) => Err(error),
   }
+}
+
+fn daemon_not_ready_yet(error: &IpcClientError) -> bool {
+  error.is_stale_instance()
+    || error.is_daemon_unavailable()
+    || error.local_error().is_some_and(|error| {
+      error.phase() == IpcClientPhase::Connect && error.code() == LocalIpcErrorCode::Timeout
+    })
 }
 
 fn sibling_binary(name: &str) -> Option<PathBuf> {
@@ -281,5 +315,19 @@ fn prepend_path_dir(command: &mut Command, dir: &std::path::Path) {
     .unwrap_or_else(|| vec![dir.to_path_buf()]);
   if let Ok(joined) = env::join_paths(paths) {
     command.env("PATH", joined);
+  }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+  use super::*;
+
+  #[test]
+  fn launch_readiness_retries_connection_timeouts() {
+    let timeout = super::super::client::connection_timeout_error();
+    assert!(daemon_not_ready_yet(&timeout));
+
+    let permanent = super::super::client::connection_error(io::Error::other("connect failed"));
+    assert!(!daemon_not_ready_yet(&permanent));
   }
 }

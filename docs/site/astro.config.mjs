@@ -12,7 +12,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Cadder',
-      description: 'Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared web server and reverse proxy.',
+      description: 'Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared reverse proxy.',
       favicon: 'favicon.ico',
       logo: {
         src: './src/assets/logo.png',

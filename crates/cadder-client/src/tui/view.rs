@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 
 use crate::app::App;
@@ -44,15 +44,28 @@ fn render_main(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
   );
 
   let rows = app.domain_rows();
+  let empty_message = if app.runtime_status().daemon_is_offline() {
+    "Cadder is not running."
+  } else {
+    "No registered routes. Run caddy run in a project."
+  };
   StatefulWidget::render(
-    RoutesTable::new(rows),
+    RoutesTable::new(rows, empty_message),
     areas.routes,
     frame.buffer_mut(),
     app.table_state_mut(),
   );
 
   if let (Some(notice_area), Some(notice)) = (areas.notice, notice) {
-    Paragraph::new(Line::from(notice))
+    let line = if let Some(marker) = app.pending_marker() {
+      Line::from(vec![
+        Span::styled(format!(" {marker} "), THEME.pending_indicator()),
+        Span::raw(notice),
+      ])
+    } else {
+      Line::from(format!(" {notice}"))
+    };
+    Paragraph::new(line)
       .style(THEME.notice())
       .render(notice_area, frame.buffer_mut());
   }
@@ -83,10 +96,10 @@ fn root_areas(root: Rect) -> (Rect, Rect) {
 
 fn main_areas(area: Rect, has_notice: bool) -> MainAreas {
   let notice_height = u16::from(has_notice);
-  let [header, routes, notice] = area.layout(&Layout::vertical([
+  let [header, notice, routes] = area.layout(&Layout::vertical([
     Constraint::Length(1),
-    Constraint::Fill(1),
     Constraint::Length(notice_height),
+    Constraint::Fill(1),
   ]));
 
   MainAreas {

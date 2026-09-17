@@ -5,10 +5,9 @@ mod inspection;
 mod tui;
 mod widgets;
 
-use cadder_api::{AppExit, DaemonLaunchOptions, OperatorContext};
+use cadder_api::AppExit;
 use clap::{Parser, error::ErrorKind};
 use cli::Cli;
-use color_eyre::Result;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> AppExit {
@@ -33,11 +32,6 @@ fn cli_exit(error: &clap::Error) -> AppExit {
   } else {
     AppExit::InvalidUsage
   }
-}
-
-pub(crate) async fn run_tui() -> Result<()> {
-  let context = OperatorContext::new("tui", None, DaemonLaunchOptions::default())?;
-  tui::run(context).await
 }
 
 #[cfg(test)]

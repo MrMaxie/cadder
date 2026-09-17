@@ -1,8 +1,5 @@
-# Operator CLI
+## MODIFIED Requirements
 
-## Purpose
-Define the intentionally small command surface of the operator executable.
-## Requirements
 ### Requirement: CLI-001: The operator exposes focused developer workflows
 `cadder` MUST support help, version, `tui`, daemon lifecycle and status, project listing and activation, domain listing and activation, port inspection and guarded process termination, Caddyfile inspection, explicit diagnostics, and bounded redacted log reads. The TUI command MUST support an explicit `--start-daemon` option that reuses the existing attach-first daemon launch contract before opening the operator. It MUST reject profile, machine-output, history, export, continuous tail, watch, and autostart commands.
 

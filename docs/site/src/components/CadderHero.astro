@@ -2,6 +2,7 @@
 import DefaultHero from '@astrojs/starlight/components/Hero.astro';
 import { Icon } from '@astrojs/starlight/components';
 import CadderTopology from './CadderTopology.astro';
+import CopyableCommand from './CopyableCommand.astro';
 
 const hero = Astro.locals.starlightRoute.entry.data.hero;
 const isProductHero = hero?.title === 'Stable addresses for every local app.';
@@ -25,14 +26,23 @@ const actions: Array<{
         </h1>
         {isProductHero ? (
           <p class="cadder-hero-tagline">
-            <strong class="product-name product-name-cadder">Cadder</strong> coordinates{' '}
-            <strong class="product-name product-name-caddy">Caddy</strong> across your local projects.
-            Caddy is the web server and reverse proxy that connects each local address to the port where
-            an app is running. With Cadder, routes from different repositories are served together by one
-            Caddy process.
+            <strong class="cadder-key-term">Cadder</strong> coordinates{' '}
+            <strong class="cadder-key-term">Caddy</strong> across your local projects. Caddy is the reverse
+            proxy that connects each local address to the port where an app is running. With Cadder, routes
+            from different repositories are served together by one Caddy process.
           </p>
         ) : (
           hero.tagline && <p class="cadder-hero-tagline">{hero.tagline}</p>
+        )}
+        {isProductHero && (
+          <div class="cadder-first-run" aria-label="Start Cadder">
+            <CopyableCommand command="npx cadder tui --start-daemon" label="Cadder start command" />
+            <p class="cadder-caddy-requirement">
+              <strong>Caddy is required.</strong> Install it on this machine and make sure <code>caddy</code>{' '}
+              is available in your shell.{' '}
+              <a class="cadder-inline-link" href="https://caddyserver.com/docs/install">Install Caddy</a>
+            </p>
+          </div>
         )}
         {actions.length > 0 && (
           <div class="cadder-hero-actions">
@@ -93,42 +103,35 @@ const actions: Array<{
       line-height: 1.6;
     }
 
-    .product-name {
-      position: relative;
-      display: inline-block;
-      color: var(--cadder-ink);
-      font-weight: 720;
-    }
-
-    .product-name::after {
-      position: absolute;
-      right: 0;
-      bottom: 0.08em;
-      left: 0;
-      height: 0.12em;
-      border-radius: 1rem;
-      background: linear-gradient(90deg, var(--cadder-accent), var(--cadder-accent-strong));
-      content: '';
-      opacity: 0.72;
-    }
-
-    .product-name-cadder {
-      background: linear-gradient(105deg, var(--cadder-accent-strong), var(--cadder-accent));
-      background-clip: text;
-      color: transparent;
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .product-name-caddy::after {
-      opacity: 0.4;
-    }
-
     .cadder-hero-actions {
       display: flex;
       flex-wrap: wrap;
       gap: 0.75rem;
-      margin-top: 1.75rem;
+      margin-top: 0.85rem;
+    }
+
+    .cadder-first-run {
+      display: grid;
+      gap: 0.55rem;
+      width: min(100%, 43rem);
+      margin-top: 1.5rem;
+    }
+
+    .cadder-caddy-requirement {
+      margin: 0;
+      color: var(--cadder-muted);
+      font-size: 0.74rem;
+      line-height: 1.5;
+    }
+
+    .cadder-caddy-requirement strong {
+      color: var(--cadder-ink);
+    }
+
+    .cadder-caddy-requirement code {
+      color: var(--cadder-accent-strong);
+      font-family: var(--sl-font-mono);
+      font-size: 0.72rem;
     }
 
     .cadder-hero-action {
@@ -144,6 +147,7 @@ const actions: Array<{
       font-size: 0.78rem;
       font-weight: 650;
       text-decoration: none;
+      transition: var(--cadder-interaction-transition);
     }
 
     .cadder-hero-action.primary {
@@ -152,7 +156,8 @@ const actions: Array<{
       color: var(--cadder-accent-ink);
     }
 
-    .cadder-hero-action:hover {
+    .cadder-hero-action:hover,
+    .cadder-hero-action:focus-visible {
       border-color: var(--cadder-accent);
     }
 
@@ -164,6 +169,10 @@ const actions: Array<{
 
       h1 {
         font-size: clamp(2.8rem, 14vw, 4.1rem);
+      }
+
+      .cadder-first-run {
+        gap: 0.55rem;
       }
     }
   }
