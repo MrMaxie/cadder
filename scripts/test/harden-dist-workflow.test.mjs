@@ -47,3 +47,11 @@ test('rejects cargo-dist commands without the reviewed workflow override', async
   );
   assert.throws(() => validateHardenedWorkflow(source));
 });
+
+test('rejects release verification that waits for the publishing-only host job', async () => {
+  const source = (await readFile(workflowPath, 'utf8')).replace(
+    '      - build-global-artifacts\n    if:',
+    '      - host\n    if:',
+  );
+  assert.throws(() => validateHardenedWorkflow(source));
+});

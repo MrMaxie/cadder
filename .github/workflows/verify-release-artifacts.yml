@@ -127,8 +127,9 @@ jobs:
           foreach ($binaryName in @("cadder", "cadderd", "caddy")) {
             $binary = Join-Path $contentRoot "$binaryName$env:EXECUTABLE_SUFFIX"
             if (-not $IsWindows) {
-              & /usr/bin/test -x $binary
-              if ($LASTEXITCODE -ne 0) {
+              $mode = [System.IO.File]::GetUnixFileMode($binary)
+              $executeMask = [System.IO.UnixFileMode]::UserExecute -bor [System.IO.UnixFileMode]::GroupExecute -bor [System.IO.UnixFileMode]::OtherExecute
+              if (($mode -band $executeMask) -eq 0) {
                 throw "$binaryName is not executable."
               }
             }
