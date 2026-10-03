@@ -48,4 +48,10 @@ test('rejects a non-release ref, invalid commit, or another signer workflow', ()
       signerWorkflow: 'MrMaxie/Cadder/.github/workflows/other.yml',
     }),
   );
+  assert.throws(() =>
+    attestationVerifyArguments('artifact.zip', {
+      ...provenance,
+      signerWorkflow: 'MrMaxie/Cadder/.github/workflows/release.yml',
+    }),
+  );
 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
-export const releaseRepository = 'MrMaxie/Cadder';
-export const releaseSignerWorkflow = 'MrMaxie/Cadder/.github/workflows/release.yml';
+export const releaseRepository = 'MrMaxie/cadder';
+export const releaseSignerWorkflow = 'MrMaxie/cadder/.github/workflows/release.yml';
 
 export function attestationVerifyArguments(path, { sourceRef, sourceDigest, signerWorkflow }) {
   assert.match(sourceRef, /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/);
