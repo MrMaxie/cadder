@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { platformTargets } from '../lib/platforms.js';
 import { attestationVerifyArguments, releaseSignerWorkflow } from './attestation-policy.js';
 import {
+  archiveContentRoot,
   commandNames,
   documentationFiles,
   ensureNewDirectory,
@@ -81,7 +82,9 @@ async function preparePlatformPackage({
       ...commandNames.map((command) => `${command}${suffix}`),
       ...documentationFiles,
     ].sort();
-    assert.deepEqual(await listFiles(extractionRoot), expectedArchiveFiles, `${target.archive} has unexpected contents.`);
+    const contentRoot = archiveContentRoot(target.archive, await listFiles(extractionRoot), expectedArchiveFiles);
+    assert.notEqual(contentRoot, null, `${target.archive} has unexpected contents.`);
+    const archiveRoot = resolve(extractionRoot, contentRoot);
 
     const destination = resolve(output, target.directory);
     const binDirectory = resolve(destination, 'bin');
@@ -95,7 +98,7 @@ async function preparePlatformPackage({
     const digests = {};
     for (const command of commandNames) {
       const fileName = `${command}${suffix}`;
-      const source = resolve(extractionRoot, fileName);
+      const source = resolve(archiveRoot, fileName);
       const copied = resolve(binDirectory, fileName);
       if (target.os[0] !== 'win32') {
         assert.notEqual((await stat(source)).mode & 0o111, 0, `${fileName} is not executable in ${target.archive}.`);
