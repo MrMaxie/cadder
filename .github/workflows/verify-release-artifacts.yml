@@ -96,11 +96,18 @@ jobs:
           if ($allExtractedFiles.Count -ne 7) {
             throw "Expected exactly seven files in the extracted archive."
           }
+          $contentRoot = $readmes[0].Directory.FullName
           $allExtractedDirectories = @(Get-ChildItem -LiteralPath $extractRoot -Recurse -Directory)
-          if ($allExtractedDirectories.Count -ne 0) {
+          $expectedDirectoryCount = if ($contentRoot -eq $extractRoot) { 0 } else { 1 }
+          $unexpectedDirectories = @(
+            $allExtractedDirectories | Where-Object FullName -ne $contentRoot
+          )
+          if (
+            $allExtractedDirectories.Count -ne $expectedDirectoryCount -or
+            $unexpectedDirectories.Count -ne 0
+          ) {
             throw "Archive directory structure differs from the portable layout."
           }
-          $contentRoot = $readmes[0].Directory.FullName
           $expectedFiles = @(
             "cadder$env:EXECUTABLE_SUFFIX",
             "cadderd$env:EXECUTABLE_SUFFIX",
