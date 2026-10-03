@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Arcantry release baseline: 0.8.0 (2026-06-11). Earlier history is not reconstructed. -->
 
+## [1.0.1] - 2026-10-03
+
+### Fixed
+
+<!-- openspec: harden-local-runtime-boundaries -->
+#### Keep managed development routes local and isolated
+
+Cadder now binds its shared HTTP and HTTPS listeners only to loopback, keeps every project behind its active host names, redacts the documented credential forms from retained logs, and renders diagnostic text without active terminal control sequences.
+
 ## [1.0.0] - 2026-09-15
 
 ### Added
@@ -63,6 +72,7 @@ Profiles, autostart, history, export, continuous log tailing and watching, machi
 
 Cadder 1.0 does not ship installers, Homebrew or Scoop packages, crates.io packages, Authenticode signatures, or macOS notarization.
 
-[Unreleased]: https://github.com/MrMaxie/cadder/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/MrMaxie/cadder/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/MrMaxie/cadder/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/MrMaxie/cadder/compare/v0.8.0...v1.0.0
 <!-- arcantry:changelog:end -->

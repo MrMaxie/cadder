@@ -32,7 +32,7 @@ required-features = ["docker-e2e"]
 anyhow = "=1.0.104"
 backon = { version = "=1.6.0", default-features = false, features = ["std", "tokio-sleep"] }
 bytes = "=1.11.1"
-cadder-ipc = { version = "1.0.0", path = "../cadder-ipc" }
+cadder-ipc = { version = "1.0.1", path = "../cadder-ipc" }
 caddyfile-rs = "=0.1.0"
 chrono = { version = "=0.4.45", features = ["serde"] }
 clap = { version = "=4.6.1", features = ["derive"] }
