@@ -39,6 +39,18 @@ async fn kill_terminates_descendants_and_closes_their_pipes() {
 async fn pinned_caddy_image_metadata_reader_bounds_and_drains_output() {
   let (mut writer, reader) = tokio::io::duplex(64);
   let write = tokio::spawn(async move {
+    writer.write_all(b"0123").await.unwrap();
+    writer.shutdown().await.unwrap();
+  });
+  let mut pipe = Some(reader);
+  let mut bytes = Vec::new();
+
+  read_pipe_bounded(&mut pipe, &mut bytes, 4).await.unwrap();
+  write.await.unwrap();
+  assert_eq!(bytes, b"0123");
+
+  let (mut writer, reader) = tokio::io::duplex(64);
+  let write = tokio::spawn(async move {
     writer.write_all(b"0123456789").await.unwrap();
     writer.shutdown().await.unwrap();
   });

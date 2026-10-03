@@ -83,6 +83,7 @@ impl ProcessTreeChild {
     Ok(())
   }
 
+  #[cfg(test)]
   pub(crate) async fn wait_for_output(self, deadline: Duration, operation: &str) -> Result<Output> {
     self
       .wait_for_bounded_output(deadline, operation, usize::MAX)

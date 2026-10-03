@@ -143,18 +143,14 @@ pub async fn ensure_daemon_running_with_options(
     return Ok(());
   }
 
-  let daemon = options
-    .explicit_daemon
-    .or_else(|| sibling_binary("cadderd"))
-    .or_else(|| find_on_path("cadderd"))
-    .ok_or_else(|| {
-      daemon_launch_error(
-        LocalIpcErrorCode::DaemonNotFound,
-        "Cadder could not find the daemon executable; no daemon was started.",
-        "Install Cadder or provide a trusted cadderd path, then retry.",
-        None,
-      )
-    })?;
+  let daemon = resolve_daemon_binary(options.explicit_daemon).ok_or_else(|| {
+    daemon_launch_error(
+      LocalIpcErrorCode::DaemonNotFound,
+      "Cadder could not find the daemon executable; no daemon was started.",
+      "Install Cadder or provide a trusted cadderd path, then retry.",
+      None,
+    )
+  })?;
 
   let process_config = DaemonProcessConfig::for_launch_mode(options.launch_mode);
   let caddy_backend = options
@@ -285,13 +281,17 @@ fn daemon_not_ready_yet(error: &IpcClientError) -> bool {
 
 fn sibling_binary(name: &str) -> Option<PathBuf> {
   let current = env::current_exe().ok()?;
+  sibling_binary_next_to(&current, name)
+}
+
+fn sibling_binary_next_to(current: &std::path::Path, name: &str) -> Option<PathBuf> {
   let dir = current.parent()?;
   let candidate = dir.join(exe_name(name));
   candidate.is_file().then_some(candidate)
 }
 
-pub(super) fn find_on_path(name: &str) -> Option<PathBuf> {
-  which::which(exe_name(name)).ok()
+fn resolve_daemon_binary(explicit: Option<PathBuf>) -> Option<PathBuf> {
+  explicit.or_else(|| sibling_binary("cadderd"))
 }
 
 pub(super) fn exe_name(name: &str) -> String {
@@ -321,6 +321,7 @@ fn prepend_path_dir(command: &mut Command, dir: &std::path::Path) {
 #[cfg(test)]
 mod readiness_tests {
   use super::*;
+  use std::fs;
 
   #[test]
   fn launch_readiness_retries_connection_timeouts() {
@@ -329,5 +330,27 @@ mod readiness_tests {
 
     let permanent = super::super::client::connection_error(io::Error::other("connect failed"));
     assert!(!daemon_not_ready_yet(&permanent));
+  }
+
+  #[test]
+  fn daemon_discovery_accepts_only_an_explicit_path_or_version_matched_sibling() {
+    let directory = tempfile::tempdir().unwrap();
+    let current = directory.path().join(exe_name("cadder"));
+    fs::write(&current, b"client").unwrap();
+
+    assert!(sibling_binary_next_to(&current, "cadderd").is_none());
+
+    let sibling = directory.path().join(exe_name("cadderd"));
+    fs::write(&sibling, b"daemon").unwrap();
+    assert_eq!(
+      sibling_binary_next_to(&current, "cadderd"),
+      Some(sibling.clone())
+    );
+
+    let explicit = directory.path().join(exe_name("diagnostic-cadderd"));
+    assert_eq!(
+      resolve_daemon_binary(Some(explicit.clone())),
+      Some(explicit)
+    );
   }
 }

@@ -33,10 +33,24 @@ jobs:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Validate release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid Cadder release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.3
         with:
           persist-credentials: false
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Resolve release commit
+        id: source
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD^{commit})" >> "$GITHUB_OUTPUT"
       - name: Set up Node.js
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -50,15 +64,6 @@ jobs:
           test "$(node --version)" = "v24.18.0"
           nub --version | grep -Fx "v0.7.5"
           test "$(npm --version)" = "12.0.2"
-      - name: Validate release tag
-        id: release
-        shell: bash
-        run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$ ]]; then
-            echo "Invalid Cadder release tag: $RELEASE_TAG" >&2
-            exit 1
-          fi
-          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
       - name: Install package workspace
         working-directory: npm
         run: nub ci
@@ -73,6 +78,9 @@ jobs:
           --assets "$RUNNER_TEMP/cadder-assets"
           --output "$RUNNER_TEMP/cadder-npm-stage"
           --version "${{ steps.release.outputs.version }}"
+          --source-ref "refs/tags/$RELEASE_TAG"
+          --source-digest "${{ steps.source.outputs.commit }}"
+          --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
       - name: Pack deterministic npm tarballs
         run: >-
           node npm/scripts/pack-release.js

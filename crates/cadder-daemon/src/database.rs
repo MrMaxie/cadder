@@ -743,7 +743,10 @@ mod tests {
       .await
       .unwrap();
     assert_eq!(result.entries.len(), 1);
-    assert_eq!(result.entries[0].raw_message, "reload failed [redacted]");
+    assert_eq!(
+      result.entries[0].raw_message,
+      "reload failed token=[redacted]"
+    );
     reopened.close().await.unwrap();
   }
 

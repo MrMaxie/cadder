@@ -230,7 +230,7 @@ pub(crate) fn diagnostics(diagnostics: &DiagnosticsView) {
           .operation
           .clone()
           .unwrap_or_else(|| "-".to_string()),
-        diagnostic.message.clone(),
+        terminal_safe(&diagnostic.message),
       ]);
     }
     println!("{table}");
@@ -254,7 +254,7 @@ pub(crate) fn diagnostics(diagnostics: &DiagnosticsView) {
         } else {
           diagnostic.source_config_paths.join(", ")
         },
-        diagnostic.message.clone(),
+        terminal_safe(&diagnostic.message),
       ]);
     }
     println!("{table}");
@@ -281,7 +281,7 @@ pub(crate) fn logs(logs: &LogsView) {
       entry.sequence_number.to_string(),
       entry.timestamp_utc.to_rfc3339(),
       debug_label(entry.severity),
-      entry.raw_message.clone(),
+      terminal_safe(&entry.raw_message),
     ]);
   }
   println!("{table}");
@@ -355,6 +355,47 @@ fn table<const N: usize>(header: [&str; N]) -> Table {
   table.load_style(NOTHING);
   table.set_header(header.map(Cell::new));
   table
+}
+
+fn terminal_safe(input: &str) -> String {
+  let mut output = String::with_capacity(input.len());
+  let mut chars = input.chars().peekable();
+  while let Some(character) = chars.next() {
+    if character == '\u{1b}' {
+      match chars.peek().copied() {
+        Some('[') => {
+          chars.next();
+          for sequence_character in chars.by_ref() {
+            if ('\u{40}'..='\u{7e}').contains(&sequence_character) {
+              break;
+            }
+          }
+        }
+        Some(']') => {
+          chars.next();
+          while let Some(sequence_character) = chars.next() {
+            if sequence_character == '\u{7}' {
+              break;
+            }
+            if sequence_character == '\u{1b}' && chars.peek() == Some(&'\\') {
+              chars.next();
+              break;
+            }
+          }
+        }
+        Some(_) => {
+          chars.next();
+        }
+        None => {}
+      }
+      continue;
+    }
+    if character <= '\u{1f}' || ('\u{7f}'..='\u{9f}').contains(&character) {
+      continue;
+    }
+    output.push(character);
+  }
+  output
 }
 
 fn activation_label(state: ActivationState) -> &'static str {
@@ -642,6 +683,19 @@ mod tests {
         operation: None,
       }],
     });
+  }
+
+  #[test]
+  fn terminal_safe_removes_ansi_and_control_sequences() {
+    assert_eq!(
+      terminal_safe("safe\u{1b}[31mred\u{1b}[0m\u{7}text\u{85}done"),
+      "saferedtextdone"
+    );
+    assert_eq!(
+      terminal_safe("before\u{1b}]0;changed title\u{7}after"),
+      "beforeafter"
+    );
+    assert_eq!(terminal_safe("ordinary Zażółć"), "ordinary Zażółć");
   }
 
   #[test]

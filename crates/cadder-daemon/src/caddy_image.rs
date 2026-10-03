@@ -14,7 +14,7 @@ use std::{
 use tokio::process::Command;
 
 pub(crate) const CADDY_COMPATIBILITY_PROBE_REVISION: &str = "cadder-v1-probe-1";
-pub(crate) const MINIMUM_CADDY_VERSION: &str = "2.11.3";
+pub(crate) const MINIMUM_CADDY_VERSION: &str = "2.11.4";
 
 const REQUIRED_CADDY_MODULES: &[&str] = &[
   "http",

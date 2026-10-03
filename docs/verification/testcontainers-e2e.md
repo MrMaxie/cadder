@@ -12,7 +12,7 @@ complements the fast fake-Caddy lifecycle tests and does not replace `cargo test
 
 - Docker daemon is running.
 - Docker CLI is available on `PATH`.
-- The current user can start containers and pull `caddy:2.11.3-alpine`.
+- The current user can start containers and pull `caddy:2.11.4-alpine`.
 - No host-global Caddy installation is required.
 
 ## Command
