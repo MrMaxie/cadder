@@ -31,6 +31,10 @@ assert.equal(workflow.jobs.stage.permissions['id-token'], 'write');
 const stageSetupNode = workflow.jobs.stage.steps.find((step) => step.name === 'Set up Node.js');
 assert.equal(stageSetupNode.with['registry-url'], 'https://registry.npmjs.org');
 assert.equal(stageSetupNode.with['package-manager-cache'], false);
+const removeSetupNodeAuth = workflow.jobs.stage.steps.find(
+  (step) => step.name === 'Remove setup-node auth placeholder',
+);
+assert.equal(removeSetupNodeAuth.run, `sed -i '/:_authToken=/d' "$NPM_CONFIG_USERCONFIG"`);
 assert.match(workflow.jobs.stage.if, /github\.event_name == 'release'/);
 assert.match(workflow.jobs.stage.if, /inputs\.stage == true/);
 assert.equal(source.includes('NPM_TOKEN'), false, 'The npm workflow must not reference NPM_TOKEN.');
