@@ -153,6 +153,24 @@ export function hardenGeneratedWorkflow(generated) {
   );
   source = replaceOnce(
     source,
+    lines(
+      '  custom-verify-release-artifacts:',
+      '    needs:',
+      '      - plan',
+      '      - host',
+      "    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}",
+    ),
+    lines(
+      '  custom-verify-release-artifacts:',
+      '    needs:',
+      '      - plan',
+      '      - build-global-artifacts',
+      "    if: ${{ always() && needs.plan.result == 'success' && needs.build-global-artifacts.result == 'success' && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}",
+    ),
+    'release artifact verification dependencies',
+  );
+  source = replaceOnce(
+    source,
     '          RELEASE_COMMIT: "${{ github.sha }}"',
     lines(
       '          RELEASE_COMMIT: "${{ github.sha }}"',
@@ -181,6 +199,10 @@ export function validateHardenedWorkflow(source) {
   assert.match(source, /RELEASE_TAG: \$\{\{ needs\.plan\.outputs\.tag \}\}/);
   assert.match(source, /gh release create "\$RELEASE_TAG"/);
   assert.match(source, /if \[\[ ! "\$RELEASE_TAG" =~ \^v/);
+  assert.match(
+    source,
+    /custom-verify-release-artifacts:\n    needs:\n      - plan\n      - build-global-artifacts\n    if: \$\{\{ always\(\) && needs\.plan\.result == 'success' && needs\.build-global-artifacts\.result == 'success'/,
+  );
 }
 
 async function apply() {

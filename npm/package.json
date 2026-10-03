@@ -1,6 +1,6 @@
 {
   "name": "cadder",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Portable launcher for the Cadder Caddy coordinator.",
   "keywords": [
     "caddy",
@@ -48,10 +48,10 @@
     "bootstrap:pack": "node scripts/pack-bootstrap.js"
   },
   "optionalDependencies": {
-    "@maxiedev/cadder-darwin-arm64": "1.0.2",
-    "@maxiedev/cadder-darwin-x64": "1.0.2",
-    "@maxiedev/cadder-linux-x64-gnu": "1.0.2",
-    "@maxiedev/cadder-win32-x64": "1.0.2"
+    "@maxiedev/cadder-darwin-arm64": "1.0.3",
+    "@maxiedev/cadder-darwin-x64": "1.0.3",
+    "@maxiedev/cadder-linux-x64-gnu": "1.0.3",
+    "@maxiedev/cadder-win32-x64": "1.0.3"
   },
   "publishConfig": {
     "access": "public",

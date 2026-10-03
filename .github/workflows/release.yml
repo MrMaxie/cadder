@@ -278,8 +278,8 @@ jobs:
   custom-verify-release-artifacts:
     needs:
       - plan
-      - host
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+      - build-global-artifacts
+    if: ${{ always() && needs.plan.result == 'success' && needs.build-global-artifacts.result == 'success' && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}
     uses: ./.github/workflows/verify-release-artifacts.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
