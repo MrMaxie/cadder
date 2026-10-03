@@ -36,7 +36,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/MrMaxie/cadder"
@@ -61,9 +61,9 @@ lto = "thin"
 
 [dependencies]
 anyhow = "=1.0.104"
-cadder-api = { version = "1.0.0", path = "crates/cadder-api" }
-cadder-daemon = { version = "1.0.0", path = "crates/cadder-daemon" }
-cadder-ipc = { version = "1.0.0", path = "crates/cadder-ipc" }
+cadder-api = { version = "1.0.1", path = "crates/cadder-api" }
+cadder-daemon = { version = "1.0.1", path = "crates/cadder-daemon" }
+cadder-ipc = { version = "1.0.1", path = "crates/cadder-ipc" }
 chrono = { version = "=0.4.45", features = ["serde"] }
 clap = { version = "=4.6.1", features = ["derive"] }
 color-eyre = "=0.6.5"
@@ -85,7 +85,7 @@ wait-timeout = "=0.2.1"
 # Config for 'dist'
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.32.0"
+cargo-dist-version = "0.33.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

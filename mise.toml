@@ -5,7 +5,7 @@ rust = { version = "1.95.0", components = "rustfmt,clippy,llvm-tools-preview" }
 node = "24.18.0"
 "npm:@fission-ai/openspec" = "1.5.0"
 "cargo:cargo-llvm-cov" = "0.8.7"
-"cargo:cargo-dist" = "0.32.0"
+"aqua:axodotdev/cargo-dist" = "0.33.0"
 
 [tasks.fmt]
 description = "Check Rust formatting"
@@ -64,8 +64,8 @@ run = [
   "openspec validate --all --strict --no-interactive",
   { task = "docs-check" },
   { task = "npm-check" },
-  "dist generate --check",
-  "dist plan",
+  { task = "dist-workflow-check" },
+  "dist plan --allow-dirty",
 ]
 
 [tasks.dev]
@@ -79,8 +79,19 @@ run = "ttyglass -- mise run dev"
 
 [tasks.dist-plan]
 description = "Create a non-publishing cargo-dist release plan"
-run = ["dist generate --check", "dist plan"]
+run = [{ task = "dist-workflow-check" }, "dist plan --allow-dirty"]
+
+[tasks.dist-workflow-sync]
+description = "Regenerate and harden the cargo-dist GitHub workflow"
+run = ["dist generate", "node scripts/harden-dist-workflow.mjs --apply"]
+
+[tasks.dist-workflow-check]
+description = "Verify the generated and hardened cargo-dist GitHub workflow"
+run = [
+  "node --test scripts/test/harden-dist-workflow.test.mjs",
+  "node scripts/harden-dist-workflow.mjs --check-generated",
+]
 
 [tasks.dist-build]
 description = "Build non-publishing cargo-dist artifacts"
-run = "dist build"
+run = "dist build --allow-dirty"

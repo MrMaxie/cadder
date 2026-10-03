@@ -27,7 +27,7 @@ Cadder does not require a special owner, parent-directory permission layout, or 
 
 ## Version and image pinning
 
-Cadder accepts Caddy 2.11.3 or newer within the 2.x release line. The selected build contains the standard modules used by Cadder and passes the compatibility probe shipped with the Cadder release.
+Cadder accepts Caddy 2.11.4 or newer within the 2.x release line. The selected build contains the standard modules used by Cadder and passes the compatibility probe shipped with the Cadder release.
 
 The daemon pins the executable's canonical path, source, operating-system file identity, SHA-256 digest, semantic version, module inventory, and probe revision. It verifies the pinned image again before every probe, adaptation, runtime start, reload, and stop operation. Metadata output is bounded and each metadata command has a 30-second deadline.
 

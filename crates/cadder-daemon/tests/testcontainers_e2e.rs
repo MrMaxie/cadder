@@ -5,7 +5,6 @@ use cadder_ipc::{
   LogStreamStatus, QueryLogsPayload, QueryLogsResponse, QueryStatePayload, QueryStateResponse,
   RuntimeStatus, SetDomainEnabledPayload, ShutdownDaemonPayload, new_request_id,
 };
-use reqwest::{Client as HttpClient, StatusCode, Url, header::HOST, redirect::Policy};
 use std::{
   env, fs,
   path::{Path, PathBuf},
@@ -15,7 +14,7 @@ use std::{
 use tempfile::TempDir;
 use testcontainers::{
   ContainerAsync, GenericImage, ImageExt,
-  core::{AccessMode, IntoContainerPort, Mount, WaitFor},
+  core::{AccessMode, ExecCommand, Mount, WaitFor},
   runners::AsyncRunner,
 };
 use tokio::{
@@ -26,8 +25,7 @@ use tokio::{
 
 const CONTAINER_WORKSPACE: &str = "/workspace";
 const CADDY_IMAGE: &str = "caddy";
-const CADDY_TAG: &str = "2.11.3-alpine";
-const HTTP_PORT: u16 = 80;
+const CADDY_TAG: &str = "2.11.4-alpine";
 const ALPHA_HOST: &str = "alpha.cadder-e2e.localhost";
 const BETA_HOST: &str = "beta.cadder-e2e.localhost";
 const INVALID_HOST: &str = "invalid.cadder-e2e.localhost";
@@ -223,9 +221,6 @@ async fn run_scenario(harness: &mut E2eHarness) -> Result<()> {
 struct E2eHarness {
   temp: TempDir,
   container: Option<ContainerAsync<GenericImage>>,
-  container_host: String,
-  container_port: u16,
-  http: HttpClient,
   client: CadderClient,
   shim_path: PathBuf,
   proxy_log_path: PathBuf,
@@ -246,28 +241,12 @@ impl E2eHarness {
       .with_access_mode(AccessMode::ReadWrite);
     let container = GenericImage::new(CADDY_IMAGE, CADDY_TAG)
       .with_entrypoint("/bin/sh")
-      .with_exposed_port(HTTP_PORT.tcp())
       .with_wait_for(WaitFor::seconds(1))
       .with_cmd(["-c", "sleep infinity"])
       .with_mount(mount)
       .start()
       .await
       .with_context(|| format!("start Docker container {CADDY_IMAGE}:{CADDY_TAG}"))?;
-    let container_host = container
-      .get_host()
-      .await
-      .context("read mapped Caddy container host")?
-      .to_string();
-    let container_port = container
-      .get_host_port_ipv4(HTTP_PORT.tcp())
-      .await
-      .context("read mapped Caddy container HTTP port")?;
-    let http = HttpClient::builder()
-      .no_proxy()
-      .redirect(Policy::none())
-      .timeout(Duration::from_secs(3))
-      .build()
-      .context("build e2e HTTP client")?;
     let proxy_command = write_caddy_proxy(temp.path(), container.id())?;
     let proxy_log_path = temp.path().join("caddy-proxy.log");
     let paths = RuntimePaths::resolve(Some(runtime_dir.clone()))?;
@@ -278,9 +257,6 @@ impl E2eHarness {
     Ok(Self {
       temp,
       container: Some(container),
-      container_host,
-      container_port,
-      http,
       client,
       shim_path,
       proxy_log_path,
@@ -384,9 +360,8 @@ impl E2eHarness {
 
   async fn wait_for_http_ok(&self, host: &str, expected_body: &str) -> Result<()> {
     for _ in 0..300 {
-      if let Ok(response) = self.http_get(host).await
-        && response.0 == StatusCode::OK
-        && response.1.contains(expected_body)
+      if let Ok(Some(body)) = self.http_get(host).await
+        && body.contains(expected_body)
       {
         return Ok(());
       }
@@ -398,8 +373,7 @@ impl E2eHarness {
   async fn wait_for_http_not_ok(&self, host: &str) -> Result<()> {
     for _ in 0..300 {
       match self.http_get(host).await {
-        Ok(response) if response.0 != StatusCode::OK => return Ok(()),
-        Err(_) => return Ok(()),
+        Ok(None) => return Ok(()),
         _ => sleep(Duration::from_millis(100)).await,
       }
     }
@@ -413,13 +387,11 @@ impl E2eHarness {
     healthy_body: &str,
   ) -> Result<()> {
     for _ in 0..300 {
-      let blocked_not_ok = match self.http_get(blocked_host).await {
-        Ok(response) => response.0 != StatusCode::OK,
-        Err(_) => false,
-      };
+      let blocked_not_ok = matches!(self.http_get(blocked_host).await, Ok(None));
       let healthy_ok = match self.http_get(healthy_host).await {
-        Ok(response) => response.0 == StatusCode::OK && response.1.contains(healthy_body),
+        Ok(Some(body)) => body.contains(healthy_body),
         Err(_) => false,
+        Ok(None) => false,
       };
       if blocked_not_ok && healthy_ok {
         return Ok(());
@@ -446,24 +418,30 @@ impl E2eHarness {
     bail!("expected proxy command `{command}` in log:\n{log}");
   }
 
-  async fn http_get(&self, host: &str) -> Result<(StatusCode, String)> {
-    let mut url = Url::parse("http://localhost/").expect("static e2e URL is valid");
-    url
-      .set_host(Some(&self.container_host))
-      .map_err(|_| anyhow::anyhow!("invalid Caddy container host {}", self.container_host))?;
-    url
-      .set_port(Some(self.container_port))
-      .map_err(|_| anyhow::anyhow!("invalid Caddy container port {}", self.container_port))?;
-    let response = self
-      .http
-      .get(url)
-      .header(HOST, host)
-      .send()
+  async fn http_get(&self, host: &str) -> Result<Option<String>> {
+    let container = self.container.as_ref().context("Caddy container missing")?;
+    let mut result = container
+      .exec(ExecCommand::new([
+        "wget".to_string(),
+        "-qO-".to_string(),
+        "--header".to_string(),
+        format!("Host: {host}"),
+        "http://127.0.0.1/".to_string(),
+      ]))
       .await
-      .with_context(|| format!("request mapped Caddy endpoint for {host}"))?;
-    let status = response.status();
-    let body = response.text().await.context("read Caddy response body")?;
-    Ok((status, body))
+      .with_context(|| format!("request loopback Caddy endpoint for {host}"))?;
+    let stdout = result.stdout_to_vec().await?;
+    let _ = result.stderr_to_vec().await?;
+    let exit_code = result
+      .exit_code()
+      .await?
+      .context("container HTTP probe exit code missing")?;
+    if exit_code != 0 {
+      return Ok(None);
+    }
+    Ok(Some(
+      String::from_utf8(stdout).context("Caddy response body was not UTF-8")?,
+    ))
   }
 
   async fn cleanup(&mut self) -> Result<()> {

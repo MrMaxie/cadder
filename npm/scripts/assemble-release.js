@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { platformTargets } from '../lib/platforms.js';
+import { attestationVerifyArguments, releaseSignerWorkflow } from './attestation-policy.js';
 import {
   commandNames,
   documentationFiles,
@@ -19,8 +20,8 @@ import {
 const npmDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const projectDirectory = resolve(npmDirectory, '..');
 
-async function verifyAttestation(path) {
-  await run('gh', ['attestation', 'verify', path, '--repo', 'MrMaxie/Cadder']);
+async function verifyAttestation(path, provenance) {
+  await run('gh', attestationVerifyArguments(path, provenance));
 }
 
 async function verifyArchiveChecksum(archive, checksum) {
@@ -56,13 +57,20 @@ async function prepareRootPackage(output, expectedVersion) {
   return destination;
 }
 
-async function preparePlatformPackage({ assets, output, target, expectedVersion, verifyAttestations }) {
+async function preparePlatformPackage({
+  assets,
+  output,
+  target,
+  expectedVersion,
+  provenance,
+  verifyAttestations,
+}) {
   const archive = resolve(assets, target.archive);
   const checksum = `${archive}.sha256`;
   await verifyArchiveChecksum(archive, checksum);
   if (verifyAttestations) {
-    await verifyAttestation(archive);
-    await verifyAttestation(checksum);
+    await verifyAttestation(archive, provenance);
+    await verifyAttestation(checksum, provenance);
   }
 
   const extractionRoot = await mkdtemp(resolve(output, `.extract-${target.directory}-`));
@@ -118,6 +126,17 @@ const selectedTargets =
 if (typeof targetDirectory !== 'undefined' && selectedTargets.length !== 1) {
   throw new Error(`Unknown npm platform target: ${targetDirectory}`);
 }
+const provenance = testMode
+  ? null
+  : {
+      sourceRef: requiredArgument(argumentsMap, 'source-ref'),
+      sourceDigest: requiredArgument(argumentsMap, 'source-digest'),
+      signerWorkflow: requiredArgument(argumentsMap, 'signer-workflow'),
+    };
+if (provenance) {
+  attestationVerifyArguments('release-asset', provenance);
+  assert.equal(provenance.signerWorkflow, releaseSignerWorkflow);
+}
 
 await prepareRootPackage(output, version);
 const packages = [];
@@ -128,6 +147,7 @@ for (const target of selectedTargets) {
       output,
       target,
       expectedVersion: version,
+      provenance,
       verifyAttestations: !testMode,
     }),
   );

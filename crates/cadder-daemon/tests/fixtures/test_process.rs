@@ -97,6 +97,10 @@ fn adapt(mode: &str) -> io::Result<u8> {
       println!("{{\"apps\":{{}}}}");
       Ok(0)
     }
+    "project-adapt-oversized" => {
+      io::stdout().write_all(&vec![b'x'; 2_048])?;
+      Ok(0)
+    }
     mode if mode.starts_with("adapter-") => {
       println!("{ADAPTER_CONFIG}");
       Ok(0)

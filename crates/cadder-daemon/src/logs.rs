@@ -3,31 +3,78 @@ use cadder_ipc::{
   LogAttributionKind, LogEntry, LogEntryKind, LogSeverity, LogStreamIdentity, LogStreamStatus,
 };
 use chrono::Utc;
+use regex::Regex;
 use std::{
   collections::{HashMap, VecDeque},
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, OnceLock},
 };
+
+const REDACTION_MARKER: &str = "[redacted]";
+
+struct RedactionPatterns {
+  private_key: Regex,
+  header: Regex,
+  bearer: Regex,
+  quoted_assignment: Regex,
+  assignment: Regex,
+}
+
+fn redaction_patterns() -> &'static RedactionPatterns {
+  static PATTERNS: OnceLock<RedactionPatterns> = OnceLock::new();
+  PATTERNS.get_or_init(|| RedactionPatterns {
+    private_key: Regex::new(
+      r"(?is)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----",
+    )
+    .expect("private-key redaction pattern is valid"),
+    header: Regex::new(
+      r"(?im)\b(authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]*",
+    )
+    .expect("header redaction pattern is valid"),
+    bearer: Regex::new(r"(?i)\bbearer\s+[^\s,;]+")
+      .expect("bearer redaction pattern is valid"),
+    quoted_assignment: Regex::new(
+      r#"(?i)([\"']?(?:access[_-]?token|api[_-]?token|token|password|secret)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*')"#,
+    )
+    .expect("quoted credential redaction pattern is valid"),
+    assignment: Regex::new(
+      r#"(?i)([\"']?(?:access[_-]?token|api[_-]?token|token|password|secret)[\"']?\s*[:=]\s*)[^\s,;&}\]]+"#,
+    )
+    .expect("credential redaction pattern is valid"),
+  })
+}
 
 #[derive(Debug, Clone)]
 pub struct Redactor;
 
 impl Redactor {
   pub fn redact(input: &str) -> String {
-    let mut output = Vec::new();
-    for token in input.split_whitespace() {
-      let lower = token.to_ascii_lowercase();
-      if lower.contains("authorization:")
-        || lower.starts_with("bearer")
-        || lower.contains("token=")
-        || lower.contains("password=")
-        || lower.contains("secret=")
-      {
-        output.push("[redacted]");
-      } else {
-        output.push(token);
-      }
-    }
-    output.join(" ")
+    let patterns = redaction_patterns();
+    let output = patterns
+      .private_key
+      .replace_all(input, REDACTION_MARKER)
+      .into_owned();
+    let output = patterns
+      .header
+      .replace_all(&output, |captures: &regex::Captures<'_>| {
+        format!("{}: {REDACTION_MARKER}", &captures[1])
+      })
+      .into_owned();
+    let output = patterns
+      .bearer
+      .replace_all(&output, format!("Bearer {REDACTION_MARKER}"))
+      .into_owned();
+    let output = patterns
+      .quoted_assignment
+      .replace_all(&output, |captures: &regex::Captures<'_>| {
+        format!("{}{REDACTION_MARKER}", &captures[1])
+      })
+      .into_owned();
+    patterns
+      .assignment
+      .replace_all(&output, |captures: &regex::Captures<'_>| {
+        format!("{}{REDACTION_MARKER}", &captures[1])
+      })
+      .into_owned()
   }
 }
 

@@ -648,6 +648,36 @@ async fn adapter_reports_adapt_timeout() {
   );
 }
 
+#[tokio::test]
+async fn adapter_rejects_output_above_the_configured_stream_limit() {
+  let dir = tempdir("caddy-adapt-oversized-");
+  let config_path = dir.path().join("Caddyfile");
+  fs::write(&config_path, "app.localhost { respond ok }").unwrap();
+  let oversized_caddy = install_test_process(dir.path(), "project-adapt-oversized");
+  let adapter = CaddyConfigAdapter::with_command_limits(
+    RealCaddyResolver::with_executable_path(
+      Some(oversized_caddy.display().to_string()),
+      Some(dir.path().join(exe_name_for_test("cadderd"))),
+    ),
+    Duration::from_secs(5),
+    1_024,
+  );
+  let mut registration = registration("project", &[]);
+  registration.source_config_path = SourcePath::new(
+    config_path.display().to_string(),
+    Some(config_path.display().to_string()),
+  );
+
+  let prepared = adapter.prepare(registration).await;
+
+  assert_eq!(prepared.diagnostics[0].code, "adapt-failed");
+  assert!(
+    prepared.diagnostics[0]
+      .message
+      .contains("process output exceeded the 1024 byte stream limit")
+  );
+}
+
 #[test]
 fn trusted_caddy_source_resolution_help_names_only_explicit_sources() {
   let resolver = RealCaddyResolver::with_test_sources(
@@ -1027,7 +1057,7 @@ fn compose_config_uses_placeholder_route_when_adapted_routes_are_missing() {
 
   assert_eq!(
     config
-      .pointer("/apps/http/servers/cadder_https/routes/0/handle/0/body")
+      .pointer("/apps/http/servers/cadder_https/routes/0/handle/0/routes/0/handle/0/body")
       .and_then(Value::as_str),
     Some("Cadder route placeholder")
   );
@@ -1064,6 +1094,68 @@ fn compose_config_drops_routes_for_disabled_domains() {
 
   assert_eq!(hosts, &[json!("app.localhost")]);
   assert_eq!(tls_subjects, &[json!("app.localhost")]);
+}
+
+#[test]
+fn compose_config_binds_only_explicit_loopback_addresses() {
+  let config = compose_config(
+    &[registration("shim", &["app.localhost"])],
+    &BTreeMap::new(),
+  );
+
+  assert_eq!(
+    config.pointer("/apps/http/servers/cadder_http/listen"),
+    Some(&json!(["127.0.0.1:80", "[::1]:80"]))
+  );
+  assert_eq!(
+    config.pointer("/apps/http/servers/cadder_https/listen"),
+    Some(&json!(["127.0.0.1:443", "[::1]:443"]))
+  );
+}
+
+#[test]
+fn compose_config_guards_hostless_sibling_routes_with_registration_hosts() {
+  let routes_by_registration = BTreeMap::from([(
+    "shim".to_string(),
+    vec![json!({
+      "handle": [{
+        "handler": "subroute",
+        "routes": [
+          {
+            "match": [{ "host": ["app.localhost"] }],
+            "handle": [{ "handler": "static_response", "body": "app" }]
+          },
+          {
+            "handle": [{ "handler": "static_response", "body": "catch-all" }]
+          }
+        ]
+      }]
+    })],
+  )]);
+
+  let config = compose_config(
+    &[registration("shim", &["app.localhost"])],
+    &routes_by_registration,
+  );
+
+  assert_eq!(
+    config.pointer("/apps/http/servers/cadder_https/routes/0/match/0/host"),
+    Some(&json!(["app.localhost"]))
+  );
+  assert_eq!(
+    config
+      .pointer("/apps/http/servers/cadder_https/routes/0/handle/0/handler")
+      .and_then(Value::as_str),
+    Some("subroute")
+  );
+  assert_eq!(
+    config
+      .pointer(
+        "/apps/http/servers/cadder_https/routes/0/handle/0/routes/0/handle/0/routes/1/handle/0/body",
+      )
+      .and_then(Value::as_str),
+    Some("catch-all")
+  );
 }
 
 #[test]

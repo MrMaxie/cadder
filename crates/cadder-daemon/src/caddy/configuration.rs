@@ -1,9 +1,12 @@
 use super::*;
 
+const MAX_CADDY_ADAPT_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct CaddyConfigAdapter {
   resolver: RealCaddyResolver,
   command_timeout: Duration,
+  max_output_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +21,7 @@ impl CaddyConfigAdapter {
     Self {
       resolver,
       command_timeout: Duration::from_secs(30),
+      max_output_bytes: MAX_CADDY_ADAPT_OUTPUT_BYTES,
     }
   }
 
@@ -25,6 +29,20 @@ impl CaddyConfigAdapter {
     Self {
       resolver,
       command_timeout,
+      max_output_bytes: MAX_CADDY_ADAPT_OUTPUT_BYTES,
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn with_command_limits(
+    resolver: RealCaddyResolver,
+    command_timeout: Duration,
+    max_output_bytes: usize,
+  ) -> Self {
+    Self {
+      resolver,
+      command_timeout,
+      max_output_bytes,
     }
   }
 
@@ -48,7 +66,7 @@ impl CaddyConfigAdapter {
         routes: Vec::new(),
         diagnostics: vec![ConfigDiagnostic {
           code: "adapt-failed".to_string(),
-          message: error.to_string(),
+          message: format!("{error:#}"),
           domain_key: None,
           source_config_paths: Vec::new(),
         }],
@@ -82,7 +100,7 @@ impl CaddyConfigAdapter {
       })
       .await?;
     let output = child
-      .wait_for_output(self.command_timeout, "caddy adapt")
+      .wait_for_bounded_output(self.command_timeout, "caddy adapt", self.max_output_bytes)
       .await?;
 
     if !output.status.success() {
@@ -466,20 +484,26 @@ pub(super) fn compose_config(
     }
     tls_subjects.extend(enabled_hosts.iter().cloned());
 
-    if let Some(source_routes) = routes_by_registration.get(&registration.registration_id) {
-      for route in source_routes {
-        if let Some(filtered) = filter_route_hosts(route.clone(), &enabled_hosts) {
-          routes.push(filtered);
-        }
-      }
-    } else {
-      for host in enabled_hosts {
-        routes.push(json!({
-            "match": [{ "host": [host] }],
-            "handle": [{ "handler": "static_response", "body": "Cadder route placeholder" }],
-            "terminal": true
-        }));
-      }
+    let registration_routes =
+      if let Some(source_routes) = routes_by_registration.get(&registration.registration_id) {
+        source_routes
+          .iter()
+          .filter_map(|route| filter_route_hosts(route.clone(), &enabled_hosts))
+          .collect()
+      } else {
+        enabled_hosts
+          .iter()
+          .map(|host| {
+            json!({
+                "match": [{ "host": [host] }],
+                "handle": [{ "handler": "static_response", "body": "Cadder route placeholder" }],
+                "terminal": true
+            })
+          })
+          .collect()
+      };
+    if let Some(guarded) = guard_registration_routes(registration_routes, &enabled_hosts) {
+      routes.push(guarded);
     }
   }
   let tls_subjects = tls_subjects.into_iter().collect::<Vec<_>>();
@@ -493,12 +517,12 @@ pub(super) fn compose_config(
       "apps": {
           "http": {
               "servers": {
-                  "cadder_http": {
-                      "listen": [":80"],
+                    "cadder_http": {
+                        "listen": ["127.0.0.1:80", "[::1]:80"],
                       "routes": http_routes
                   },
                   "cadder_https": {
-                      "listen": [":443"],
+                        "listen": ["127.0.0.1:443", "[::1]:443"],
                       "tls_connection_policies": [{}],
                       "routes": routes
                   }
@@ -514,6 +538,21 @@ pub(super) fn compose_config(
           }
       }
   })
+}
+
+fn guard_registration_routes(
+  routes: Vec<Value>,
+  enabled_hosts: &BTreeSet<String>,
+) -> Option<Value> {
+  if routes.is_empty() {
+    return None;
+  }
+  let hosts = enabled_hosts.iter().cloned().collect::<Vec<_>>();
+  Some(json!({
+      "match": [{ "host": hosts }],
+      "handle": [{ "handler": "subroute", "routes": routes }],
+      "terminal": true
+  }))
 }
 
 pub(super) fn mock_route_for_domain(domain: &str) -> Value {
