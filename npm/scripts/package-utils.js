@@ -120,3 +120,15 @@ export async function listFiles(root) {
 export function npmArchiveName(packageName, version) {
   return `${packageName.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
 }
+
+export function archiveContentRoot(archiveName, actualFiles, expectedFiles) {
+  if (sameFiles(actualFiles, expectedFiles)) return '';
+
+  const wrapper = archiveName.replace(/\.(?:tar\.xz|zip)$/, '');
+  const wrappedFiles = expectedFiles.map((file) => `${wrapper}/${file}`);
+  return sameFiles(actualFiles, wrappedFiles) ? wrapper : null;
+}
+
+function sameFiles(actualFiles, expectedFiles) {
+  return actualFiles.length === expectedFiles.length && actualFiles.every((file, index) => file === expectedFiles[index]);
+}

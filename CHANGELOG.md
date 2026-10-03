@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- Arcantry release baseline: 0.8.0 (2026-06-11). Earlier history is not reconstructed. -->
 
+## [1.0.5] - 2026-10-03
+
+### Fixed
+
+#### Assemble npm packages from verified cargo-dist archives
+
+The npm publishing pipeline now accepts the single versioned directory emitted by cargo-dist while still rejecting unexpected wrappers, files, and executable metadata before staging packages.
+
 ## [1.0.4] - 2026-10-03
 
 ### Fixed
@@ -76,7 +84,8 @@ Profiles, autostart, history, export, continuous log tailing and watching, machi
 
 Cadder 1.0 does not ship installers, Homebrew or Scoop packages, crates.io packages, Authenticode signatures, or macOS notarization.
 
-[Unreleased]: https://github.com/MrMaxie/cadder/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/MrMaxie/cadder/compare/v1.0.5...HEAD
+[1.0.5]: https://github.com/MrMaxie/cadder/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/MrMaxie/cadder/compare/v1.0.0...v1.0.4
 [1.0.0]: https://github.com/MrMaxie/cadder/compare/v0.8.0...v1.0.0
 <!-- arcantry:changelog:end -->
