@@ -13,8 +13,8 @@ name = "cadder-client"
 path = "src/main.rs"
 
 [dependencies]
-cadder-api = { version = "1.0.3", path = "../cadder-api" }
-cadder-ipc = { version = "1.0.3", path = "../cadder-ipc" }
+cadder-api = { version = "1.0.4", path = "../cadder-api" }
+cadder-ipc = { version = "1.0.4", path = "../cadder-ipc" }
 clap = { version = "=4.6.1", features = ["derive"] }
 color-eyre = "=0.6.5"
 crossterm = { version = "=0.29.0", features = ["event-stream"] }
