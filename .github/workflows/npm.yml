@@ -151,6 +151,8 @@ jobs:
           node-version: 24.18.0
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Remove setup-node auth placeholder
+        run: sed -i '/:_authToken=/d' "$NPM_CONFIG_USERCONFIG"
       - name: Pin npm CLI
         run: npm install --global npm@12.0.2 --ignore-scripts
       - name: Download verified npm tarballs
