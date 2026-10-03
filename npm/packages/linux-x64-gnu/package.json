@@ -1,6 +1,6 @@
 {
   "name": "@maxiedev/cadder-linux-x64-gnu",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Linux x64 glibc native binaries for Cadder.",
   "license": "Apache-2.0",
   "repository": {
