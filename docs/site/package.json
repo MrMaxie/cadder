@@ -11,13 +11,13 @@
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",
-    "@astrojs/starlight": "0.42.1",
+    "@astrojs/starlight": "0.42.4",
     "@fontsource-variable/fira-code": "5.3.0",
     "@fontsource-variable/space-grotesk": "5.3.0",
     "@fortawesome/free-solid-svg-icons": "7.3.1",
-    "astro": "7.3.2",
-    "sharp": "0.35.4",
-    "simple-icons": "16.31.0",
+    "astro": "7.3.5",
+    "sharp": "0.35.5",
+    "simple-icons": "16.33.0",
     "typescript": "6.0.3"
   },
   "packageManager": "npm@11.16.0"
