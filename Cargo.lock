@@ -430,7 +430,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cadder"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "cadder-api",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "cadder-api"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "cadder-daemon",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "cadder-client"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "cadder-api",
  "cadder-ipc",
@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "cadder-daemon"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "backon",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "cadder-ipc"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "chrono",
  "idna",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "cadder-shim"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "cadder-api",
