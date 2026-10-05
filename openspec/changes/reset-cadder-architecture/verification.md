@@ -35,11 +35,19 @@ authority and cannot authorize another account.
 
 ## Required remaining runtime gate
 
-The committed CI matrix must pass on Windows, Linux and macOS. Real same-owner
-user-to-elevated contact and different-user rejection remain unverified on
-macOS and Windows, including Windows Sandbox. Fake Unix policy tests do not
-prove these privilege transitions. Do not mark N2 complete or port Caddy before
-these gates.
+The [native CI matrix](https://github.com/MrMaxie/cadder/actions/runs/37324338555)
+passes on Windows x64, Linux x64 and macOS arm64. It verifies typechecking,
+linting, formatting, native compiled-JS IPC/SQLite/process smoke and coverage.
+Own-code line coverage is 90.30% on Windows and 87.95% on Linux and macOS, with
+runtime modules included. Unix runners also pass real same-owner normal-user
+contact with a root daemon and different-account denial.
+
+Real same-owner user-to-elevated contact and different-user rejection remain
+unverified on Windows, including Windows Sandbox. The interactive fixture and
+read-only Sandbox package are prepared; preparation is not execution evidence.
+Follow `windows-runtime-gate.md`. Do not mark N2 complete or port Caddy before
+the Windows privilege gate passes. No host UAC policy, accounts, IIS bindings
+or autostart settings are changed by preparing the package.
 
 ## Commands
 

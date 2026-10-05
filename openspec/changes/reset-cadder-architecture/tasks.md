@@ -7,7 +7,7 @@ Node migration. The approved target and gates are in `node-migration.md`.
 - [ ] N2. Implement v2 owner-protected runtime, SQLite exclusion, mutual HMAC IPC and system gate tests.
   - [x] N2.1 Implement runtime/IPC foundation and run Windows unit, regression and native child-process tests.
   - [x] N2.2 Run the compiled-JS native runtime gate on Linux x64 with real Unix sockets and permissions.
-  - [ ] N2.3 Pass the native Windows/Linux/macOS CI matrix on the committed code.
+  - [x] N2.3 Pass the native Windows/Linux/macOS CI matrix on the committed code.
   - [ ] N2.4 Verify same-owner non-elevated contact with elevated daemon and different-account denial in system tests, including Windows Sandbox.
 - [ ] N3. Port Caddy composition, transaction queue, loopback mTLS and owned-process lifecycle.
 - [ ] N4. Port shim policy, safe resolution, heartbeat, autostart and scoped IIS helpers.

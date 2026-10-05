@@ -50,6 +50,9 @@ jobs:
       - name: Native same-owner elevated daemon and different-account denial
         if: runner.os != 'Windows'
         run: node "${{ steps.fixtures.outputs.stage }}/runtime-privilege-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-denied-client.mjs"
+      - name: Prepare interactive Windows gate without launching Sandbox
+        if: runner.os == 'Windows'
+        run: node scripts/prepare-windows-runtime-sandbox.ts
       - name: Verify no tracked build output
         run: git diff --exit-code
       - name: Upload coverage

@@ -15,6 +15,9 @@ await build({
     'runtime-privilege-smoke': fileURLToPath(
       new URL('../test/fixtures/runtime-privilege-smoke.ts', import.meta.url),
     ),
+    'runtime-windows-contact': fileURLToPath(
+      new URL('../test/fixtures/runtime-windows-contact.ts', import.meta.url),
+    ),
   },
   outdir: stage,
   outExtension: { '.js': '.mjs' },

@@ -2,7 +2,7 @@ import { startLocalRuntime } from '../../src/daemon/local-runtime.ts';
 
 const options: { runtimeDir?: string; runtimeOwner?: number } = {};
 if (process.argv[2] !== undefined) options.runtimeDir = process.argv[2];
-if (process.argv[3] !== undefined) options.runtimeOwner = Number(process.argv[3]);
+if (process.getuid && process.argv[3] !== undefined) options.runtimeOwner = Number(process.argv[3]);
 const runtime = await startLocalRuntime(options, async (request) => {
   if (request.method === 'status') return { processId: process.pid, recovered: runtime.recovered };
   if (request.method === 'shutdown') {
@@ -21,6 +21,9 @@ async function shutdown() {
 process.on('SIGTERM', () => {
   void shutdown();
 });
-setTimeout(() => {
-  void shutdown();
-}, 30000).unref();
+setTimeout(
+  () => {
+    void shutdown();
+  },
+  process.argv.includes('--interactive-gate') ? 300000 : 30000,
+).unref();
