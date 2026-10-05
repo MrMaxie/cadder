@@ -22,8 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-    env:
-      CADDER_COVERAGE_DIR: ${{ runner.temp }}/cadder-node-coverage
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: actions/setup-node@v7.0.0
@@ -40,6 +38,8 @@ jobs:
       - name: Check formatting
         run: nub run format:check
       - name: Test runtime and coverage
+        env:
+          CADDER_COVERAGE_DIR: ${{ runner.temp }}/cadder-node-coverage
         run: nub run coverage
       - name: Pack native runtime fixtures outside checkout
         id: fixtures
@@ -47,6 +47,9 @@ jobs:
         run: echo "stage=$(node scripts/prepare-runtime-gate.ts)" >> "$GITHUB_OUTPUT"
       - name: Native compiled-JS runtime smoke without TS loader
         run: node "${{ steps.fixtures.outputs.stage }}/runtime-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs"
+      - name: Native same-owner elevated daemon and different-account denial
+        if: runner.os != 'Windows'
+        run: node "${{ steps.fixtures.outputs.stage }}/runtime-privilege-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-denied-client.mjs"
       - name: Verify no tracked build output
         run: git diff --exit-code
       - name: Upload coverage
@@ -54,6 +57,6 @@ jobs:
         uses: actions/upload-artifact@v7.0.1
         with:
           name: node-coverage-${{ matrix.os }}
-          path: ${{ env.CADDER_COVERAGE_DIR }}
+          path: ${{ runner.temp }}/cadder-node-coverage
           if-no-files-found: ignore
           retention-days: 14

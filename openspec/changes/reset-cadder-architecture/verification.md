@@ -25,6 +25,9 @@ authority and cannot authorize another account.
 - Linux x64 native gate passes in a local Linux environment: real Unix socket,
   real file permissions, child-process exclusion, forced crash and recovery,
   authenticated contact and orderly shutdown.
+- Linux x64 privilege gate passes with a root daemon explicitly assigned to the
+  normal user's runtime. The normal user authenticates successfully; an existing
+  different account is denied; authenticated shutdown releases the runtime.
 - Authentication tests cover fake server proof, wrong/reflected client proof,
   proof replay, RPC replay/tampering and RPC before authentication.
 - Unsafe ACLs are rejected instead of repaired. A failed discovery publication
@@ -33,9 +36,10 @@ authority and cannot authorize another account.
 ## Required remaining runtime gate
 
 The committed CI matrix must pass on Windows, Linux and macOS. Real same-owner
-user-to-elevated contact and different-user rejection remain system acceptance
-items, including Windows Sandbox. Fake Unix policy tests do not prove these
-privilege transitions. Do not mark N2 complete or port Caddy before these gates.
+user-to-elevated contact and different-user rejection remain unverified on
+macOS and Windows, including Windows Sandbox. Fake Unix policy tests do not
+prove these privilege transitions. Do not mark N2 complete or port Caddy before
+these gates.
 
 ## Commands
 
@@ -51,4 +55,7 @@ node scripts/prepare-runtime-gate.ts
 The last command prints an outside-checkout staging directory containing test
 fixtures. Run `node <stage>/runtime-smoke.mjs <stage>/runtime-child.mjs` with the
 native platform Node 24.18.0. These fixtures are not npm or SEA release artifacts.
+On Unix, run `node <stage>/runtime-privilege-smoke.mjs <stage>/runtime-child.mjs
+<stage>/runtime-denied-client.mjs` as a non-root user with noninteractive sudo.
+Only disposable test runtime files and fixture processes are used.
 Coverage output also stays in system/runner temp. No publication is performed.
