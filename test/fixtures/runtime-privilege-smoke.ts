@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { rpc } from '../../src/client/connection.ts';
 import { resolvePaths } from '../../src/daemon/paths.ts';
@@ -14,14 +13,25 @@ const daemonEntry = process.argv[2];
 const deniedEntry = process.argv[3];
 if (!daemonEntry || !deniedEntry)
   throw new Error('Pass packed runtime-child and runtime-denied-client entrypoints.');
-const root = await mkdtemp(join(tmpdir(), 'cadder-privilege-'));
+// macOS runner tool caches and per-user temp directories are not traversable by nobody.
+// Publish only the executable and test bundle in a disposable shared directory.
+const inputs = await mkdtemp('/tmp/cadder-privilege-inputs-');
+const root = await mkdtemp('/tmp/cadder-privilege-runtime-');
 const paths = resolvePaths({ runtimeDir: root });
-await prepareRuntime(paths.directory, await runtimeOwner());
 const environment = { ...process.env };
 delete environment.NODE_OPTIONS;
 let daemon: ChildProcessWithoutNullStreams | undefined;
 
 try {
+  const outsiderNode = join(inputs, 'node');
+  const outsiderEntry = join(inputs, 'runtime-denied-client.mjs');
+  await copyFile(process.execPath, outsiderNode);
+  await copyFile(deniedEntry, outsiderEntry);
+  await chmod(outsiderNode, 0o755);
+  await chmod(outsiderEntry, 0o644);
+  await chmod(inputs, 0o755);
+  await chmod(root, 0o755);
+  await prepareRuntime(paths.directory, await runtimeOwner());
   daemon = spawn('sudo', ['-n', process.execPath, daemonEntry, root, String(process.getuid())], {
     env: environment,
   });
@@ -51,7 +61,7 @@ try {
   };
   assert.equal(discovery.elevated, true);
   assert.equal(discovery.owner, `uid:${process.getuid()}`);
-  const outsider = spawn('sudo', ['-n', '-u', 'nobody', process.execPath, deniedEntry, root], {
+  const outsider = spawn('sudo', ['-n', '-u', 'nobody', outsiderNode, outsiderEntry, root], {
     env: environment,
   });
   let deniedOutput = '';
@@ -79,4 +89,5 @@ try {
     await exited;
   }
   await rm(root, { recursive: true, force: true });
+  await rm(inputs, { recursive: true, force: true });
 }
