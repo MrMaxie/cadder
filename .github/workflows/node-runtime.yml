@@ -28,7 +28,7 @@ jobs:
         with:
           node-version: 24.18.0
       - name: Bootstrap pinned repository manager
-        run: npm install --global nub@0.7.5
+        run: npm install --global @nubjs/nub@0.7.5
       - name: Install exact locked dependencies
         run: nub ci
       - name: Check TypeScript
