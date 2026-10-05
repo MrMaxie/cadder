@@ -1,89 +1,55 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
-### Requirement: OpenSpec is the planning source of truth
-The repository SHALL use OpenSpec for product requirements, design decisions,
-and implementation planning.
+### Requirement: QT-001: Declarative contributor environment
+The Node product SHALL declare exact dependencies, tool versions and locks, managed by Nub, without private paths/credentials. TypeScript SHALL be 6.0.3; the npm-tested Node minimum SHALL be 24.18.0 on Node 24 LTS. SEA SHALL use a separately verified, exact Node 26 builder pin. Required tools SHALL work on Windows/Linux/macOS without a custom compiled task runner after cutover.
 
-#### Scenario: New architecture work is proposed
-- **WHEN** new architecture or product behavior work is proposed
-- **THEN** the work SHALL be captured as an OpenSpec change
-- **AND** the change SHALL define affected capabilities before implementation
+#### Scenario: Fresh Node-only checkout
+- **WHEN** a contributor follows the declared setup after Rust removal
+- **THEN** Node tests/build/docs/packaging SHALL work without Cargo/Rust or private setup
 
-#### Scenario: Project documentation conflicts with OpenSpec
-- **WHEN** project documentation conflicts with accepted OpenSpec requirements
-- **THEN** OpenSpec SHALL be treated as authoritative
-- **AND** the documentation SHALL be updated or explicitly marked stale
+### Requirement: QT-002: One discoverable task surface
+Node validation/build/pack tasks SHALL be discoverable as Nub package scripts, with focused commands and a complete check. Existing tool provisioning MAY remain as a thin adapter during cutover, not a competing policy framework. Custom scripts SHALL be limited to Cadder-specific packaging/acceptance seams.
 
-### Requirement: Release surface follows accepted specs
-Release artifacts, docs, and validation SHALL include only product surfaces
-defined by accepted OpenSpec requirements or an active approved change.
+#### Scenario: Contributor runs complete checks
+- **WHEN** the documented Node check/pack verification commands run
+- **THEN** each SHALL delegate to its owning maintained tool
+- **AND** there SHALL be no replacement general-purpose custom command dispatcher
 
-#### Scenario: Release artifact list generated
-- **WHEN** release metadata is generated
-- **THEN** every shipped artifact SHALL map to a documented product surface
-- **AND** undocumented artifacts SHALL fail validation or require an explicit OpenSpec change
+### Requirement: QT-003: Maintained tools own validation and release formats
+tsc noEmit, ESLint, Prettier, Vitest/V8 and ink-testing-library SHALL own their checks; own TS/TSX line coverage SHALL be at least 85%, including hard runtime modules without selective exclusion. npm emission SHALL use tsc with relative import rewriting; SEA bundling SHALL use esbuild and the pinned Node builder. All generated Node JS/bundles/archives/coverage SHALL go to system or runner temp outside checkout, never beside source or into tracked files. Astro/Starlight SHALL own documentation checks/builds with Nub-managed dependencies.
 
-#### Scenario: Documentation advertises a workflow
-- **WHEN** user documentation advertises a workflow
-- **THEN** that workflow SHALL map to an accepted requirement or active change
-- **AND** stale workflows SHALL be removed or moved to historical notes
+#### Scenario: Pack verification runs
+- **WHEN** the same source is checked and packed for either channel
+- **THEN** the supported tools SHALL produce only outside-checkout Node artifacts
+- **AND** tracked files SHALL remain unchanged with no emitted source-side JS
 
-### Requirement: Files stay small and cohesive
-Production source files SHALL stay focused on one concern and SHOULD remain
-under the project file-size threshold unless an explicit exception is documented.
+### Requirement: QT-004: Local and CI task parity
+CI SHALL invoke the same checks and non-publishing packing process as local verification, with native Windows/Linux/macOS system/security integration and every SEA target. PR jobs SHALL not publish or receive publication credentials. Native exact-artifact verification SHALL precede attest/publish stages with least privilege and source/tag validation. Documentation examples SHALL be tested.
 
-#### Scenario: File exceeds threshold
-- **WHEN** a source file exceeds the configured line threshold
-- **THEN** the change SHALL either split the file by concern or document a narrow exception
-- **AND** validation SHALL report the exception visibly
+#### Scenario: Candidate PR is validated
+- **WHEN** CI verifies a migration or release candidate
+- **THEN** it SHALL check contracts, coverage, native product behavior and both channels
+- **AND** artifact preparation SHALL NOT create a public release or registry publication
 
-#### Scenario: Generated file exceeds threshold
-- **WHEN** a generated file exceeds the threshold
-- **THEN** the file SHALL be marked as generated or excluded by policy
-- **AND** reviewers SHALL not treat it as a precedent for hand-written modules
+### Requirement: QT-005: Evidence-gated task-runner removal
+The Rust/Cargo product and obsolete native npm/release packaging SHALL be removed only after complete Node functionality and both distributions pass acceptance at the candidate revision. Each old responsibility SHALL have a verified replacement or explicitly approved removal. Unrelated pre-existing untracked npm content SHALL be inspected and preserved. After removal, the full Node-only gate SHALL pass again without Rust/Cargo installed.
 
-### Requirement: Mature tools are preferred over custom orchestration
-The project SHALL prefer proven external tools for testing, coverage, release,
-documentation, and command orchestration when they satisfy Cadder's needs.
+#### Scenario: Rust removal is proposed
+- **WHEN** one required capability, platform or distribution still lacks evidence
+- **THEN** Rust removal SHALL wait and migration SHALL remain incomplete
+- **AND** a foundation checkpoint SHALL NOT be represented as the finished migration
 
-#### Scenario: Tooling task duplicates external tool
-- **WHEN** a custom tooling feature duplicates a mature external tool
-- **THEN** the change SHALL either replace it or justify why Cadder-specific logic is required
-- **AND** the resulting implementation SHALL remain small and reviewable
+### Requirement: QT-006: npm packages pass clean-room verification
+The gate SHALL verify the actual single npm tarball and every extracted SEA archive outside checkout using the publication packing process without publishing. It SHALL verify exact allowed files, version/license/repository identity, all three entries, local/global npm installs, argument/stream/exit fidelity and no wrapper recursion. npm SHALL have no platform optional packages or install scripts; SEA SHALL pass real TUI/SQLite/worker/child smoke without Node/npm PATH.
 
-#### Scenario: Dependency proposed
-- **WHEN** a new dependency is proposed for tooling or runtime code
-- **THEN** the task SHALL state the job it performs, why it is preferable to custom code, and how it will be tested
+#### Scenario: Clean consumer verification fails
+- **WHEN** either channel fails its native packed-consumer catalog
+- **THEN** neither the whole migration nor matching final release SHALL be accepted
 
-### Requirement: Test strategy covers independent seams
-Cadder SHALL test domain logic, external adapters, protocol contracts, client
-rendering, platform providers, and log filtering independently before relying on
-system smoke tests.
+### Requirement: QT-007: npm publication uses staged trusted publishing
+After separate publication approval, the single npm package SHALL retain short-lived OIDC trusted publishing from the exact protected GitHub workflow, staged publishing and maintainer 2FA review, without long-lived npm tokens. The consumed candidate SHALL match the verified source revision/version and complete npm/SEA evidence. The obsolete native-platform-package approval order SHALL not remain a dependency of the new single package.
 
-#### Scenario: Runtime logic tested without external process
-- **WHEN** runtime registration, config composition, or lifecycle logic is tested
-- **THEN** the test SHALL use fake adapters unless the test is explicitly marked as integration or smoke coverage
-- **AND** failure paths SHALL be covered with typed errors
-
-#### Scenario: Client rendering tested without daemon
-- **WHEN** client screens or output modes are tested
-- **THEN** tests SHALL use mock view models or fake client responses
-- **AND** no real IPC SHALL be required
-
-#### Scenario: System behavior needs OS integration
-- **WHEN** a behavior depends on OS services, process installation, path resolution, or platform-specific permissions
-- **THEN** a system smoke test SHALL cover that behavior
-- **AND** unit tests SHALL still cover the decision logic separately
-
-### Requirement: Coverage and CI are explicit
-The project SHALL keep automated coverage and CI expectations visible in
-OpenSpec and project documentation.
-
-#### Scenario: Full validation runs in CI
-- **WHEN** CI validates Cadder
-- **THEN** it SHALL run the formatting, linting, test, documentation, release metadata, and coverage checks required by the current specs
-- **AND** failures SHALL identify which project contract was violated where practical
-
-#### Scenario: Local verification is skipped
-- **WHEN** a change cannot run part of the expected verification locally
-- **THEN** the final change notes SHALL state what was skipped and why
+#### Scenario: Authorized candidate reaches publishing
+- **WHEN** the separately approved matched candidate enters the publishing workflow
+- **THEN** it SHALL stage the exact verified single package with trusted provenance
+- **AND** a maintainer SHALL approve publication without an embedded persistent token

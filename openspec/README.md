@@ -1,10 +1,18 @@
 # Cadder OpenSpec
 
-> Last reviewed: 2026-07-12
+> Last reviewed: 2026-10-05
 
 OpenSpec records the accepted Cadder 1.0 contract and the evidence that the
 implementation satisfies it. Product requirements live here; public docs
 explain how people use the finished product.
+
+The active `reset-cadder-architecture` now defines the approved 2.0 Node migration,
+not another Rust reset. Its functional scope preserves the released Rust 1.0.5
+CLI/TUI, not superseded history/IIS/autostart or machine-output workflows. Its
+`acceptance.md` maps the approved scope to stable
+requirement IDs, ordered gates and evidence; `tasks.md` counts only Node work.
+Main specs retain the 1.0 baseline until the reviewed deltas are synced. Planning
+completion is not product readiness or release authorization.
 
 ## Contract model
 
@@ -52,12 +60,12 @@ Run these commands from the repository root:
 openspec doctor
 openspec schema validate implementation
 openspec validate --specs --strict
-cargo xtask openspec-check
+mise run openspec-check
 ```
 
-The repository-specific check verifies requirement identifiers, references,
-verification coverage, and documentation boundaries that OpenSpec does not
-validate itself.
+Also review stable requirement IDs, task-to-acceptance references, verification
+coverage and documentation boundaries explicitly; CLI schema validation does not
+prove that a plan covers the requested product or that implementation exists.
 
 After every implementation change is archived, the final release gate also
 runs `openspec validate --all --strict` against the remaining contract changes

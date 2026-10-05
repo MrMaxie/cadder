@@ -1,80 +1,77 @@
 ## Why
 
-The approved 2.0 migration replaces the Rust workspace with one TypeScript/Node
-product. npm and Node SEA archives on GitHub Releases are equal, required release
-channels. The concrete migration contract is in `node-migration.md`; it
-supersedes earlier Rust-specific implementation choices in this change.
+Cadder's approved migration replaces the Rust product with TypeScript/Node to
+reduce language-boundary and implementation overhead. Preserve the existing
+project Caddyfile -> managed shim -> daemon -> operator journey, with the current
+released Rust 1.0.5 command scope and routes-first TUI, while delivering the same
+product through npm and standalone downloads.
 
-Cadder needs a smaller and more explicit target architecture before more code is
-added. The current direction must make ownership obvious: one runtime service
-owns external state, while compatibility shims and operator clients attach to it
-through stable local contracts.
-
-The target should be familiar to users of daemon-backed developer tools. A
-durable daemon manages the runtime. Thin clients inspect it, configure it, and
-recover from offline states without becoming independent sources of truth.
+The next end-to-end capability is an authenticated, exclusively owned Node
+runtime that passes the real privilege-boundary gate. That is a prerequisite,
+not the finished migration.
 
 ## What Changes
 
-- Define the product topology around:
-  - a daemon that owns runtime state and external process coordination;
-  - a Caddy-compatible shim that routes managed Caddy workflows into the daemon;
-  - an operator executable that exposes CLI and TUI workflows.
-- Define the local control plane, runtime identity, privilege boundaries, and
-  daemon-unavailable behavior as product contracts.
-- Define Caddy integration as an adapter boundary: Cadder owns the generated
-  runtime model, and real Caddy is the execution target.
-- Define optional platform integrations behind narrow, testable providers.
-- Treat logs as a first-class operator workflow across runtime, project, domain,
-  source, and severity dimensions.
-- Require future operator surfaces to reuse the same daemon protocol and view
-  models instead of creating another state model.
-- Replace ad hoc planning with OpenSpec requirements, design notes, and
-  implementation tasks.
-- Reconcile workspace crates and tooling around small, independently testable
-  modules and mature external tools where they fit.
+- **BREAKING** Replace the Rust application, Cargo workspace and native npm
+  launcher packages with one TypeScript product after parity and release gates.
+- npm requires Node 24 LTS >=24.18.0; GitHub Releases provides equally required
+  Node SEA standalone archives without an installed Node/npm prerequisite.
+- Keep the three entrypoints, project configuration, Caddyfiles, shim policy,
+  owner/elevated access models and installation isolation. Preserve the current
+  CLI/TUI scope and human-readable output through one client service, including
+  bare help and explicit cadder tui --start-daemon; do not restore removed features.
+- **BREAKING** Isolate runtime v2 and protocol 3/security policy 2. Use mutual
+  HMAC over local NDJSON and a lifetime SQLite exclusion lock. Do not support
+  Rust/Node IPC or import old runtime data.
+- Apply Caddy updates transactionally through an owned process and a protected
+  loopback mTLS admin channel, with last-known-good and ambiguity reconciliation.
+- Build only into outside-checkout staging. Both channels must pass the same
+  consumer scenarios before Rust or its existing release path is removed.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `runtime-topology`: product surfaces, package boundaries, runtime ownership,
-  future-surface constraints, and production/dev runtime identity.
-- `daemon-control-plane`: daemon lifecycle, local IPC, state ownership,
-  protocol compatibility, privilege boundaries, and offline handling.
-- `caddy-shim-integration`: shim command policy, registration lifecycle, config
-  composition, real Caddy resolution, fallback policy, and drift detection.
-- `windows-iis-handoff`: optional IIS discovery, handoff, restore, privilege
-  boundaries, provider abstraction, and system smoke coverage.
-- `observability-logs`: structured log capture, retention, redaction, and query
-  semantics by runtime, project, domain, source, and severity.
-- `operator-clients`: CLI/TUI contracts, offline UX, daemon start/setup flows,
-  reusable view models, and future client boundaries.
-- `quality-tooling`: project workflow, code organization, dependency selection,
-  test strategy, coverage, CI, release, and documentation expectations.
+- `caddy-shim-integration`: explicit command policy, transport/exit fidelity and
+  npm/SEA-aware recursion prevention (SHIM-001 through SHIM-003).
 
 ### Modified Capabilities
 
-The current 1.0 main specs and archived Rust reset remain the released baseline.
-The active 2.0 target in `node-migration.md` supersedes the earlier Rust-specific
-choices in this change without marking pending Node behavior as implemented.
+- `product-topology`: one Node product and daemon-owned state (TOP-001/002).
+- `daemon-lifecycle`: SQLite ownership, managed launch, bounded teardown and
+  explicit owner/elevated access (RUN-001/002/003 and RUN-005).
+- `local-control-plane`: mutual authentication and the retained eight-operation
+  RPC catalog without Rust compatibility (IPC-001/002/003).
+- `caddy-runtime`: verified transactions and protected admin transport while
+  retaining trusted resolution, local routes and bounded adaptation
+  (CADDY-001/003/006; CADDY-002/004/005 remain required).
+- `project-registration`: live session ownership and preserved project formats
+  (REG-001/004; REG-002/003 remain required).
+- `runtime-storage`: Node SQLite state/log worker, schema validation and no
+  old-data migration or cleanup (STO-001 through STO-004).
+- `operator-cli`: released command, human-output and invocation parity (CLI-001).
+- `operator-tui`: real shared-model workflows and explicit offline start
+  (TUI-001/003; TUI-002/004 remain required).
+- `distribution-and-upgrades`: single npm tarball, four equal SEA downloads and
+  explicit transition (DIST-001 through DIST-005).
+- `quality-tooling`: Nub/TS tooling, native gates, release security and verified
+  Rust removal (QT-001 through QT-007; conditional QT-008 remains required).
+- `documentation-experience`: verified equal installation paths and shared
+  contributor workflow (DOC-001/002/004; DOC-003 remains required).
 
 ## Impact
 
-- Planning:
-  - `openspec/` becomes the canonical place for requirements, design decisions,
-    and implementation plans.
-- Runtime architecture:
-  - The daemon owns Cadder-managed runtime state.
-  - Shims and operator clients are protocol clients.
-  - Platform-specific behavior is explicit and isolated behind provider seams.
-- Rust workspace:
-  - Product crates, shared protocol/API code, test support, and tooling must be
-    classified and simplified against the target topology.
-- Testing:
-  - Daemon logic, shim policy, protocol contracts, operator rendering, platform
-    providers, log filtering, and system smoke behavior must be independently
-    testable.
-- Tooling:
-  - Large custom orchestration should shrink or move to mature tools when those
-    tools cover the job clearly.
+The implementation touches protocol, daemon, Caddy adapter, platform adapters,
+client service, CLI/TUI, packaging, CI and Astro/Starlight documentation. It
+removes Cargo, Rust crates, legacy native platform packages and old release
+orchestration only at the final cutover. Existing 1.0.5 releases, runtime and
+database remain available for rollback.
+
+No history, IIS, autostart, machine-output, profiles, export, watch, continuous
+tail, expanded log filters or separate TUI activity/log views are included.
+No Bun, custom WASM, native runtime addons, Web UI, Tauri, new system installers
+or unrelated feature expansion is included. OBS-001 through OBS-004 remain
+unchanged; older historical code is evidence, not authority to restore features.
+Port/Caddyfile inspection and guarded operator process control retain INSPECT-001
+through INSPECT-004. This planning update does not sync/archive specs, bump released versions, change runtime code,
+commit, push, tag or publish.
