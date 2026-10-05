@@ -34,7 +34,7 @@ people, scripts, and agents uses the `cadder` CLI and daemon protocol model.
 
 Windows remains the primary platform target for now, especially least-privilege
 operation, named-pipe security, autostart behavior, shim PATH behavior, Windows
-Sandbox smoke tests, and optional IIS handoff. Cross-platform primitives remain
+Sandbox smoke tests. Cross-platform primitives remain
 preferred where they do not hide platform security or lifecycle differences.
 
 ## Consequences
@@ -42,8 +42,8 @@ preferred where they do not hide platform security or lifecycle differences.
 - The daemon is the single source of truth for Cadder-managed runtime state.
 - The shim cannot silently start unmanaged Caddy for Cadder-managed commands.
 - CLI and TUI must handle daemon-unavailable states as normal user-facing states.
-- Logs are a first-class operator workflow across all logs, project logs,
-  domain logs, and severity filters.
+- Bounded redacted logs remain available through the daemon protocol for
+  diagnostics. The primary TUI does not expose a dedicated log view.
 - Multiple Cadder runtimes are limited to explicit dev/debug profiles.
 - Large custom orchestration must be reduced or justified against mature tools.
 - Future implementation work starts from OpenSpec, not Backlog.md.

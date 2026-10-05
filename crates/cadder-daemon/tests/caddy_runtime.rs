@@ -2,7 +2,7 @@ use cadder_daemon::{
   CaddyConfigAdapter, CaddyConfigCoordinator, CaddyLogStore, ProcessRuntime, RealCaddyResolver,
   RuntimePaths, RuntimeTimeouts,
 };
-use cadder_protocol::{
+use cadder_ipc::{
   ActivationState, EntrypointInstanceIdentity, EntrypointRegistration, LogStreamIdentity,
   OwnerProcessIdentity, RegisteredDomain, RuntimeStatus, ShimRunMetadata, SourcePath,
 };
@@ -16,14 +16,12 @@ use tokio::time::sleep;
 
 #[tokio::test]
 async fn adapter_uses_raw_config_path_and_shim_adapter_metadata() {
-  let temp = tempfile::tempdir().unwrap();
+  let temp = test_tempdir();
   let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::LongRunning);
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::LongRunning);
   let config_path = temp.path().join("Caddyfile.json");
   fs::write(&config_path, r#"{"apps":{}}"#).unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
   let mut registration = registration("adapter", "nonce", &config_path);
   registration.source_working_directory = SourcePath::new(temp.path().display().to_string(), None);
   registration.source_config_path = SourcePath::new(config_path.display().to_string(), None);
@@ -59,40 +57,13 @@ async fn adapter_uses_raw_config_path_and_shim_adapter_metadata() {
   );
 }
 
-#[test]
-fn resolver_anchors_relative_command_from_working_directory_config() {
-  let temp = tempfile::tempdir().unwrap();
-  let bin_dir = temp.path().join("bin");
-  fs::create_dir_all(&bin_dir).unwrap();
-  let command_name = if cfg!(windows) {
-    "real-caddy.cmd"
-  } else {
-    "real-caddy"
-  };
-  let command = bin_dir.join(command_name);
-  fs::write(&command, "").unwrap();
-  fs::write(
-    temp.path().join("cadder.toml"),
-    format!("[caddy]\nreal_command = \"bin/{command_name}\"\n"),
-  )
-  .unwrap();
-  let resolver = RealCaddyResolver::new(None);
-
-  let resolved = resolver.resolve_for_working_directory(temp.path()).unwrap();
-
-  assert_eq!(resolved, command.canonicalize().unwrap());
-}
-
 #[tokio::test]
 async fn adapter_reports_nonzero_adapt_failures() {
-  let temp = tempfile::tempdir().unwrap();
-  let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::FailAdapt);
+  let temp = test_tempdir();
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::FailAdapt);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "broken.localhost { respond ok }").unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
 
   let prepared = adapter
     .prepare(registration("broken", "nonce", &config_path))
@@ -110,14 +81,11 @@ async fn adapter_reports_nonzero_adapt_failures() {
 
 #[tokio::test]
 async fn adapter_reports_invalid_adapt_json() {
-  let temp = tempfile::tempdir().unwrap();
-  let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::InvalidAdaptJson);
+  let temp = test_tempdir();
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::InvalidAdaptJson);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "invalid-json.localhost { respond ok }").unwrap();
-  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::new(Some(
-    fake_caddy.display().to_string(),
-  )));
+  let adapter = CaddyConfigAdapter::new(RealCaddyResolver::for_test_fixture(fake_caddy));
 
   let prepared = adapter
     .prepare(registration("invalid-json", "nonce", &config_path))
@@ -135,13 +103,12 @@ async fn adapter_reports_invalid_adapt_json() {
 
 #[tokio::test]
 async fn adapter_reports_adapt_timeout() {
-  let temp = tempfile::tempdir().unwrap();
-  let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::SlowAdapt);
+  let temp = test_tempdir();
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::SlowAdapt);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "slow.localhost { respond ok }").unwrap();
   let adapter = CaddyConfigAdapter::with_command_timeout(
-    RealCaddyResolver::new(Some(fake_caddy.display().to_string())),
+    RealCaddyResolver::for_test_fixture(fake_caddy),
     Duration::from_millis(50),
   );
 
@@ -159,17 +126,17 @@ async fn adapter_reports_adapt_timeout() {
 
 #[tokio::test]
 async fn process_runtime_starts_reports_running_reloads_and_stops() {
-  let temp = tempfile::tempdir().unwrap();
+  let temp = test_tempdir();
   let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::LongRunning);
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::LongRunning);
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
   paths.ensure_dirs().unwrap();
   let runtime = ProcessRuntime::with_timeouts(
-    RealCaddyResolver::new(Some(fake_caddy.display().to_string())),
+    RealCaddyResolver::for_test_fixture(fake_caddy),
     paths,
     RuntimeTimeouts {
       start_check: Duration::from_millis(150),
-      reload: Duration::from_secs(1),
+      reload: Duration::from_secs(3),
       graceful_stop: Duration::from_secs(1),
       stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
@@ -197,20 +164,19 @@ async fn process_runtime_starts_reports_running_reloads_and_stops() {
 
 #[tokio::test]
 async fn coordinator_apply_tracks_runtime_success_failure_and_idle_stop() {
-  let temp = tempfile::tempdir().unwrap();
-  let command_log = temp.path().join("fake-caddy.log");
-  let fake_caddy = write_fake_caddy(temp.path(), &command_log, FakeMode::FailReload);
+  let temp = test_tempdir();
+  let fake_caddy = write_fake_caddy(temp.path(), FakeMode::FailReload);
   let config_path = temp.path().join("Caddyfile");
   fs::write(&config_path, "coordinator.localhost { respond ok }").unwrap();
   let paths = RuntimePaths::resolve(Some(temp.path().join("runtime"))).unwrap();
   paths.ensure_dirs().unwrap();
-  let resolver = RealCaddyResolver::new(Some(fake_caddy.display().to_string()));
+  let resolver = RealCaddyResolver::for_test_fixture(fake_caddy);
   let runtime = ProcessRuntime::with_timeouts(
     resolver.clone(),
     paths,
     RuntimeTimeouts {
       start_check: Duration::from_millis(150),
-      reload: Duration::from_secs(1),
+      reload: Duration::from_secs(3),
       graceful_stop: Duration::from_secs(1),
       stop_wait: Duration::from_secs(1),
       kill_wait: Duration::from_secs(1),
@@ -228,10 +194,10 @@ async fn coordinator_apply_tracks_runtime_success_failure_and_idle_stop() {
   let idle = coordinator.apply(&[active], &logs).await;
   let _ = runtime.stop().await;
 
-  assert_eq!(applied.status, cadder_protocol::ConfigApplyStatus::Applied);
-  assert_eq!(failed.status, cadder_protocol::ConfigApplyStatus::Failed);
+  assert_eq!(applied.status, cadder_ipc::ConfigApplyStatus::Applied);
+  assert_eq!(failed.status, cadder_ipc::ConfigApplyStatus::Failed);
   assert_eq!(failed.diagnostics[0].code, "runtime-apply-failed");
-  assert_eq!(idle.status, cadder_protocol::ConfigApplyStatus::Idle);
+  assert_eq!(idle.status, cadder_ipc::ConfigApplyStatus::Idle);
 }
 
 fn registration(id: &str, nonce: &str, config_path: &Path) -> EntrypointRegistration {
@@ -277,114 +243,35 @@ enum FakeMode {
   SlowAdapt,
 }
 
-fn write_fake_caddy(dir: &Path, command_log: &Path, mode: FakeMode) -> PathBuf {
-  let stop_file = dir.join("fake-caddy.stop");
-  #[cfg(windows)]
-  {
-    let path = dir.join("fake-caddy.cmd");
-    let reload_behavior = if matches!(mode, FakeMode::FailReload) {
-      "echo reload failed 1>&2\r\n  exit /b 7"
-    } else {
-      "exit /b 0"
-    };
-    let adapt_behavior = match mode {
-      FakeMode::FailAdapt => "echo adapt failed 1>&2\r\n  exit /b 6".to_string(),
-      FakeMode::InvalidAdaptJson => "echo not-json\r\n  exit /b 0".to_string(),
-      FakeMode::SlowAdapt => {
-        "powershell -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 500\"\r\n  echo {\"apps\":{}}\r\n  exit /b 0".to_string()
-      }
-      _ => {
-        r#"echo {"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["adapter.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}
-  exit /b 0"#
-          .to_string()
-      }
-    };
-    fs::write(
-      &path,
-      format!(
-        r#"@echo off
-echo %*>> "{command_log}"
-if "%1"=="adapt" (
-  {adapt_behavior}
-)
-if "%1"=="reload" (
-  {reload_behavior}
-)
-if "%1"=="stop" (
-  echo stop> "{stop_file}"
-  exit /b 0
-)
-if "%1"=="run" (
-  :run_loop
-  if exist "{stop_file}" exit /b 0
-  powershell -NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 100" >nul
-  goto run_loop
-)
-exit /b 0
-"#,
-        command_log = command_log.display(),
-        stop_file = stop_file.display(),
-        reload_behavior = reload_behavior,
-        adapt_behavior = adapt_behavior,
-      ),
-    )
-    .unwrap();
-    path
-  }
+fn test_tempdir() -> tempfile::TempDir {
+  tempfile::Builder::new()
+    .prefix("caddy-runtime-")
+    .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+    .unwrap()
+}
 
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-caddy");
-    let reload_behavior = if matches!(mode, FakeMode::FailReload) {
-      "printf '%s\n' 'reload failed' >&2\n  exit 7"
-    } else {
-      "exit 0"
-    };
-    let adapt_behavior = match mode {
-      FakeMode::FailAdapt => "printf '%s\n' 'adapt failed' >&2\n  exit 6".to_string(),
-      FakeMode::InvalidAdaptJson => "printf '%s\n' 'not-json'\n  exit 0".to_string(),
-      FakeMode::SlowAdapt => {
-        "sleep 1\n  printf '%s\n' '{\"apps\":{}}'\n  exit 0".to_string()
-      }
-      _ => {
-        r#"printf '%s\n' '{"apps":{"http":{"servers":{"srv0":{"routes":[{"match":[{"host":["adapter.localhost"]}],"handle":[{"handler":"static_response","body":"ok"}],"terminal":true}]}}}}}'
-  exit 0"#
-          .to_string()
-      }
-    };
-    fs::write(
-      &path,
-      format!(
-        r#"#!/usr/bin/env sh
-printf '%s\n' "$*" >> '{command_log}'
-if [ "$1" = "adapt" ]; then
-  {adapt_behavior}
-fi
-if [ "$1" = "reload" ]; then
-  {reload_behavior}
-fi
-if [ "$1" = "stop" ]; then
-  : > '{stop_file}'
-  exit 0
-fi
-if [ "$1" = "run" ]; then
-  while [ ! -f '{stop_file}' ]; do sleep 0.1; done
-  exit 0
-fi
-exit 0
-"#,
-        command_log = command_log.display(),
-        stop_file = stop_file.display(),
-        reload_behavior = reload_behavior,
-        adapt_behavior = adapt_behavior,
-      ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
-    path
+fn write_fake_caddy(dir: &Path, mode: FakeMode) -> PathBuf {
+  fs::write(dir.join("cadder-test.mode"), mode.as_str()).unwrap();
+
+  let source = Path::new(env!("CARGO_BIN_EXE_cadder-test-process"));
+  let path = dir.join(if cfg!(windows) {
+    "fake-caddy.exe"
+  } else {
+    "fake-caddy"
+  });
+  fs::hard_link(source, &path).unwrap();
+  path
+}
+
+impl FakeMode {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::LongRunning => "adapter-long-running",
+      Self::FailReload => "adapter-fail-reload",
+      Self::FailAdapt => "adapter-fail-adapt",
+      Self::InvalidAdaptJson => "adapter-invalid-adapt-json",
+      Self::SlowAdapt => "adapter-slow-adapt",
+    }
   }
 }
 

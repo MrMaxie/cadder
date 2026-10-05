@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-07
+goal: Adopt OpenSpec as the source of truth and define the target architecture
+  before implementation.

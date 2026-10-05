@@ -1,7 +1,13 @@
 # Behavior baseline and migration evidence
 
-Rust task completion is not Node implementation evidence. These source paths are
-the baseline for fixtures and verification; Node tests are listed separately.
+Rust task completion is not Node implementation evidence. The source paths and
+test names below refer to the historical Rust snapshot at `a10c63a`, accessible
+with `git show a10c63a:<path>`, not necessarily the current checkout. Node tests
+are listed separately. After integrating `master`, the released Rust 1.0.5
+workspace is retained unchanged as the operational baseline, including its
+security fixes and release tooling. Its superseding reset is archived under
+`openspec/changes/archive/`; this active change retains the approved 2.0 scope,
+including IIS, autostart, history and both distribution channels.
 
 | Contract | Rust source/test evidence | Node evidence |
 | --- | --- | --- |

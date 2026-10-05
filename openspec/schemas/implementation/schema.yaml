@@ -1,0 +1,78 @@
+name: implementation
+version: 1
+description: Implement and verify accepted Cadder requirement IDs
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Scope and acceptance contract for one implementation slice
+    template: proposal.md
+    instruction: |
+      Define one coherent implementation slice against accepted main-spec
+      requirement IDs.
+
+      State the problem and user value, list every requirement ID in scope,
+      define scope and non-goals, and give measurable success criteria. Separate
+      confirmed repository facts from assumptions. Do not copy requirement text
+      or introduce new product behavior; use a spec-driven contract change when
+      accepted behavior must change.
+    requires: []
+
+  - id: design
+    generates: design.md
+    description: Technical decisions and verification seams for the slice
+    template: design.md
+    instruction: |
+      Explain how the implementation satisfies the referenced requirements.
+
+      Record current evidence, ownership and trust boundaries, public contracts,
+      data flow, failure and recovery behavior, migration and rollback, test
+      seams, and alternatives considered. Resolve every open product decision
+      before implementation starts. Keep code-level detail only where it prevents
+      ambiguity or a security mistake.
+    requires:
+      - proposal
+
+  - id: tasks
+    generates: tasks.md
+    description: Small implementation tasks tied to requirements and checks
+    template: tasks.md
+    instruction: |
+      Break the slice into dependency-ordered tasks that each fit one focused
+      implementation and verification cycle.
+
+      Every task must use `- [ ] X.Y` checkbox syntax, reference at least one
+      accepted requirement ID, and name the focused verification that earns its
+      completion. Keep implementation, migration, documentation, and final gate
+      work explicit. Mark a task complete only after its stated check passes.
+    requires:
+      - proposal
+      - design
+
+  - id: verification
+    generates: verification.md
+    description: Final requirement-to-evidence matrix for the completed slice
+    template: verification.md
+    instruction: |
+      Create this artifact only after every task is complete.
+
+      Map every in-scope requirement ID and task to concrete automated or manual
+      evidence. Record the exact portable command or procedure, result, and any
+      residual risk. Do not claim a check that was skipped or failed. The slice
+      is archive-ready only when every row passes and no unresolved release
+      blocker remains. Use the repository's schema-aware OpenSpec check; the
+      OpenSpec 1.5 delta validator does not accept this schema's spec-free
+      implementation changes.
+    requires:
+      - tasks
+
+apply:
+  requires:
+    - tasks
+  tracks: tasks.md
+  instruction: |
+    Read the main specs for every referenced requirement ID, then read proposal,
+    design, and tasks. Implement one pending task at a time. Run its stated
+    focused verification before checking it off. Keep tasks unchecked when work
+    or evidence is incomplete. After all tasks pass, create verification.md, run
+    `cargo xtask openspec-check` and the repository gates, and archive with
+    --skip-specs.

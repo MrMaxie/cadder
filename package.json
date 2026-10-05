@@ -12,9 +12,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "lint": "eslint --flag unstable_native_nodejs_ts_config src test scripts",
-    "format:check": "prettier --check src test scripts package.json tsconfig.json vitest.config.ts eslint.config.ts",
-    "format": "prettier --write src test scripts package.json tsconfig.json vitest.config.ts eslint.config.ts",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\" package.json tsconfig.json vitest.config.ts eslint.config.ts",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\" package.json tsconfig.json vitest.config.ts eslint.config.ts",
     "check": "nub run typecheck && nub run lint && nub run format:check && nub run coverage"
   },
   "dependencies": {

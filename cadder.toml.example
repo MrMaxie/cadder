@@ -1,0 +1,4 @@
+[caddy]
+# Set exactly one trusted source for the real Caddy executable.
+# real_path = "C:/Tools/caddy/caddy.exe"
+# real_command = "caddy-real"

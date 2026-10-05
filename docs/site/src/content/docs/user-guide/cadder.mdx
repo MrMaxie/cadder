@@ -1,76 +1,94 @@
 ---
-title: cadder
-description: Use the Cadder operator executable for CLI automation and TUI operation.
+title: Operator CLI and TUI
+description: Choose a focused command or open the full routes workspace.
 ---
 
-`cadder` is the v1 operator executable. It is designed for shell scripts, CI checks, agents, and operators who need daemon state, diagnostics, logs, IIS handoff, autostart, toggles, and interactive TUI operation.
+Use the CLI for one focused check or change. Open the TUI when you want projects, domains, daemon state, and Caddy state in one view.
 
-## Command Groups
+## Inspect the runtime
 
-```sh
-cadder daemon status
-cadder daemon start
-cadder daemon shutdown
-cadder entrypoints list
-cadder entrypoints disable <registration-id>
+Inspect the current daemon and Caddy state:
+
+```sh frame="none"
+cadder status
+```
+
+List registered projects or domains:
+
+```sh frame="none"
+cadder projects list
 cadder domains list
-cadder domains disable <domain> --registration <registration-id>
-cadder diagnostics show
-cadder logs show --limit 20 domain <domain> --registration <registration-id>
-cadder logs tail --limit 20 --poll-interval-ms 750 domain <domain> --registration <registration-id>
-cadder logs export --limit 100 runtime --output-path runtime.log
-cadder history show --limit 50
-cadder iis bindings
-cadder iis handoff <binding-id> --route-host app.localhost
-cadder iis restore <binding-id>
-cadder autostart status
-cadder autostart set daemon
-cadder watch status
-cadder tui
 ```
 
-`cadder` stays attach-only by default. Read-only commands, toggles, `watch`, `logs tail`, history, IIS, and autostart queries connect to an already running daemon. `cadder daemon start` is the explicit launch path.
+## Inspect a route
 
-## Output Modes
+Start from the port, Caddyfile, or domain you already know:
 
-`cadder` supports:
-
-- `human` for operators running commands by hand.
-- `json` for one-shot scripting and machine parsing.
-- `jsonl` for streaming commands such as `watch` and `logs tail`.
-
-Examples:
-
-```sh
-cadder entrypoints list --output json
-cadder domains list --output json
-cadder watch diagnostics --output jsonl
-cadder logs tail --output jsonl --limit 50 domain app.localhost --registration shim-1
-cadder history show --output json
+```sh frame="none"
+cadder port inspect 3000
+cadder caddyfile inspect ./Caddyfile
+cadder domains inspect app.localhost
 ```
 
-## TUI
+Port inspection works even when `cadderd` is offline. When daemon state is available, Cadder connects the listener and process to the matching project, Caddyfile, domain, and upstream. Caddyfile and domain inspection keep registration, activation, Caddy runtime, applied configuration, and listener ownership as separate facts.
 
-Run:
+## Change activation
 
-```sh
-cadder tui
+Enable or disable a project by its Caddyfile, or a domain by name:
+
+```sh frame="none"
+cadder projects disable ./Caddyfile
+cadder projects enable ./Caddyfile
+cadder domains disable app.localhost --caddyfile ./Caddyfile
+cadder domains enable app.localhost --caddyfile ./Caddyfile
 ```
 
-The TUI uses the same local daemon contracts and operator view models as the CLI. It covers daemon lifecycle, runtime status, entrypoints, domains, logs, diagnostics, history, IIS handoff, autostart, and settings.
+## Control the daemon
 
-Remote pairing, authentication, and multi-host control are not part of v1.0.
+Use lifecycle commands when a shell workflow needs an explicit start, stop, or restart:
 
-## Autostart
-
-```sh
-cadder autostart status
-cadder autostart set disabled
-cadder autostart set daemon
+```sh frame="none"
+cadder daemon start
+cadder daemon stop
+cadder daemon restart
 ```
 
-Autostart writes per-user startup entries. Configure it from the same normal user account that owns the Cadder runtime. v1.0 supports disabled and daemon autostart modes.
+## Read diagnostics and logs
 
-## Agent Use
+Detailed runtime information stays behind explicit diagnostic commands:
 
-CLI output modes are the stable v1 automation surface for agents. The TUI is the interactive operator surface.
+```sh frame="none"
+cadder diagnostics
+cadder logs runtime --limit 50
+cadder logs project ./Caddyfile --limit 50
+cadder logs domain app.localhost --caddyfile ./Caddyfile --limit 50
+```
+
+Runtime logs contain daemon lifecycle and control events. Project and domain logs contain Caddy entries attributed to that registration or route. Reads return only the newest requested entries, up to the daemon limit of 200, after Cadder redacts sensitive values. The CLI does not provide a continuous tail.
+
+## Terminate a known port owner
+
+Inspect the port first, then copy the observed PID into the guarded command:
+
+```sh frame="none"
+cadder port inspect 3000
+cadder port kill 3000 --pid 12345
+```
+
+Cadder checks that the PID still owns the port immediately before signaling it. It never chooses a process automatically. This command runs in the operator process and does not expand which processes `cadderd` owns.
+
+## Use the TUI
+
+Start or attach to Cadder in the background, then open the full-screen operator:
+
+```sh frame="none"
+cadder tui --start-daemon
+```
+
+Use plain `cadder tui` when you want to inspect the current state without starting an offline daemon. In that mode, press Enter if you decide to start it from the TUI.
+
+The main table groups every registered domain under its project with tree connectors. A filled circle is enabled and an empty circle is disabled. The header reports `cadderd` and Caddy separately without repeating diagnostic state.
+
+Up and Down move through lists of any length. Space and Enter both toggle the selection. Press `x` to stop or `R` to restart; both actions require inline confirmation. Press `q` or Ctrl+C to exit while restoring the terminal.
+
+Loopback upstreams show only the useful port. Project paths emphasize the repository-relative suffix, or the final folder when the path is not inside a Git repository.

@@ -5,7 +5,7 @@ use std::{
 };
 
 fn run_shim(args: &[&str]) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_caddy"))
+  Command::new(env!("CARGO_BIN_EXE_cadder-shim"))
     .args(args)
     .output()
     .unwrap()
@@ -22,47 +22,6 @@ fn unique_runtime_dir(name: &str) -> PathBuf {
   ))
 }
 
-fn write_fake_real_caddy(name: &str, exit_code: u8) -> PathBuf {
-  let dir = unique_runtime_dir(name);
-  fs::create_dir_all(&dir).unwrap();
-
-  #[cfg(windows)]
-  {
-    let path = dir.join("real-caddy.cmd");
-    fs::write(
-      &path,
-      format!(
-        r#"@echo off
-echo delegated %*
-exit /b {exit_code}
-"#
-      ),
-    )
-    .unwrap();
-    path
-  }
-
-  #[cfg(not(windows))]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("real-caddy");
-    fs::write(
-      &path,
-      format!(
-        r#"#!/usr/bin/env sh
-printf '%s\n' "delegated $*"
-exit {exit_code}
-"#
-      ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
-    path
-  }
-}
-
 #[test]
 fn shim_info_flag_reports_release_identity_json() {
   let output = run_shim(&["--cadder-shim-info"]);
@@ -76,7 +35,7 @@ fn shim_info_flag_reports_release_identity_json() {
 
 #[test]
 fn shim_info_flag_ignores_invalid_backend_env() {
-  let output = Command::new(env!("CARGO_BIN_EXE_caddy"))
+  let output = Command::new(env!("CARGO_BIN_EXE_cadder-shim"))
     .arg("--cadder-shim-info")
     .env("CADDER_CADDY_BACKEND", "invalid")
     .output()
@@ -88,43 +47,25 @@ fn shim_info_flag_ignores_invalid_backend_env() {
 }
 
 #[test]
-fn delegated_command_reports_real_caddy_resolution_failure() {
+fn shim_real_caddy_selector_is_rejected() {
+  let selected_executable = env!("CARGO_BIN_EXE_cadder-shim");
   let output = run_shim(&[
     "--cadder-real-caddy-command",
-    "definitely-missing-caddy",
+    selected_executable,
     "version",
   ]);
 
   assert_eq!(output.status.code(), Some(1));
   let stderr = String::from_utf8(output.stderr).unwrap();
   assert!(
-    stderr.contains("could not resolve a safe real Caddy binary"),
+    stderr.contains("shim cannot select the executable"),
     "{stderr}"
   );
 }
 
 #[test]
-fn delegated_command_propagates_real_caddy_exit_code() {
-  let fake_caddy = write_fake_real_caddy("delegated-exit", 7);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "version"]);
-
-  assert_eq!(output.status.code(), Some(7));
-  assert!(
-    String::from_utf8(output.stdout)
-      .unwrap()
-      .contains("delegated version")
-  );
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
-}
-
-#[test]
 fn unsupported_command_does_not_delegate_to_real_caddy() {
-  let fake_caddy = write_fake_real_caddy("unsupported-start", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&["--cadder-real-caddy-command", &fake_caddy_arg, "start"]);
+  let output = run_shim(&["--cadder-caddy-backend", "mock", "start"]);
 
   assert_eq!(output.status.code(), Some(1));
   assert!(
@@ -137,13 +78,11 @@ fn unsupported_command_does_not_delegate_to_real_caddy() {
     stderr.contains("Cadder shim does not support `caddy start`"),
     "{stderr}"
   );
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }
 
 #[test]
-fn managed_run_reports_missing_backend_for_runtime_dir() {
+fn managed_run_reports_missing_backend_without_runtime_selection() {
   let runtime_dir = unique_runtime_dir("missing-backend");
-  let runtime_dir_arg = runtime_dir.display().to_string();
   let missing_daemon = runtime_dir.join(if cfg!(windows) {
     "missing-cadderd.exe"
   } else {
@@ -152,8 +91,6 @@ fn managed_run_reports_missing_backend_for_runtime_dir() {
   let missing_daemon_arg = missing_daemon.display().to_string();
 
   let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
     "--cadder-daemon-path",
     &missing_daemon_arg,
     "--cadder-caddy-backend",
@@ -173,25 +110,13 @@ fn managed_run_reports_missing_backend_for_runtime_dir() {
 #[test]
 fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
   let runtime_dir = unique_runtime_dir("managed-no-delegate");
-  let runtime_dir_arg = runtime_dir.display().to_string();
   let missing_daemon = runtime_dir.join(if cfg!(windows) {
     "missing-cadderd.exe"
   } else {
     "missing-cadderd"
   });
   let missing_daemon_arg = missing_daemon.display().to_string();
-  let fake_caddy = write_fake_real_caddy("managed-no-delegate", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
-    "--cadder-daemon-path",
-    &missing_daemon_arg,
-    "--cadder-real-caddy-command",
-    &fake_caddy_arg,
-    "run",
-  ]);
+  let output = run_shim(&["--cadder-daemon-path", &missing_daemon_arg, "run"]);
 
   assert_eq!(output.status.code(), Some(1));
   assert!(
@@ -205,36 +130,4 @@ fn managed_run_does_not_delegate_to_real_caddy_when_daemon_is_missing() {
     "{stderr}"
   );
   let _ = fs::remove_dir_all(runtime_dir);
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
-}
-
-#[test]
-fn read_only_command_labels_real_caddy_inspection_when_daemon_is_missing() {
-  let runtime_dir = unique_runtime_dir("read-only-no-daemon");
-  let runtime_dir_arg = runtime_dir.display().to_string();
-  let fake_caddy = write_fake_real_caddy("read-only-no-daemon", 0);
-  let fake_caddy_arg = fake_caddy.display().to_string();
-
-  let output = run_shim(&[
-    "--cadder-runtime-dir",
-    &runtime_dir_arg,
-    "--cadder-real-caddy-command",
-    &fake_caddy_arg,
-    "version",
-  ]);
-
-  assert_eq!(output.status.code(), Some(0));
-  assert!(
-    String::from_utf8(output.stdout)
-      .unwrap()
-      .contains("delegated version")
-  );
-  let stderr = String::from_utf8(output.stderr).unwrap();
-  assert!(
-    stderr.contains("real-Caddy inspection, not Cadder runtime state"),
-    "{stderr}"
-  );
-  assert!(stderr.contains("cadder daemon start"), "{stderr}");
-  let _ = fs::remove_dir_all(runtime_dir);
-  let _ = fs::remove_dir_all(fake_caddy.parent().unwrap());
 }

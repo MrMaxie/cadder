@@ -1,9 +1,9 @@
 use super::*;
 
 impl DaemonState {
-  pub async fn query_state(&self, request_id: String) -> QueryStateResponse {
+  pub async fn query_state(&self) -> QueryStateResponse {
     QueryStateResponse {
-      request_id,
+      request_id: String::new(),
       accepted: true,
       message: "State snapshot returned.".to_string(),
       snapshot: Some(self.snapshot().await),
@@ -16,30 +16,6 @@ impl DaemonState {
       inner.registrations.values().cloned().collect::<Vec<_>>()
     };
     self.snapshot_from_parts(registrations).await
-  }
-
-  pub(super) async fn publish_change(
-    &self,
-    kind: StateChangeKind,
-    registration_id: Option<String>,
-  ) {
-    let _publish = self.publish_operation.lock().await;
-    let (sequence, registrations) = {
-      let mut inner = self.inner.lock().await;
-      inner.sequence += 1;
-      (
-        inner.sequence,
-        inner.registrations.values().cloned().collect::<Vec<_>>(),
-      )
-    };
-    let event = StateChangedEvent {
-      request_id: "state-change".to_string(),
-      sequence_number: sequence,
-      change_kind: kind,
-      snapshot: self.snapshot_from_parts(registrations).await,
-      registration_id,
-    };
-    let _ = self.events.send(event);
   }
 
   async fn snapshot_from_parts(
@@ -55,7 +31,7 @@ impl DaemonState {
       registrations,
       runtime: runtime.inspect().await,
       config,
-      storage: Some(self.store.state()),
+      storage: Some(self.storage_state()),
     }
   }
 }

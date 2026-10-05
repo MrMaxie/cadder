@@ -1,0 +1,17 @@
+# Cadder
+
+Cadder coordinates Caddy across local projects. Caddy is the web server and reverse proxy that maps local addresses to app ports; Cadder combines project routes into one shared Caddy runtime.
+
+## Start
+
+- Documentation: https://maxie.dev/cadder/
+- Getting started: https://maxie.dev/cadder/quick-start/getting-started/
+- Daily workflow: https://maxie.dev/cadder/user-guide/how-to-use/
+- CLI and TUI: https://maxie.dev/cadder/user-guide/cadder/
+- Source: https://github.com/MrMaxie/Cadder
+
+## Product boundary
+
+Cadder ships three version-matched executables: cadder, cadderd, and a PATH-facing caddy shim. It supports managed caddy run workflows, a routes-first TUI, focused inspection and activation commands, bounded redacted logs, and explicit daemon lifecycle commands.
+
+Cadder does not provide profiles, machine-readable output, continuous log tailing, history, export, watch mode, autostart, automatic process termination, or MCP.

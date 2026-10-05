@@ -1,0 +1,179 @@
+---
+import DefaultHero from '@astrojs/starlight/components/Hero.astro';
+import { Icon } from '@astrojs/starlight/components';
+import CadderTopology from './CadderTopology.astro';
+import CopyableCommand from './CopyableCommand.astro';
+
+const hero = Astro.locals.starlightRoute.entry.data.hero;
+const isProductHero = hero?.title === 'Stable addresses for every local app.';
+const actions: Array<{
+  text: string;
+  link: string;
+  variant: 'primary' | 'secondary' | 'minimal';
+}> = hero?.actions ?? [];
+---
+
+{
+  hero ? (
+    <section class="cadder-hero" aria-labelledby="cadder-hero-title">
+      <div class="cadder-hero-copy">
+        <h1 id="cadder-hero-title">
+          {isProductHero ? (
+            <>Stable addresses for every <span>local app.</span></>
+          ) : (
+            hero.title
+          )}
+        </h1>
+        {isProductHero ? (
+          <p class="cadder-hero-tagline">
+            <strong class="cadder-key-term">Cadder</strong> coordinates{' '}
+            <strong class="cadder-key-term">Caddy</strong> across your local projects. Caddy is the reverse
+            proxy that connects each local address to the port where an app is running. With Cadder, routes
+            from different repositories are served together by one Caddy process.
+          </p>
+        ) : (
+          hero.tagline && <p class="cadder-hero-tagline">{hero.tagline}</p>
+        )}
+        {isProductHero && (
+          <div class="cadder-first-run" aria-label="Start Cadder">
+            <CopyableCommand command="npx cadder tui --start-daemon" label="Cadder start command" />
+            <p class="cadder-caddy-requirement">
+              <strong>Caddy is required.</strong> Install it on this machine and make sure <code>caddy</code>{' '}
+              is available in your shell.{' '}
+              <a class="cadder-inline-link" href="https://caddyserver.com/docs/install">Install Caddy</a>
+            </p>
+          </div>
+        )}
+        {actions.length > 0 && (
+          <div class="cadder-hero-actions">
+            {actions.map((action) => (
+              <a class:list={['cadder-hero-action', action.variant]} href={action.link}>
+                <span>{action.text}</span>
+                <Icon name="right-arrow" size="1rem" aria-hidden="true" />
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+      <CadderTopology />
+    </section>
+  ) : (
+    <DefaultHero />
+  )
+}
+
+<style>
+  @layer starlight.core {
+    .cadder-hero {
+      display: grid;
+      gap: clamp(2.5rem, 4vw, 3.5rem);
+      width: min(74rem, calc(100% - 2.5rem));
+      margin-inline: auto;
+      padding-block: clamp(3rem, 5vw, 4.5rem);
+    }
+
+    .cadder-hero-copy {
+      max-width: 49rem;
+      min-width: 0;
+    }
+
+    h1 {
+      max-width: 13ch;
+      margin: 0;
+      color: var(--cadder-ink);
+      font-size: clamp(3.2rem, 7vw, 5.8rem);
+      font-weight: 650;
+      line-height: 0.96;
+      letter-spacing: -0.055em;
+    }
+
+    h1 span {
+      background: linear-gradient(105deg, var(--cadder-ink) 10%, var(--cadder-accent) 92%);
+      background-clip: text;
+      color: transparent;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .cadder-hero-tagline {
+      max-width: 43rem;
+      margin: 1.35rem 0 0;
+      color: var(--cadder-muted);
+      font-size: clamp(1rem, 1.6vw, 1.14rem);
+      line-height: 1.6;
+    }
+
+    .cadder-hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 0.85rem;
+    }
+
+    .cadder-first-run {
+      display: grid;
+      gap: 0.55rem;
+      width: min(100%, 43rem);
+      margin-top: 1.5rem;
+    }
+
+    .cadder-caddy-requirement {
+      margin: 0;
+      color: var(--cadder-muted);
+      font-size: 0.74rem;
+      line-height: 1.5;
+    }
+
+    .cadder-caddy-requirement strong {
+      color: var(--cadder-ink);
+    }
+
+    .cadder-caddy-requirement code {
+      color: var(--cadder-accent-strong);
+      font-family: var(--sl-font-mono);
+      font-size: 0.72rem;
+    }
+
+    .cadder-hero-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.55rem;
+      min-height: 2.75rem;
+      padding: 0.65rem 1rem;
+      border: 1px solid var(--cadder-line);
+      border-radius: 0.2rem;
+      color: var(--cadder-ink);
+      font-size: 0.78rem;
+      font-weight: 650;
+      text-decoration: none;
+      transition: var(--cadder-interaction-transition);
+    }
+
+    .cadder-hero-action.primary {
+      border-color: var(--cadder-accent);
+      background: var(--cadder-accent);
+      color: var(--cadder-accent-ink);
+    }
+
+    .cadder-hero-action:hover,
+    .cadder-hero-action:focus-visible {
+      border-color: var(--cadder-accent);
+    }
+
+    @media (max-width: 40rem) {
+      .cadder-hero {
+        width: min(100% - 2rem, 40rem);
+        padding-block: 2.75rem;
+      }
+
+      h1 {
+        font-size: clamp(2.8rem, 14vw, 4.1rem);
+      }
+
+      .cadder-first-run {
+        gap: 0.55rem;
+      }
+    }
+  }
+</style>

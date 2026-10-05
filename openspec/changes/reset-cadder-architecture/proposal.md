@@ -55,7 +55,9 @@ recover from offline states without becoming independent sources of truth.
 
 ### Modified Capabilities
 
-- None. This repository has no existing OpenSpec main specs yet.
+The current 1.0 main specs and archived Rust reset remain the released baseline.
+The active 2.0 target in `node-migration.md` supersedes the earlier Rust-specific
+choices in this change without marking pending Node behavior as implemented.
 
 ## Impact
 

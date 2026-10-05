@@ -4,7 +4,9 @@
 
 The Node implementation currently covers the runtime/IPC foundation, not a
 shippable 2.0 application. Product handlers, Caddy, shim, history, CLI/TUI, IIS,
-autostart and npm/SEA distributions are still pending. Rust remains intact.
+autostart and npm/SEA distributions are still pending. The released Rust 1.0.5
+workspace and packaging are retained from `master`; older Rust behavior evidence
+is pinned in `behavior-baseline.md` rather than restored into production code.
 
 Implemented: isolated v2 paths and profiles, owner-only Unix modes and Windows
 ACLs, SQLite `BEGIN EXCLUSIVE` lifetime lock, crash residue recovery only after

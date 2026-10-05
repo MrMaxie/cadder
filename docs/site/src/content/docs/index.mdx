@@ -1,84 +1,90 @@
 ---
-title: Cadder documentation
-description: Run local Caddy reverse proxies through one coordinated Caddy runtime.
+title: Cadder
+description: Cadder coordinates Caddy routes across local repositories so their apps can use stable addresses through one shared reverse proxy.
+template: splash
+hero:
+  title: Stable addresses for every local app.
+  tagline: "Cadder coordinates Caddy across your local projects. Caddy is the reverse proxy that connects each local address to the port where an app is running. With Cadder, routes from different repositories are served together by one Caddy process."
+  actions:
+    - text: Download Cadder
+      link: https://github.com/MrMaxie/cadder/releases
+      variant: primary
+    - text: Browse the docs
+      link: /cadder/quick-start/getting-started/
+      variant: secondary
 ---
 
-import banner from '../../assets/banner.webp';
-import { Icon } from '@astrojs/starlight/components';
+import CadderTuiPreview from '../../components/CadderTuiPreview.astro';
+import CopyableCommand from '../../components/CopyableCommand.astro';
 
-<img src={banner.src} alt="Cadder banner" class="cadder-hero-banner" />
+<section class="cadder-home-section" id="how-it-works">
 
-Cadder coordinates local Caddy projects that would otherwise fight for the same HTTP and HTTPS ports. Each project can still use a familiar `caddy run` workflow, but Cadder registers those projects with one per-user daemon and applies them through one real Caddy process.
+<div class="cadder-section-layout">
+  <div class="cadder-section-copy">
+## See every route in one place.
 
-Repository: [github.com/MrMaxie/cadder](https://github.com/MrMaxie/cadder)
+`cadder tui` shows which project owns each address, where requests go, and whether Cadder and Caddy are running. Select a project or route to enable or disable it without touching the others.
 
-## Features
-
-- One local Caddy runtime can serve domains from many project Caddyfiles.
-- The `caddy` shim keeps `caddy run` usable for project workflows.
-- `cadder` gives scripts and agents a non-interactive CLI.
-- `cadder` also provides the interactive TUI operator surface.
-- `cadder.toml` points Cadder at the real Caddy binary without replacing it.
-- Domains can be enabled or disabled without killing unrelated project sessions.
-- Cadder avoids owning Caddy processes it did not start.
-
-## Binaries
-
-- `caddy` is the Caddy-compatible shim.
-- `cadderd` is the daemon.
-- `cadder` is the CLI and TUI operator executable.
-
-Runtime installers and portable archives contain `caddy`, `cadderd`, `cadder`, and `cadder.toml`. Each binary supports `--help` and `--version`. See [Releases and downloads](reference/releases/) for artifact names and checksums.
-
-## Runtime Installer
-
-<div class="cadder-downloads">
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="windows-x64-msi">
-    <span class="cadder-windows-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
-    <span>Windows x64 MSI</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="macos-arm64-pkg">
-    <Icon name="apple" />
-    <span>macOS Apple Silicon PKG</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="macos-x64-pkg">
-    <Icon name="apple" />
-    <span>macOS Intel PKG</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="linux-x64-deb">
-    <Icon name="linux" />
-    <span>Linux x64 DEB</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-runtime-installer-asset="linux-x64-rpm">
-    <Icon name="linux" />
-    <span>Linux x64 RPM</span>
-  </a>
+    <a class="cadder-section-action" href="/cadder/user-guide/cadder/">Open the guide</a>
+  </div>
+  <CadderTuiPreview />
 </div>
 
-## Portable Runtime Archive
+</section>
 
-<div class="cadder-downloads">
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="windows-x64">
-    <span class="cadder-windows-icon" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
-    <span>Windows x64</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="macos-arm64">
-    <Icon name="apple" />
-    <span>macOS Apple Silicon</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="macos-x64">
-    <Icon name="apple" />
-    <span>macOS Intel</span>
-  </a>
-  <a class="cadder-download" href="https://github.com/MrMaxie/cadder/releases/latest" data-cadder-asset="linux-x64">
-    <Icon name="linux" />
-    <span>Linux x64</span>
-  </a>
+<section class="cadder-home-section">
+
+## What Cadder adds around Caddy.
+
+<div class="cadder-capabilities">
+  <article>
+    <span>01</span>
+    <div><h3>Keep projects independent.</h3><p>Each project keeps its own <strong class="cadder-key-term">Caddyfile</strong>. <code>caddy run</code> registers it with <strong class="cadder-key-term">Cadder</strong>.</p></div>
+  </article>
+  <article>
+    <span>02</span>
+    <div><h3>Reject collisions.</h3><p><strong class="cadder-key-term">Cadder</strong> checks route ownership and blocks conflicting active addresses before applying a change.</p></div>
+  </article>
+  <article>
+    <span>03</span>
+    <div><h3>See the complete picture.</h3><p><strong class="cadder-key-term">Cadder</strong> connects projects, local addresses, ports, logs, and <strong class="cadder-key-term">Caddy</strong> state in one view.</p></div>
+  </article>
+  <article>
+    <span>04</span>
+    <div><h3>Change one route at a time.</h3><p>Enable or disable one domain while unrelated local routes stay active.</p></div>
+  </article>
 </div>
 
-<script src="cadder-downloads.js"></script>
+</section>
 
-1. Download either the runtime installer or the portable runtime archive for your operating system.
-2. Create `cadder.toml` with the path to the real Caddy binary.
-3. Start `cadderd`, then run Cadder's `caddy` shim instead of the real `caddy` command.
-4. Use `cadder` for CLI automation or TUI operation.
+<section class="cadder-home-section cadder-home-start">
+
+## How to start.
+
+Each project can define its own reverse-proxy route. <strong class="cadder-key-term">Cadder</strong> combines the active routes and keeps one shared <strong class="cadder-key-term">Caddy</strong> process synchronized.
+
+The <a class="cadder-inline-link" href="https://caddyserver.com/docs/caddyfile">Caddyfile</a> format belongs to <strong class="cadder-key-term">Caddy</strong>: Caddy defines it and turns it into server configuration. <strong class="cadder-key-term">Cadder</strong> reads that result only to coordinate the local address with the right app port.
+
+<div class="cadder-caddyfile-example" aria-label="Caddyfile example">
+  <div class="caddyfile-header">
+    <span class="caddyfile-label">Caddyfile</span>
+    <button class="cadder-copy-button" type="button" data-copy-target="caddyfile-example-code">Copy</button>
+  </div>
+  <pre><code id="caddyfile-example-code"><span class="caddyfile-address">shop.localhost</span> <span class="caddyfile-brace">&#123;</span>
+<span class="caddyfile-indent">{'    '}</span><span class="caddyfile-directive">reverse_proxy</span> <span class="caddyfile-target">localhost:3000</span>
+<span class="caddyfile-brace">&#125;</span></code></pre>
+</div>
+
+Then run this command inside that project:
+
+<CopyableCommand command="caddy run" label="Register this Caddyfile with Cadder" />
+
+The route appears in `cadder tui`, where you can inspect its owner, target, and activation state.
+
+<nav class="cadder-home-links" aria-label="Learn Cadder">
+  <a class="primary" href="/cadder/quick-start/getting-started/">Install Cadder</a>
+  <a href="/cadder/user-guide/how-to-use/">Read the workflow</a>
+  <a href="/cadder/user-guide/cadder/">Open the reference</a>
+</nav>
+
+</section>

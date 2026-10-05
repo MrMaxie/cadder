@@ -1,40 +1,28 @@
 use crate::{
   CaddyConfigCoordinator,
-  autostart::AutostartManager,
-  caddy::{CaddyApplyAction, IisProxyBackendProtocol},
-  iis::{
-    IisBindingRecord, IisMetadataStore, IisMutation, IisProvider, IisRestoreRecord,
-    binding_to_view, unsupported_binding_issue,
-  },
+  caddy::CaddyApplyAction,
+  database::Database,
   logs::{CaddyLogStore, LogQuery},
+  operation_fence::{CommitRejection, OperationFence, OperationFenceAuthority},
   paths::RuntimePaths,
-  storage::RuntimeStore,
 };
 use anyhow::Result;
-use cadder_protocol::{
-  ActivationState, BasicResponse, ConfigApplyStatus, ConfigState, EntrypointRegistration,
-  GuiStateSnapshot, HeartbeatEntrypointRequest, HistoryKind, IisBinding, IisElevationApproval,
-  IisFollowUpAction, IisHandoffState, IisIssue, IisIssueKind, IisOperationStep,
-  IisOperationStepStatus, LogAttributionKind, LogSeverity, LogStreamIdentity,
-  QueryAutostartResponse, QueryHistoryResponse, QueryIisBindingsResponse, QueryLogsResponse,
-  QueryStateResponse, RegisterEntrypointResponse, SetAutostartRequest, SetAutostartResponse,
-  SetDomainEnabledRequest, SetEntrypointEnabledRequest, SetIisHandoffRequest,
-  SetIisHandoffResponse, StateChangeKind, StateChangedEvent, canonicalize_domain,
+use cadder_ipc::{
+  ActivationState, BasicResponse, EntrypointRegistration, GuiStateSnapshot,
+  HeartbeatEntrypointPayload, LogAttributionKind, LogSeverity, LogStreamIdentity,
+  QueryLogsResponse, QueryStateResponse, RegisterEntrypointResponse, SetDomainEnabledPayload,
+  SetEntrypointEnabledPayload,
 };
 use chrono::Utc;
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::BTreeMap,
   sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
   },
 };
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
-mod autostart_control;
-mod config_apply;
-mod history;
-mod iis_handoff;
 mod lifecycle;
 mod log_queries;
 mod registrations;
@@ -48,35 +36,39 @@ mod tests;
 pub struct DaemonState {
   inner: Arc<Mutex<DaemonInner>>,
   coordinator: Arc<Mutex<CaddyConfigCoordinator>>,
-  config_operation: Arc<Mutex<()>>,
-  publish_operation: Arc<Mutex<()>>,
-  events: broadcast::Sender<StateChangedEvent>,
+  config_operation: Arc<Semaphore>,
   logs: CaddyLogStore,
-  store: RuntimeStore,
-  autostart: AutostartManager,
-  iis_provider: IisProvider,
-  iis_store: IisMetadataStore,
-  iis_operation: Arc<Mutex<()>>,
+  database: Option<Database>,
   shutdown_signal: ShutdownSignal,
+  operation_fences: OperationFenceAuthority,
 }
 
 #[derive(Debug)]
 struct DaemonInner {
   registrations: BTreeMap<String, EntrypointRegistration>,
-  sequence: u64,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ShutdownSignal {
   requested: Arc<AtomicBool>,
+  started_at: Arc<OnceLock<tokio::time::Instant>>,
   notify: Arc<Notify>,
 }
 
 impl ShutdownSignal {
+  fn prepare(&self, started_at: tokio::time::Instant) {
+    let _ = self.started_at.set(started_at);
+  }
+
   fn request(&self) {
+    self.prepare(tokio::time::Instant::now());
     if !self.requested.swap(true, Ordering::SeqCst) {
       self.notify.notify_waiters();
     }
+  }
+
+  pub(crate) fn started_at(&self) -> Option<tokio::time::Instant> {
+    self.started_at.get().copied()
   }
 
   pub async fn wait(&self) {
