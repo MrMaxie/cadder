@@ -1,5 +1,10 @@
 ## Why
 
+The approved 2.0 migration replaces the Rust workspace with one TypeScript/Node
+product. npm and Node SEA archives on GitHub Releases are equal, required release
+channels. The concrete migration contract is in `node-migration.md`; it
+supersedes earlier Rust-specific implementation choices in this change.
+
 Cadder needs a smaller and more explicit target architecture before more code is
 added. The current direction must make ownership obvious: one runtime service
 owns external state, while compatibility shims and operator clients attach to it

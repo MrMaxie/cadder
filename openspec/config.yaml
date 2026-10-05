@@ -1,13 +1,15 @@
 schema: spec-driven
 
 context: |
-  Cadder is a Rust workspace for coordinating Caddy-backed local development
-  runtimes. OpenSpec is the canonical source for product requirements, design
+  Cadder 2.0 is a TypeScript/Node product for coordinating Caddy-backed local
+  development runtimes, with equal npm and Node SEA release channels. Rust is
+  retained as a migration baseline until both distribution gates pass.
+  OpenSpec is the canonical source for product requirements, design
   decisions, and implementation plans.
 
   The codebase should favor small modules, explicit ownership, independently
   testable boundaries, and clear contracts between runtime, integration, and
-  presentation layers. Prefer proven Rust crates and established tooling over
+  presentation layers. Prefer proven libraries and established tooling over
   custom infrastructure when they fit the job.
 
   Cadder is cross-platform by default. Platform-specific behavior must live

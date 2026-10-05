@@ -24,19 +24,33 @@ reusable view-model contracts used by the initial operator clients.
 - **AND** it SHALL NOT create an independent runtime state model or Caddy control plane
 
 ### Requirement: Workspace boundaries are minimal and explainable
-The Rust workspace SHALL keep product crates and library crates aligned with the
-target topology and SHALL require each crate to have a documented, testable
-responsibility.
+The TypeScript product SHALL keep protocol, daemon, Caddy adapter, platform
+adapters, client service, CLI and TUI modules aligned with the target topology.
+Rust crates remain only as a migration baseline until the release gates pass.
 
-#### Scenario: Contributor evaluates a crate
-- **WHEN** a crate is reviewed during the reset
+#### Scenario: Contributor evaluates a module
+- **WHEN** a module is reviewed during the reset
 - **THEN** it SHALL be classified as daemon, shim, operator client, shared protocol/API, test support, documentation/tooling, or obsolete
-- **AND** crates without a current responsibility SHALL be removed, merged, or explicitly justified
+- **AND** modules without a current responsibility SHALL be removed, merged, or explicitly justified
 
-#### Scenario: New crate proposed
-- **WHEN** a new crate is proposed
-- **THEN** the proposal SHALL explain why a module inside an existing crate is insufficient
-- **AND** the crate SHALL have independently testable responsibilities
+#### Scenario: New module proposed
+- **WHEN** a new module is proposed
+- **THEN** the proposal SHALL explain its independent responsibility
+- **AND** it SHALL NOT introduce a new public product or native runtime addon
+
+### Requirement: Distribution channels are equal
+Cadder SHALL ship one npm package on Node 24 LTS >=24.18.0 and standalone Node SEA
+archives through GitHub Releases. Both SHALL provide the same three entrypoints
+and CLI/TUI functionality. Both channels SHALL pass before migration completion.
+
+#### Scenario: Packaging release sources
+- **WHEN** npm or SEA artifacts are prepared
+- **THEN** TypeScript sources SHALL compile only into staging outside checkout
+- **AND** generated JavaScript and binaries SHALL NOT be committed
+
+#### Scenario: Standalone consumer has no Node
+- **WHEN** a supported standalone archive is used without Node/npm on PATH
+- **THEN** all entrypoints, TUI, SQLite and owned subprocess flows SHALL work
 
 ### Requirement: Production runtime identity is singular
 Production Cadder SHALL run one stable runtime identity per user or per explicit

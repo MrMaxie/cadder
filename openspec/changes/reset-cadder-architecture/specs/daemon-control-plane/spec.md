@@ -6,8 +6,8 @@ generated Caddy config, Caddy process lifecycle, and OS integration state.
 
 #### Scenario: Applying project definitions
 - **WHEN** a project definition changes through the shim or operator client
-- **THEN** `cadderd` SHALL update Cadder state first
-- **AND** `cadderd` SHALL regenerate and apply the effective Caddy config from that state
+- **THEN** `cadderd` SHALL serialize preparation, validation, apply and commit
+- **AND** `cadderd` SHALL keep last-known-good state after rejection and reconcile ambiguous results before another mutation
 
 #### Scenario: External Caddy process exists
 - **WHEN** an unrelated Caddy process is already running
@@ -102,9 +102,14 @@ Production daemon startup SHALL use a lock mechanism with explicit ownership,
 diagnostics, and stale-lock recovery.
 
 #### Scenario: Stale lock after crash
-- **WHEN** a daemon lock exists but the recorded owner is no longer alive
-- **THEN** `cadderd` SHALL recover or replace the stale lock through a documented process
+- **WHEN** a daemon acquires the exclusive SQLite runtime lock and stale metadata remains
+- **THEN** `cadderd` SHALL recover metadata and endpoint residue only after acquiring that lock
 - **AND** it SHALL record the recovery in daemon logs
+
+#### Scenario: Metadata does not grant runtime ownership
+- **WHEN** PID or timestamp metadata suggests an expired owner but SQLite remains locked
+- **THEN** a competing daemon SHALL refuse startup
+- **AND** it SHALL NOT delete an endpoint or override exclusion based on diagnostic metadata
 
 #### Scenario: Lock owner metadata is readable while lock is active
 - **WHEN** a production runtime owns the daemon lock
@@ -115,3 +120,29 @@ diagnostics, and stale-lock recovery.
 - **WHEN** a lock is owned by an active incompatible runtime
 - **THEN** `cadderd` SHALL refuse to start a competing production runtime
 - **AND** it SHALL report the active runtime identity and recovery options
+
+### Requirement: Protocol 3 uses authenticated owner-local transport
+The v2 runtime SHALL use protocol 3 over bounded NDJSON on Unix sockets or Windows
+named pipes, with security policy 2. A cryptographic secret SHALL be protected by
+owner-only permissions or Windows ACLs. Both peers SHALL authenticate with fresh,
+direction-bound HMAC challenges before any RPC. Rust protocol is not supported.
+
+#### Scenario: Fake endpoint or wrong secret
+- **WHEN** a peer cannot prove knowledge of the protected secret
+- **THEN** the connection SHALL close before RPC handlers execute
+- **AND** neither peer SHALL transmit secret bytes
+
+#### Scenario: Replay or reflected proof
+- **WHEN** an earlier handshake proof or authenticated frame is replayed
+- **THEN** authentication or sequence validation SHALL reject it
+- **AND** runtime state SHALL remain unchanged
+
+#### Scenario: Unsafe runtime permissions
+- **WHEN** existing runtime permissions, ownership or ACLs allow another account
+- **THEN** startup and client contact SHALL fail closed
+- **AND** startup SHALL NOT repair or weaken the existing security boundary silently
+
+#### Scenario: Root starts a user-owned runtime
+- **WHEN** root starts the daemon on Unix
+- **THEN** startup SHALL require an explicit runtime directory and owner UID
+- **AND** protected files and the socket SHALL remain accessible to that owner without elevating the client

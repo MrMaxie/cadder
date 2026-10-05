@@ -1,0 +1,59 @@
+name: Node runtime migration gate
+
+on:
+  push:
+    branches:
+      - master
+      - feat/node-runtime-migration
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: Node runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    env:
+      CADDER_COVERAGE_DIR: ${{ runner.temp }}/cadder-node-coverage
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+      - name: Bootstrap pinned repository manager
+        run: npm install --global nub@0.7.5
+      - name: Install exact locked dependencies
+        run: nub ci
+      - name: Check TypeScript
+        run: nub run typecheck
+      - name: Check lints
+        run: nub run lint
+      - name: Check formatting
+        run: nub run format:check
+      - name: Test runtime and coverage
+        run: nub run coverage
+      - name: Pack native runtime fixtures outside checkout
+        id: fixtures
+        shell: bash
+        run: echo "stage=$(node scripts/prepare-runtime-gate.ts)" >> "$GITHUB_OUTPUT"
+      - name: Native compiled-JS runtime smoke without TS loader
+        run: node "${{ steps.fixtures.outputs.stage }}/runtime-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs"
+      - name: Verify no tracked build output
+        run: git diff --exit-code
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: node-coverage-${{ matrix.os }}
+          path: ${{ env.CADDER_COVERAGE_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14

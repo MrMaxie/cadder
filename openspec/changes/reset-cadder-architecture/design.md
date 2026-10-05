@@ -1,5 +1,10 @@
 ## Context
 
+The approved target is now TypeScript on Node, not a Rust workspace. Read
+`node-migration.md` for the current implementation decisions. Rust-specific
+sections below describe the migration baseline, not the 2.0 target. Existing
+behavioral requirements remain unless explicitly changed by the migration.
+
 Cadder coordinates Caddy-backed local development runtimes. The reset defines a
 target architecture before implementation continues, so each part has one clear
 reason to exist and one clear owner.

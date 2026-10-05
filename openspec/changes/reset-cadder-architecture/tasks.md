@@ -1,4 +1,23 @@
-## 1. Planning Migration
+## Node migration implementation
+
+Earlier completed tasks below refer to the Rust baseline. They do not prove the
+Node migration. The approved target and gates are in `node-migration.md`.
+
+- [x] N1. Update OpenSpec target, behavior evidence and TS/Nub tooling with exact dependencies.
+- [ ] N2. Implement v2 owner-protected runtime, SQLite exclusion, mutual HMAC IPC and system gate tests.
+  - [x] N2.1 Implement runtime/IPC foundation and run Windows unit, regression and native child-process tests.
+  - [x] N2.2 Run the compiled-JS native runtime gate on Linux x64 with real Unix sockets and permissions.
+  - [ ] N2.3 Pass the native Windows/Linux/macOS CI matrix on the committed code.
+  - [ ] N2.4 Verify same-owner non-elevated contact with elevated daemon and different-account denial in system tests, including Windows Sandbox.
+- [ ] N3. Port Caddy composition, transaction queue, loopback mTLS and owned-process lifecycle.
+- [ ] N4. Port shim policy, safe resolution, heartbeat, autostart and scoped IIS helpers.
+- [ ] N5. Implement history worker, bounded/redacted logs, shared client service and real CLI/TUI.
+- [ ] N6. Verify npm staging and all four SEA releases, native consumer smoke and documentation.
+- [ ] N7. Pass >=85% coverage, three-platform integration and Windows Sandbox acceptance.
+- [ ] N8. Remove Rust/Cargo and legacy packaging only after N1-N7 gates pass.
+- [ ] N9. Prepare matching rc.1 artifacts without publishing; await separate release authorization.
+
+## 1. Planning Migration (Rust baseline)
 
 - [x] 1.1 Keep `openspec/` initialized and document it as the repository planning source of truth.
 - [x] 1.2 Preserve relevant architecture rationale in OpenSpec proposal, design, and specs.
