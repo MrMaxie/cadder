@@ -3,6 +3,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import type { RuntimePaths } from './paths.ts';
 import type { RuntimeOwner } from '../platform/runtime-security.ts';
+import { normalizeRuntimeCreationOwner } from '../platform/runtime-creation-owner.ts';
 import {
   assertProtected,
   assertRuntimeDescendant,
@@ -37,6 +38,7 @@ export async function acquireRuntimeLock(
     }
   }
   await assertJournal();
+  await normalizeRuntimeCreationOwner(owner);
   const database = new DatabaseSync(paths.lock, { timeout: 0 });
   let transaction = false;
   let metadataOwned = false;

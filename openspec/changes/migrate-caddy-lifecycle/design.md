@@ -61,6 +61,22 @@ owned execution settles. Strict product-created path checks remain unchanged.
 Known generated Caddy storage paths use the accepted read-only descendant check;
 no ACL rewrite, general tree scan or secret-bearing diagnostic is added.
 
+Windows native creation must also preserve the actual user's ownership. An
+elevated primary token may otherwise create SQLite journals and Caddy keys with
+the Administrators group as owner, even beneath a user-only inherited DACL.
+After validating the runtime directory, lock file and existing known journal,
+`acquireRuntimeLock` awaits `normalizeRuntimeCreationOwner` before opening SQLite.
+The bounded existing PowerShell bridge targets the Node process primary token,
+verifies its TokenUser against the runtime owner, and queries TokenOwner. Only a
+mismatch requests TOKEN_ADJUST_DEFAULT and sets TokenOwner to that existing user
+SID. A separately reopened query-only token must prove the same user and owner
+before admission continues. Unix remains a no-op; `runtimeOwner` stays
+observational. This changes default ownership for future native-created objects,
+not token privileges, groups, elevation, identity or existing file ACLs. Unsafe
+existing journals still fail before normalization. No native addon or additional
+launcher is introduced. Runtime exclusion remains the caller's prerequisite for
+Caddy lifecycle execution.
+
 ## Verification
 
 Use fake Caddy/process/admin seams in unit tests and disposable Node-native

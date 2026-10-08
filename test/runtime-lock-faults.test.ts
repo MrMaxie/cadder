@@ -5,6 +5,11 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { acquireRuntimeLock } from '../src/daemon/runtime-lock.ts';
 import { resolvePaths } from '../src/daemon/paths.ts';
 import * as security from '../src/platform/runtime-security.ts';
+import { normalizeRuntimeCreationOwner } from '../src/platform/runtime-creation-owner.ts';
+
+vi.mock('../src/platform/runtime-creation-owner.ts', () => ({
+  normalizeRuntimeCreationOwner: vi.fn(),
+}));
 
 vi.mock('node:crypto', async (original) => ({
   ...(await original<typeof import('node:crypto')>()),
@@ -64,6 +69,7 @@ it.each(['unsafe', 'inspection', 'missing-root', 'missing-intermediate'])(
     });
     vi.mocked(security.assertRuntimeDescendant).mockRejectedValueOnce(failure);
     await expect(acquireRuntimeLock(paths, owner)).rejects.toBe(failure);
+    expect(normalizeRuntimeCreationOwner).not.toHaveBeenCalled();
     expect(DatabaseSync).not.toHaveBeenCalled();
     expect(fs.unlink).not.toHaveBeenCalled();
     expect(fs.writeFile).not.toHaveBeenCalled();
@@ -85,7 +91,11 @@ it('allows only known journal leaf absence and checks again while exclusion is h
   const lock = await acquireRuntimeLock(paths, owner);
   expect(security.assertRuntimeDescendant).toHaveBeenCalledTimes(2);
   expect(security.assertRuntimeDescendant).toHaveBeenCalledWith(paths.directory, journal, owner);
+  expect(normalizeRuntimeCreationOwner).toHaveBeenCalledExactlyOnceWith(owner);
   expect(vi.mocked(security.assertRuntimeDescendant).mock.invocationCallOrder[0]).toBeLessThan(
+    vi.mocked(normalizeRuntimeCreationOwner).mock.invocationCallOrder[0]!,
+  );
+  expect(vi.mocked(normalizeRuntimeCreationOwner).mock.invocationCallOrder[0]).toBeLessThan(
     vi.mocked(DatabaseSync).mock.invocationCallOrder[0]!,
   );
   expect(vi.mocked(security.assertRuntimeDescendant).mock.invocationCallOrder[1]).toBeGreaterThan(
@@ -95,6 +105,43 @@ it('allows only known journal leaf absence and checks again while exclusion is h
     vi.mocked(fs.writeFile).mock.invocationCallOrder[0]!,
   );
   await lock.release();
+});
+
+it('awaits creation owner normalization before opening SQLite', async () => {
+  let complete!: () => void;
+  vi.mocked(normalizeRuntimeCreationOwner).mockReturnValueOnce(
+    new Promise<void>((resolve) => {
+      complete = resolve;
+    }),
+  );
+  const acquiring = acquireRuntimeLock(paths, owner);
+  await vi.waitFor(() => expect(normalizeRuntimeCreationOwner).toHaveBeenCalledOnce());
+  expect(DatabaseSync).not.toHaveBeenCalled();
+  expect(fs.readFile).not.toHaveBeenCalled();
+  expect(fs.writeFile).not.toHaveBeenCalled();
+  complete();
+  const lock = await acquiring;
+  expect(DatabaseSync).toHaveBeenCalledOnce();
+  await lock.release();
+});
+
+it('leaves SQLite, metadata and secret untouched when creation owner normalization fails', async () => {
+  const failure = Object.assign(new Error('native owner failure'), {
+    code: 'unsafe-runtime-permissions',
+  });
+  vi.mocked(normalizeRuntimeCreationOwner).mockRejectedValueOnce(failure);
+  await expect(acquireRuntimeLock(paths, owner)).rejects.toBe(failure);
+  expect(normalizeRuntimeCreationOwner).toHaveBeenCalledExactlyOnceWith(owner);
+  expect(security.assertProtected).toHaveBeenCalledWith(paths.directory, owner, true);
+  expect(security.createProtectedFile).toHaveBeenCalledExactlyOnceWith(paths.lock, owner);
+  expect(security.assertRuntimeDescendant).toHaveBeenCalledOnce();
+  expect(DatabaseSync).not.toHaveBeenCalled();
+  expect(database.exec).not.toHaveBeenCalled();
+  expect(database.close).not.toHaveBeenCalled();
+  expect(fs.readFile).not.toHaveBeenCalled();
+  expect(fs.writeFile).not.toHaveBeenCalled();
+  expect(fs.unlink).not.toHaveBeenCalled();
+  expect(randomBytes).not.toHaveBeenCalled();
 });
 
 it('refuses an unsafe generated journal and finalizes exclusion before publication', async () => {
@@ -161,9 +208,10 @@ it.each(['directory', 'lock-create', 'metadata-read', 'secret-create'])(
     await expect(acquireRuntimeLock(paths, owner)).rejects.toBe(failure);
     expect(fs.unlink).not.toHaveBeenCalled();
     expect(fs.writeFile).not.toHaveBeenCalled();
-    if (phase === 'directory' || phase === 'lock-create')
+    if (phase === 'directory' || phase === 'lock-create') {
+      expect(normalizeRuntimeCreationOwner).not.toHaveBeenCalled();
       expect(DatabaseSync).not.toHaveBeenCalled();
-    else expect(database.close).toHaveBeenCalledOnce();
+    } else expect(database.close).toHaveBeenCalledOnce();
     if (phase === 'secret-create') expect(generated.every((byte) => byte === 0)).toBe(true);
   },
 );
