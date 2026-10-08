@@ -6,9 +6,11 @@ project Caddyfile -> managed shim -> daemon -> operator journey, with the curren
 released Rust 1.0.5 command scope and routes-first TUI, while delivering the same
 product through npm and standalone downloads.
 
-The next end-to-end capability is an authenticated, exclusively owned Node
-runtime that passes the real privilege-boundary gate. That is a prerequisite,
-not the finished migration.
+The delivered foundation supplies authenticated, exclusively owned Node runtime
+boundaries. The next capability selects trusted real Caddy and adapts/validates an
+existing project Caddyfile with bounded child cleanup. The user approved testing
+Windows Sandbox on the completed product; its acceptance remains mandatory before
+G7, Rust removal or release, not before Caddy integration implementation.
 
 ## What Changes
 
@@ -73,5 +75,7 @@ No Bun, custom WASM, native runtime addons, Web UI, Tauri, new system installers
 or unrelated feature expansion is included. OBS-001 through OBS-004 remain
 unchanged; older historical code is evidence, not authority to restore features.
 Port/Caddyfile inspection and guarded operator process control retain INSPECT-001
-through INSPECT-004. This planning update does not sync/archive specs, bump released versions, change runtime code,
-commit, push, tag or publish.
+through INSPECT-004. The reviewed contract deltas are synchronized into main
+specs without archiving this open roadmap. That accepts the target, not migration
+completion. Released versions, commits, pushes, tags and publication remain
+separate actions.

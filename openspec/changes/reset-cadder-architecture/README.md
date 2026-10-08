@@ -12,7 +12,7 @@ cadder tui retains the routes workspace and explicit --start-daemon option.
 | proposal.md | User journey, full replacement scope, affected capabilities |
 | node-migration.md | Approved migration constraints and exclusions |
 | design.md | Node module contracts, ownership, security, packaging and cutover |
-| specs/ | Stable-ID normative changes relative to current main specs |
+| specs/ | Reviewed stable-ID deltas synchronized into main specs; retained provenance |
 | tasks.md | Only Node implementation checklist, grouped by dependency gate |
 | acceptance.md | Approved-plan coverage, evidence levels and final completion |
 | release.md | Planned consumer outcomes and major release impact |
@@ -24,12 +24,17 @@ The original Rust reset is archived separately. Its earlier active task snapshot
 is recoverable at `f850418:openspec/changes/reset-cadder-architecture/tasks.md`.
 Historical Rust completions must not count as Node progress.
 
-G2 remains open pending product-contract completion and actual Windows privilege
-acceptance. The runtime foundation is not a shippable 2.0 application. Both npm
+G1/G2 acceptance remains open. The user-approved sequence permits groups 3-6
+implementation against delivered contract/runtime boundaries and schedules Windows
+Sandbox for the completed product under 2.8/7.4. G1/G2 must still close before
+G7 acceptance, Rust removal or release. The runtime foundation is not a shippable
+2.0 application. Both npm
 and every standalone SEA variant must pass before Rust/Cargo/legacy packaging
 removal, followed by a complete Node-only recheck.
 
 Follow the repository's Arcantry/OpenSpec contract -> reviewed delta sync ->
 focused implementation slice -> evidence -> closeout workflow. Completing these
-planning artifacts does not sync main specs, close implementation gates, update
-release manifests/changelog, or authorize commit/push/tag/publication.
+planning artifacts does not close implementation gates, update release
+manifests/changelog, or authorize commit/push/tag/publication. The reviewed
+spec-only synchronization is recorded separately in verification.md; this
+roadmap remains active.

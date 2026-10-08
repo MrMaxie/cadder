@@ -6,18 +6,20 @@ Define accurate, audience-scoped documentation for users and contributors.
 ## Requirements
 
 ### Requirement: DOC-001: User documentation follows the retained journey
-User documentation SHALL describe portable extraction, trusted real-Caddy configuration, managed `caddy run`, the TUI, and coherent manual upgrades without removed CLI, profile, alias installer, autostart, history, export, tail, watch, mock, or hidden-flag claims.
+Astro/Starlight documentation SHALL describe verified Node routes-first TUI, existing CLI lifecycle/project/domain/inspection commands, bounded diagnostic logs and coherent transition workflows in English, without exposing private/test-only context. Published 2.0 instructions SHALL only advertise flows that pass actual product acceptance.
 
-#### Scenario: New user follows Quick Start
-- **WHEN** a user follows the published steps
-- **THEN** every command exists in Cadder 1.0 and no repository-only seam is required
+#### Scenario: User follows a Node guide
+- **WHEN** a user follows a documented 2.0 workflow
+- **THEN** commands SHALL exist in the tested product rather than fixture handlers
+- **AND** old Rust data SHALL remain protected during the documented transition
 
 ### Requirement: DOC-002: Contributor tooling is direct and reproducible
-Contributor documentation SHALL use pinned mise tasks and direct maintained tools for Rust, OpenSpec, Astro, coverage, and cargo-dist.
+Contributor documentation SHALL use the exact Node/Nub TS, OpenSpec, Astro, coverage and npm/SEA workflow, replacing Bun and obsolete Rust tasks after the cutover gate. Sources SHALL remain TS/TSX and generated artifacts SHALL not be committed. SEA's separate Node builder SHALL not change npm's Node minimum.
 
-#### Scenario: Contributor discovers tasks
-- **WHEN** a contributor runs `mise tasks`
-- **THEN** formatting, linting, tests, specs, docs, coverage, TUI web preview, and distribution tasks are visible
+#### Scenario: Contributor prepares artifacts
+- **WHEN** a contributor follows the documented pack verification workflow
+- **THEN** both channels SHALL use the shared sources and outside-checkout staging
+- **AND** no loader/build SHALL be required during consumer npm installation
 
 ### Requirement: DOC-003: Private context does not leak
 Published documentation MUST NOT contain personal absolute paths, `.local`, credentials, mock-only commands, or agent-only operational details.
@@ -27,24 +29,9 @@ Published documentation MUST NOT contain personal absolute paths, `.local`, cred
 - **THEN** only portable reader-facing content is included
 
 ### Requirement: DOC-004: Installation guidance distinguishes npm, Cadder, and Caddy
+Verified npm and standalone GitHub downloads SHALL be presented as equal channels with the same functionality/version. npm SHALL document Node 24 LTS minimum 24.18.0; standalone SHALL require no installed Node/npm. Both SHALL identify upstream Caddy as separate. Unpublished/unverified versions SHALL not be presented as available, and SEA's mechanism status SHALL not demote its channel.
 
-Public installation guidance SHALL present `npx cadder`, global npm installation, and portable GitHub archives only when the corresponding channel has passed its release verification. It MUST explain that npm installs the Cadder operator, daemon, and `caddy` shim while the upstream Caddy web server remains a separate prerequisite.
-
-The hero and getting-started path MUST give users adjacent actions for npm installation or download and documentation without presenting an unpublished package as available. When npm is available, the hero MUST keep the upstream Caddy prerequisite beside a complete first-run Cadder command that starts or attaches to the daemon and opens the operator without an undisclosed interaction.
-
-#### Scenario: npm channel is not yet public
-
-- **WHEN** the current Cadder version is not verified in the public npm registry
-- **THEN** published documentation does not instruct users to install that version from npm
-
-#### Scenario: npm channel is verified
-
-- **WHEN** the exact Cadder version passes clean-room registry installation on every supported platform
-- **THEN** the hero and installation guide may present npm as a supported option
-- **AND** they retain a direct GitHub download path and the separate upstream Caddy requirement
-
-#### Scenario: New user follows the hero
-
-- **WHEN** a new user reads the npm-enabled hero
-- **THEN** the user can identify the separate upstream Caddy prerequisite
-- **AND** copy one Cadder command that starts or attaches to the daemon and opens the TUI without another required interaction
+#### Scenario: Consumer chooses standalone
+- **WHEN** the consumer selects a supported GitHub archive instead of npm
+- **THEN** instructions SHALL offer the same product workflow without Node installation
+- **AND** neither channel SHALL be described as secondary or optional

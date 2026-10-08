@@ -61,7 +61,10 @@ Use `nub ci` and `nub run check` for the root TypeScript workspace. Sources and
 runtime fixtures live in `src/`, `test/`, and `scripts/*.ts`; generated outputs
 and coverage belong in system or runner temp outside the checkout. The Node
 runtime gate supplements, rather than replaces, the existing Rust, docs, npm
-and cargo-dist checks. Windows privilege acceptance still gates Caddy porting.
+and cargo-dist checks. Under the approved migration sequencing, Windows Sandbox
+privilege acceptance runs on the completed product before G7 acceptance, Rust
+removal or release. It does not block Caddy integration implementation; deferred
+evidence must remain open rather than be recorded as passed.
 
 ### Released Rust baseline
 

@@ -111,10 +111,14 @@ using fresh direction-bound challenges. Secret bytes never cross IPC. Validate
 authenticated frame sequences and reject replay/reflection/tampering or RPC
 before authentication. Do not add capability negotiation or Rust compatibility.
 
-G2 must prove native exclusion/crash recovery and both privilege models before
-Caddy porting. The existing Windows Sandbox guide/package is preparation only;
-UAC approval, cancellation, same-owner elevated contact and different-account
-denial require real isolated execution, not mocked claims or host policy changes.
+The delivered contract/runtime boundaries support Caddy integration implementation
+while G1/G2 acceptance evidence remains open. Under the user-approved sequencing,
+Windows Sandbox runs on the completed product, not midway through implementation.
+G2 must still prove native exclusion/crash recovery and both privilege models
+before G7 acceptance, Rust removal or release. The existing Windows Sandbox
+guide/package is preparation only; UAC approval, cancellation, same-owner elevated
+contact and different-account denial require real isolated execution, not mocked
+claims or host policy changes.
 
 ### Configuration transactions and Caddy
 
@@ -137,9 +141,13 @@ query the active protected Caddy state and reconcile before accepting another
 mutation. If persistence fails after apply, restore and verify last-known-good;
 a failed restore stays fenced and reports a recoverable diagnostic.
 
-Create an internal CA, server certificate and protected client certificate using
-WebCrypto/X.509. Bind the admin channel to loopback with mTLS, validate server
-identity and require the authorized client. Do not install this CA in OS trust.
+Create protected root/intermediate CA and authorized client material using
+WebCrypto/X.509. Caddy's native internal issuer obtains and renews the admin
+server certificate from that CA; do not inject a server leaf into CertMagic
+storage or add a proxy/custom issuer. Keep Caddy's identity storage inside the
+owner-protected runtime boundary. Bind the admin channel to loopback with mTLS,
+validate server identity and require the authorized client. Do not install this
+CA in OS trust.
 Override/reject project admin settings before validation; no plaintext admin
 listener may remain. Verify no-cert/wrong-cert denial with real Caddy. Lifecycle
 control uses only the daemon's owned child handle: graceful stop, bounded wait,
@@ -238,11 +246,12 @@ identity includes exact source commit/version; npm and SEA versions match.
 
 ## Migration Plan
 
-G1 establishes complete contracts/fixtures and tooling. G2 closes runtime/security
-acceptance. G3 ports and verifies transactional Caddy. G4 ports shim and current
-inspection/platform boundaries. G5 completes persistence and real CLI/TUI. G6
-builds and verifies both channels and docs. G7 closes cross-platform/security/parity
-acceptance. G8 removes
+G1 establishes contracts/fixtures and tooling. Implemented contract/runtime
+boundaries permit G3 Caddy work while remaining G1/G2 evidence stays open. G3
+ports and verifies transactional Caddy. G4 ports shim and current inspection/platform
+boundaries. G5 completes persistence and real CLI/TUI. G6 builds and verifies both
+channels and docs. Complete G1/G2 acceptance, including actual-product Windows
+Sandbox, before G7 closes cross-platform/security/parity acceptance. G8 removes
 Rust and legacy packaging and reruns the Node-only gates. G9 prepares matching
 release candidates without publishing. See task dependencies and evidence in
 `acceptance.md`; a checkpoint does not close the whole migration.

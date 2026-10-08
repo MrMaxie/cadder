@@ -12,11 +12,12 @@ The user corrected the migration to preserve that product in TypeScript, not
 restore superseded history, IIS, autostart or machine-output workflows. Older
 snapshots may explain retained behavior but cannot expand the accepted scope.
 
-Main specs remain the 1.0 baseline until the reviewed migration deltas are synced
-through the contract archive workflow before further product implementation.
-Archiving those deltas accepts the target, not the unfinished implementation
-roadmap. Preserve open tasks as planning. Future implementation slices reference
-stable requirement IDs and record evidence rather than duplicating this roadmap.
+The reviewed migration deltas are synchronized into main specs; verification.md
+records the contract-sync checks. The released Rust 1.0.5 product remains the
+operational baseline. Synchronization accepts the target, not the unfinished
+implementation roadmap. Open tasks remain planning. Focused implementation slices
+reference stable requirement IDs and record evidence rather than duplicating this
+roadmap.
 
 | Approved scope | Contract and design owner | Tasks / exit |
 | --- | --- | --- |
@@ -64,20 +65,28 @@ Former IIS/AUTO/OBS-005 additions are withdrawn, not accepted product contracts.
 | --- | --- | --- |
 | G1 | Reviewed corrected plan | Complete contracts/design, released-behavior fixtures and reproducible TS tooling |
 | G2 | G1 foundation | Native exclusion/recovery/authentication and owner/elevated/other-account checks, including actual Windows Sandbox |
-| G3 | G2 | Real Caddy multi-project transactions, mTLS denial, rollback/reconcile and owned teardown |
+| G3 | Implemented contract/runtime boundaries (1.2, 1.5, 2.1-2.4), with open G1/G2 evidence tracked | Real Caddy multi-project transactions, mTLS denial, rollback/reconcile and owned teardown |
 | G4 | G3 | Shim fidelity, session cleanup and native operator inspection/PID revalidation |
 | G5 | G4 | Real Node application journey, state/log persistence and current routes CLI/TUI parity |
 | G6 | G5 | Actual packed npm and every native SEA target, matching functionality/version and verified docs |
-| G7 | G6 | Complete coverage, security/system matrix and one-revision requirements ledger |
+| G7 | G6 plus completed G1/G2 acceptance | Complete coverage, security/system matrix, actual product Windows Sandbox and one-revision requirements ledger |
 | G8 | G7 | Node-only checkout/consumers pass again after removing Rust and obsolete packaging |
 | G9 | G8 | Matched RC artifacts and transition evidence; final version only after RC acceptance |
+
+The user approved completing the product before Windows Sandbox execution.
+Groups 3-6 may be implemented against the delivered contract/runtime boundaries;
+open G1/G2 acceptance does not block that implementation. Actual TTY and remaining
+native runtime evidence stay tracked, and Sandbox runs against the completed
+product under 2.8/7.4. G1/G2 must be accepted before G7, Rust removal or release.
+This changes execution order, not owner/elevated access or other security criteria.
 
 Fake adapters prove policy/contract behavior. Native child fixtures prove runtime
 mechanics. Actual packed-product tests prove distribution behavior. Interactive
 Sandbox proves UAC/account boundaries. None may be relabeled as another.
-If a gate lacks execution authority or a native runner, record the gap and do
-safe work within that gate; do not bypass dependencies or mark it complete.
-Material contract changes return for an explicit user decision.
+If a check lacks execution authority or a native runner, record the gap and keep
+its acceptance open. Continue only implementation permitted by the dependency
+rules above; deferred checks are not passes. Material contract changes return
+for an explicit user decision.
 
 ## Reusable functional catalog
 

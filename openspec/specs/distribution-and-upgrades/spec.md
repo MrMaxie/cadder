@@ -4,74 +4,40 @@
 Define maintained portable releases and coherent manual upgrades.
 ## Requirements
 ### Requirement: DIST-001: Release binaries are version matched
-Cadder SHALL version and release the `cadder`, `cadderd`, and `caddy` executables together in one application archive for Windows x64, Linux x64, Intel macOS, and Apple Silicon macOS.
+Cadder SHALL have equal, required npm and Node SEA GitHub Release channels with the same version and cadder/cadderd/caddy functionality. Standalone targets SHALL include Windows x64, Linux x64, macOS x64 and macOS arm64. Both channels SHALL pass acceptance before migration completion or final release readiness.
 
-#### Scenario: Unified tag is planned
-- **WHEN** cargo-dist plans tag `v1.0.0`
-- **THEN** it includes one 1.0.0 application with all three executables on all four targets
+#### Scenario: One channel is ready
+- **WHEN** npm passes but any supported standalone variant remains unverified
+- **THEN** the migration SHALL remain incomplete rather than treating SEA as optional
 
 ### Requirement: DIST-002: Archives are portable and verifiable
-Each cargo-dist archive MUST contain exactly the three expected executables, README, changelog, Apache-2.0 license, and sample configuration and MUST have a SHA-256 checksum.
+Each standalone archive SHALL contain three version-matched Node SEA entries and required accepted assets, a SHA-256 checksum and release-source provenance. Every target SHALL be extracted outside checkout and pass native CLI/TUI, state/log SQLite worker and owned subprocess smoke without Node/npm on PATH. Standalone SHALL NOT require installed Node, download runtime components or bundle real Caddy. Existing release attestation verification SHALL bind assets to their exact tag/source commit/repository/signer before publication.
 
-Before publication, each archive MUST be extracted into a fresh directory outside the source checkout on its native operating system. The verifier MUST check the checksum, exact file set, executable permissions where applicable, and successful `--version` and `--help` behavior for all three executables. Published archives, checksums, source archive, cargo-dist manifest MUST carry GitHub artifact attestations from the release workflow. A downstream package workflow MUST bind attestation verification to the selected tag ref, its exact source commit, the Cadder repository, and that signer workflow.
-
-#### Scenario: User downloads a release
-- **WHEN** an archive and checksum are obtained from one release
-- **THEN** the checksum can be verified before extraction without an installer
-- **AND** a GitHub attestation can associate the asset with the exact release source and workflow
-
-#### Scenario: Release archive is verified
-- **WHEN** a release archive is evaluated before publication or downstream packaging
-- **THEN** only the accepted binaries and static release files are present
-- **AND** each executable reports the planned version and exposes help outside the source checkout
-- **AND** Unix executables retain their executable permissions
-- **AND** downstream verification rejects an attestation for a different ref, commit, repository, or signer workflow
+#### Scenario: Consumer has no Node installation
+- **WHEN** a supported standalone archive is used with Node/npm absent from PATH
+- **THEN** all three entries, TUI, SQLite worker and owned child workflows SHALL work
+- **AND** checksum/provenance verification SHALL apply to the exact tested archive
 
 ### Requirement: DIST-003: Upgrades replace the coherent executable set
-Public guidance MUST instruct the user to stop through the TUI, replace all three executables from one release, and restart through managed run or the TUI.
+Transition guidance SHALL require stopping the old daemon before switching the coherent release set. Node SHALL re-register projects from existing files without importing or deleting old runtime data. Old releases SHALL remain available for rollback without automatic deprecation. Mixed Rust/Node IPC SHALL not be supported. Transition SHALL NOT require IIS handoff or autostart operations absent from the released product.
 
-#### Scenario: Mixed versions connect
-- **WHEN** only part of the executable set was replaced
-- **THEN** the exact handshake rejects the mismatch before mutation
+#### Scenario: User switches to Node and later rolls back
+- **WHEN** the user follows the documented transition with each daemon stopped
+- **THEN** existing configuration and old data/releases SHALL remain available
+- **AND** rollback SHALL use the matched old set, not mixed IPC or imported old data
 
-### Requirement: DIST-004: npm installs the coherent native application
+### Requirement: DIST-004: npm installs one Node application package
+npm SHALL deliver one cadder tarball with three bin entries on Node 24 LTS, minimum 24.18.0. It SHALL contain compiled JS and required assets from the shared TS sources, not platform optionalDependencies or native Rust executables. Installation SHALL require no TS loader/compiler, install-time build, postinstall runtime download or bundled upstream Caddy. Local/global installs SHALL preserve arguments, streams, status and non-recursive PATH behavior.
 
-Cadder SHALL publish one public `cadder` launcher package and one platform package for each supported release target. Every package in one release MUST use the same version, and the root package MUST depend on the matching platform packages by exact optional dependency versions.
-
-The root package MUST expose `cadder`, `cadderd`, and the Cadder `caddy` shim. It MUST select only the package matching the current operating system, architecture, and C runtime, launch the native executable without a shell, preserve standard streams and exit status, and report an actionable error for an unsupported platform or omitted optional dependency.
-
-The npm installation MUST NOT bundle, download, replace, or claim to provide the independently installed upstream Caddy server.
-
-#### Scenario: One-off operator invocation
-
-- **WHEN** a user runs `npx cadder` on a supported platform with optional dependencies enabled
-- **THEN** the matching native `cadder` executable runs with the requested arguments
-- **AND** its version matches the root and platform package versions
-
-#### Scenario: Global installation
-
-- **WHEN** a user installs `cadder` globally on a supported platform
-- **THEN** `cadder`, `cadderd`, and the Cadder `caddy` shim are available as commands
-- **AND** all three native executables report the same release version
-
-#### Scenario: Upstream Caddy remains separate
-
-- **WHEN** the npm-installed Cadder shim needs a real Caddy executable
-- **THEN** the npm launcher cannot be selected as upstream Caddy
-- **AND** real Caddy resolution continues through Cadder's existing trusted sources
-
-#### Scenario: Optional package is unavailable
-
-- **WHEN** the platform package was omitted or the current platform is unsupported
-- **THEN** the launcher exits unsuccessfully without downloading or compiling an executable
-- **AND** the diagnostic identifies the missing package or unsupported target
+#### Scenario: Clean consumer installs the packed tarball
+- **WHEN** a supported consumer installs locally or globally without build tools
+- **THEN** cadder, cadderd and the caddy shim SHALL run from the one package
+- **AND** upstream Caddy SHALL remain a separately configured prerequisite
 
 ### Requirement: DIST-005: npm and portable archives share release identity
+npm and SEA SHALL be built from the same source revision with one matching release version and pass the same functional catalog. Their artifact bytes need not match because packaging differs. A verified 2.0.0-rc.1 in both channels SHALL precede 2.0.0 acceptance. Tagging and publication SHALL require separate explicit authorization; artifact preparation alone SHALL NOT publish either channel.
 
-Every npm platform package SHALL contain the exact three executable files taken from the corresponding verified cargo-dist release archive. npm packaging MUST preserve executable permissions where applicable and MUST NOT alter the native executable bytes.
-
-#### Scenario: Release channel comparison
-
-- **WHEN** a native executable from an npm platform package is compared with the corresponding verified GitHub Release archive
-- **THEN** their cryptographic digests match
-- **AND** both report the same Cadder release version
+#### Scenario: Candidate channels are compared
+- **WHEN** packed npm and extracted SEA are accepted for a candidate
+- **THEN** source revision, reported version and observable functional outcomes SHALL match
+- **AND** no publication SHALL occur without its separate authority

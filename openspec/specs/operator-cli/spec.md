@@ -4,37 +4,21 @@
 Define the intentionally small command surface of the operator executable.
 ## Requirements
 ### Requirement: CLI-001: The operator exposes focused developer workflows
-`cadder` MUST support help, version, `tui`, daemon lifecycle and status, project listing and activation, domain listing and activation, port inspection and guarded process termination, Caddyfile inspection, explicit diagnostics, and bounded redacted log reads. The TUI command MUST support an explicit `--start-daemon` option that reuses the existing attach-first daemon launch contract before opening the operator. It MUST reject profile, machine-output, history, export, continuous tail, watch, and autostart commands.
+Commander-based cadder SHALL preserve the released 1.0.5 help/version, status, daemon lifecycle, project/domain controls, port/Caddyfile inspection, diagnostics and bounded redacted log commands, with stable arguments, human-readable output and exit status through the shared client service. Bare cadder SHALL print help successfully without starting TUI or the daemon, regardless of TTY. cadder tui SHALL open the routes workspace without implicit daemon startup; its explicit --start-daemon option SHALL use the shared attach-first bounded launch contract. Explicit daemon start/restart and managed caddy run SHALL retain their launch policy. Other state and inspection commands SHALL remain attach-only. Profile, machine-output, history, export, continuous tail, watch, IIS and autostart commands SHALL be rejected as unsupported.
 
 #### Scenario: Bare invocation
-- **WHEN** a user runs `cadder` without a subcommand
-- **THEN** Cadder prints help successfully without starting the TUI
+- **WHEN** cadder has no subcommand, with or without a TTY
+- **THEN** it SHALL print help successfully without starting a daemon or interactive session
 
-#### Scenario: TUI invocation
-- **WHEN** a user runs `cadder tui`
-- **THEN** Cadder opens the interactive operator without changing the existing daemon lifecycle
+#### Scenario: Explicit TUI startup option
+- **WHEN** the user runs cadder tui --start-daemon
+- **THEN** Cadder SHALL start or attach through the bounded shared launch path before opening the TUI
 
-#### Scenario: TUI invocation with daemon startup
-- **WHEN** a user runs `cadder tui --start-daemon`
-- **THEN** Cadder starts or attaches to `cadderd` through the existing bounded launch path
-- **AND** opens the interactive operator after the daemon is ready without requiring another interaction
+#### Scenario: CLI state command while daemon is offline
+- **WHEN** a state command cannot attach
+- **THEN** it SHALL report actionable offline state with the stable exit contract
+- **AND** it SHALL NOT start a daemon implicitly
 
-#### Scenario: General state inspection
-- **WHEN** a user runs `cadder status`, `cadder projects list`, or `cadder domains list`
-- **THEN** Cadder reports current daemon-backed state using developer-facing project and domain terminology
-
-#### Scenario: Activation management
-- **WHEN** a user explicitly enables or disables a selected project or domain
-- **THEN** Cadder applies the mutation through the daemon and reports the result
-
-#### Scenario: Daemon lifecycle management
-- **WHEN** a user explicitly starts, stops, or restarts `cadderd`
-- **THEN** Cadder uses the existing attach-first, bounded stop, or ordered restart operation and reports the outcome
-
-#### Scenario: On-demand diagnostics
-- **WHEN** a user requests diagnostics or bounded logs for the runtime, a project, or a domain
-- **THEN** Cadder reports the selected diagnostic data without adding it back to the primary TUI
-
-#### Scenario: Removed command
-- **WHEN** a user invokes a profile, machine-output, history, export, continuous tail, watch, or autostart command
-- **THEN** Cadder rejects it as unsupported CLI input
+#### Scenario: Unsupported expansion is requested
+- **WHEN** the user requests machine output, history, export, continuous tail, watch, profiles, IIS or autostart
+- **THEN** Cadder SHALL reject the unsupported input rather than restoring an older command surface

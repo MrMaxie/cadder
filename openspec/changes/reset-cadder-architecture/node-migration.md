@@ -66,11 +66,15 @@ packaging mechanism, not distribution priority.
 
 ## Verification and transition gates
 
-Follow migration tasks in order. Runtime/IPC system tests gate Caddy porting.
+Follow implemented module dependencies while tracking open acceptance evidence.
+The user approved groups 3-6 implementation against the delivered contract/runtime
+boundaries without first executing Windows Sandbox. Sandbox tests the completed
+product under tasks 2.8/7.4; G1/G2 acceptance remains mandatory before G7, Rust
+removal or release. Deferred execution is not a security waiver or a passed gate.
 Cover concurrent starts, crash recovery, authentication failures, replay, fake
-endpoints, unsafe ACLs and same-owner elevated access. Later cover multi-project
-reload/rollback, heartbeat, Ctrl+C, shutdown, native privilege boundaries in
-Windows Sandbox and identical npm/SEA consumer scenarios. Test SEA without
+endpoints, unsafe ACLs and same-owner elevated access. Also cover multi-project
+reload/rollback, heartbeat, Ctrl+C, shutdown, actual-product native privilege
+boundaries and identical npm/SEA consumer scenarios. Test SEA without
 Node/npm on PATH on each native platform, including the routes TUI, state/log
 SQLite worker and subprocesses. Packaging must leave tracked files unchanged
 and no generated JS in checkout.

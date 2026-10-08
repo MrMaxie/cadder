@@ -1,5 +1,11 @@
 # Interactive Windows runtime gate
 
+Execution is deferred by the user's approved sequencing until the actual product
+is complete. Tasks 2.8 and 7.4 require final product evidence before G7 acceptance,
+Rust removal or release. The runtime-fixture procedure below is retained for
+reference; it does not replace actual-product acceptance and must not be launched
+during the current implementation stage.
+
 This package tests the Node runtime foundation only. It is not an npm or SEA
 release and does not contain product commands, Caddy, IIS or autostart mutations.
 The host package is mounted read-only, networking is disabled, and all runtime
@@ -96,5 +102,6 @@ Back in the original non-elevated shell:
 
 Record the three markers, UAC cancellation/approval, and any errors. Close
 Sandbox to discard its runtime, test account profile and other disposable state.
-Only after reviewing actual results can N2.4 be marked complete. This interactive
-gate has not been verified merely by preparing the package.
+Only reviewed actual-product results can close tasks 2.8 and 7.4. Runtime-fixture
+results alone do not satisfy those tasks. This interactive gate has not been
+verified merely by preparing the package.
