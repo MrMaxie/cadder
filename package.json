@@ -1,0 +1,46 @@
+{
+  "name": "cadder",
+  "version": "2.0.0-rc.1",
+  "description": "Daemon-backed Caddy coordination with CLI and TUI clients",
+  "type": "module",
+  "private": true,
+  "packageManager": "nub@0.7.5",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint --flag unstable_native_nodejs_ts_config \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\" package.json tsconfig.json vitest.config.ts eslint.config.ts",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\" \"scripts/**/*.ts\" package.json tsconfig.json vitest.config.ts eslint.config.ts",
+    "check": "nub run typecheck && nub run lint && nub run format:check && nub run coverage"
+  },
+  "dependencies": {
+    "@peculiar/x509": "2.1.0",
+    "commander": "15.0.0",
+    "ink": "8.0.0",
+    "react": "19.3.0",
+    "reflect-metadata": "0.2.2",
+    "smol-toml": "1.9.0",
+    "zod": "4.6.5"
+  },
+  "allowBuilds": {
+    "esbuild": true
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.1",
+    "@types/react": "19.3.0",
+    "@vitest/coverage-v8": "5.0.3",
+    "esbuild": "0.28.2",
+    "eslint": "10.0.3",
+    "ink-testing-library": "4.0.0",
+    "prettier": "3.8.3",
+    "tsx": "4.23.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.57.0",
+    "vitest": "5.0.3"
+  }
+}

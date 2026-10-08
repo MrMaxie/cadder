@@ -4,119 +4,58 @@
 Define the maintained contributor toolchain, validation gate, and release automation boundary.
 ## Requirements
 ### Requirement: QT-001: Declarative contributor environment
-Cadder SHALL define its supported development-tool versions, task entrypoints, task dependencies, working directories, and non-secret development environment values in committed `mise` configuration with a committed lockfile.
+The Node product SHALL declare exact dependencies, tool versions and locks, managed by Nub, without private paths/credentials. TypeScript SHALL be 6.0.3; the npm-tested Node minimum SHALL be 24.18.0 on Node 24 LTS. SEA SHALL use a separately verified, exact Node 26 builder pin. Required tools SHALL work on Windows/Linux/macOS without a custom compiled task runner after cutover.
 
-The configuration MUST work from a fresh checkout on Windows, Linux, and macOS without requiring a repository-specific compiled task runner. It MUST NOT contain credentials, personal paths, `.local` paths, or values that alter ordinary product behavior outside an explicitly scoped development task.
-
-#### Scenario: Fresh contributor setup
-- **WHEN** a contributor installs `mise` and prepares the declared project environment from a fresh checkout
-- **THEN** the pinned Rust, documentation, specification, coverage, and release tools become available
-- **AND** no `xtask`, `just`, Nushell, or private workstation configuration is required
-
-#### Scenario: Development-only environment
-- **WHEN** a contributor runs a task that requires the mock Caddy backend
-- **THEN** the mock setting applies only to that task and its children
-- **AND** an ordinary Cadder command does not inherit the mock setting from committed global configuration
+#### Scenario: Fresh Node-only checkout
+- **WHEN** a contributor follows the declared setup after Rust removal
+- **THEN** Node tests/build/docs/packaging SHALL work without Cargo/Rust or private setup
 
 ### Requirement: QT-002: One discoverable task surface
-The supported repository task surface SHALL be discoverable through `mise tasks` and SHALL use `mise run <task>` as its stable documented invocation.
+Node validation/build/pack tasks SHALL be discoverable as Nub package scripts, with focused commands and a complete check. Existing tool provisioning MAY remain as a thin adapter during cutover, not a competing policy framework. Custom scripts SHALL be limited to Cadder-specific packaging/acceptance seams.
 
-Tasks MUST remain small adapters to an owning tool. The repository MUST NOT add a second general command runner, embed substantial shell programs in task configuration, or recreate a command-dispatch framework in Rust or another language.
-
-#### Scenario: Contributor discovers validation commands
-- **WHEN** a contributor lists project tasks
-- **THEN** the output identifies focused formatting, linting, testing, specification, documentation, coverage, complete-check, and release-verification tasks
-- **AND** each task delegates its work to the tool that owns that responsibility
-
-#### Scenario: New automation is proposed
-- **WHEN** a proposed task would parse a maintained tool's format or reproduce its policy
-- **THEN** the proposal is rejected in favor of that tool's supported command or configuration
-- **AND** any claimed exception requires an explicit Cadder product invariant and a focused verification owner
+#### Scenario: Contributor runs complete checks
+- **WHEN** the documented Node check/pack verification commands run
+- **THEN** each SHALL delegate to its owning maintained tool
+- **AND** there SHALL be no replacement general-purpose custom command dispatcher
 
 ### Requirement: QT-003: Maintained tools own validation and release formats
-Cargo SHALL own Rust formatting, linting, builds, and tests; `cargo-llvm-cov` SHALL own coverage calculation and the configured threshold; the official OpenSpec CLI SHALL own specification validation; npm and Astro SHALL own documentation dependency and build checks; and `cargo-dist` SHALL own release planning, portable archives, included release files, SHA-256 checksums, and generated GitHub Release automation.
+tsc noEmit, ESLint, Prettier, Vitest/V8 and ink-testing-library SHALL own their checks; own TS/TSX line coverage SHALL be at least 85%, including hard runtime modules without selective exclusion. npm emission SHALL use tsc with relative import rewriting; SEA bundling SHALL use esbuild and the pinned Node builder. All generated Node JS/bundles/archives/coverage SHALL go to system or runner temp outside checkout, never beside source or into tracked files. Astro/Starlight SHALL own documentation checks/builds with Nub-managed dependencies.
 
-Cadder MAY apply one deterministic, focused postprocessor to cargo-dist's generated workflow only for security invariants that cargo-dist cannot express. The adapter MUST fail when its expected generated structure changes, MUST be verified by the supported repository task surface, and MUST NOT recreate release planning, artifact construction, checksums, or publication policy.
-
-Cadder-specific executable behavior MUST be verified by tests in the package that owns the executable. Repository checks that only restate a native manifest, generated release plan, or accepted OpenSpec declaration MUST NOT be retained as independent policy engines.
-
-#### Scenario: Complete repository gate
-- **WHEN** a contributor or CI runs the complete supported check task
-- **THEN** each required validation runs through its owning maintained tool or focused product test
-- **AND** a failure identifies the owning validation boundary
-
-#### Scenario: Portable release is planned
-- **WHEN** release automation plans a Cadder version
-- **THEN** `cargo-dist` describes one portable application for every supported target with the accepted binaries, included files, and SHA-256 checksums
-- **AND** the committed workflow equals cargo-dist's generated output after the focused security hardening pass
+#### Scenario: Pack verification runs
+- **WHEN** the same source is checked and packed for either channel
+- **THEN** the supported tools SHALL produce only outside-checkout Node artifacts
+- **AND** tracked files SHALL remain unchanged with no emitted source-side JS
 
 ### Requirement: QT-004: Local and CI task parity
-Continuous integration SHALL invoke the same supported task definitions used locally for platform-independent repository validation. Platform-specific jobs MAY add only the runner, target, permissions, or external service evidence required by their operating-system contract.
+CI SHALL invoke the same checks and non-publishing packing process as local verification, with native Windows/Linux/macOS system/security integration and every SEA target. PR jobs SHALL not publish or receive publication credentials. Native exact-artifact verification SHALL precede attest/publish stages with least privilege and source/tag validation. Documentation examples SHALL be tested.
 
-Release pull requests MUST build and upload the complete cargo-dist artifact plan without publishing a release. Planning and artifact-build jobs MUST have read-only repository permissions and MUST NOT receive a publication token. Release tag values MUST be validated as data outside generated shell source. Release publication MUST remain separate from general validation, MUST use the source revision and artifact plan accepted by the release gate, MUST verify the exact tagged archives on their native operating-system runners before announce, and MUST grant write permission only to the stages that attest or publish immutable release assets.
-
-#### Scenario: Pull request validation
-- **WHEN** a pull request runs repository validation
-- **THEN** CI installs the pinned project environment and invokes the documented `mise run` tasks
-- **AND** the jobs do not receive release publication credentials
-
-#### Scenario: Release candidate pull request
-- **WHEN** cargo-dist evaluates a release pull request
-- **THEN** it builds and uploads the complete portable artifact set for inspection with read-only repository access
-- **AND** it does not create or modify a public GitHub Release
-
-#### Scenario: Platform-specific evidence
-- **WHEN** a requirement needs Windows, Linux, macOS, or Docker evidence
-- **THEN** CI runs the focused task on the required runner or service
-- **AND** the platform job does not introduce an alternative repository task implementation
-
-#### Scenario: Tagged release publication
-- **WHEN** a validated supported release tag is built
-- **THEN** every target archive is verified on its native runner from a fresh directory outside the checkout
-- **AND** GitHub Release publication waits for all verification jobs to succeed and receives write permission only in the publishing path
+#### Scenario: Candidate PR is validated
+- **WHEN** CI verifies a migration or release candidate
+- **THEN** it SHALL check contracts, coverage, native product behavior and both channels
+- **AND** artifact preparation SHALL NOT create a public release or registry publication
 
 ### Requirement: QT-005: Evidence-gated task-runner removal
-The `xtask` package and command surface SHALL be removed only after every retained responsibility is mapped to a maintained tool, a focused owning-package test, or an explicit accepted removal rationale.
+The Rust/Cargo product and obsolete native npm/release packaging SHALL be removed only after complete Node functionality and both distributions pass acceptance at the candidate revision. Each old responsibility SHALL have a verified replacement or explicitly approved removal. Unrelated pre-existing untracked npm content SHALL be inspected and preserved. After removal, the full Node-only gate SHALL pass again without Rust/Cargo installed.
 
-The replacement release path MUST demonstrate the complete supported artifact matrix without publishing, and the replacement complete-check path MUST pass on the same source revision before the old task framework is deleted.
-
-#### Scenario: Migration inventory is reviewed
-- **WHEN** removal of `xtask` is proposed
-- **THEN** every existing command has a recorded replacement owner or removal rationale
-- **AND** no command is translated into a new general-purpose script solely to preserve the old structure
-
-#### Scenario: Replacement release path is incompatible
-- **WHEN** cargo-dist cannot produce the accepted one-application artifact contract without substantial custom glue
-- **THEN** implementation stops before deleting the existing release path
-- **AND** a follow-up OpenSpec decision chooses a new package model or explicitly scoped adapter
+#### Scenario: Rust removal is proposed
+- **WHEN** one required capability, platform or distribution still lacks evidence
+- **THEN** Rust removal SHALL wait and migration SHALL remain incomplete
+- **AND** a foundation checkpoint SHALL NOT be represented as the finished migration
 
 ### Requirement: QT-006: npm packages pass clean-room verification
+The gate SHALL verify the actual single npm tarball and every extracted SEA archive outside checkout using the publication packing process without publishing. It SHALL verify exact allowed files, version/license/repository identity, all three entries, local/global npm installs, argument/stream/exit fidelity and no wrapper recursion. npm SHALL have no platform optional packages or install scripts; SEA SHALL pass real TUI/SQLite/worker/child smoke without Node/npm PATH.
 
-The npm package gate SHALL verify the exact packed file set, platform metadata, exact optional dependency versions, absence of install lifecycle scripts, and matching license and repository identity before any package is staged.
-
-On every supported native runner, the gate MUST install locally packed packages in a fresh consumer directory outside the checkout and MUST exercise `--version` and `--help` for `cadder`, `cadderd`, and the Cadder `caddy` shim. The gate MUST prove that the npm `caddy` launcher cannot resolve itself as upstream Caddy.
-
-#### Scenario: Package candidate is verified
-
-- **WHEN** npm package tarballs are prepared for a release
-- **THEN** every supported platform passes native clean-room installation and command checks
-- **AND** unexpected files, lifecycle scripts, version drift, or launcher recursion fail the gate before registry staging
+#### Scenario: Clean consumer verification fails
+- **WHEN** either channel fails its native packed-consumer catalog
+- **THEN** neither the whole migration nor matching final release SHALL be accepted
 
 ### Requirement: QT-007: npm publication uses staged trusted publishing
-Cadder npm publication SHALL use npm trusted publishing from the exact GitHub-hosted workflow and protected release environment through short-lived OIDC credentials. The trusted publisher MUST allow staged publishing only, package publishing access MUST disallow traditional tokens, and no long-lived npm publish credential may be stored in the repository or GitHub Actions.
+After separate publication approval, the single npm package SHALL retain short-lived OIDC trusted publishing from the exact protected GitHub workflow, staged publishing and maintainer 2FA review, without long-lived npm tokens. The consumed candidate SHALL match the verified source revision/version and complete npm/SEA evidence. The obsolete native-platform-package approval order SHALL not remain a dependency of the new single package.
 
-The workflow MUST stage packages only after it verifies the corresponding GitHub Release assets, SHA-256 checksums, and attestations. Every accepted asset attestation MUST identify the selected release tag, its exact source commit, and Cadder's release workflow as signer. npm provenance MUST identify the public repository and publishing workflow. A maintainer MUST review and approve each stage with 2FA, approving all platform packages before the root package.
-
-#### Scenario: Automated staging
-- **WHEN** a verified tagged release reaches the npm workflow
-- **THEN** GitHub Actions checks out that exact tag and verifies every consumed asset against its ref, commit digest, repository, and release workflow
-- **AND** it obtains a short-lived OIDC publishing identity and stages rather than directly publishes all version-matched packages
-- **AND** no npm access token is available to the job
-
-#### Scenario: Human publication approval
-- **WHEN** the staged package set is ready for publication
-- **THEN** a maintainer reviews the staged artifacts and approves them with 2FA
-- **AND** the root package cannot become public before every referenced platform package
+#### Scenario: Authorized candidate reaches publishing
+- **WHEN** the separately approved matched candidate enters the publishing workflow
+- **THEN** it SHALL stage the exact verified single package with trusted provenance
+- **AND** a maintainer SHALL approve publication without an embedded persistent token
 
 ### Requirement: QT-008: New npm names use an explicit bootstrap
 

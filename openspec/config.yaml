@@ -1,13 +1,15 @@
 schema: spec-driven
 
 context: |
-  Cadder is a Rust workspace for coordinating Caddy-backed local development
-  runtimes. OpenSpec is the canonical source for product requirements, design
+  Cadder 2.0 is a TypeScript/Node product for coordinating Caddy-backed local
+  development runtimes, with equal npm and Node SEA release channels. Rust is
+  retained as a migration baseline until both distribution gates pass.
+  OpenSpec is the canonical source for product requirements, design
   decisions, and implementation plans.
 
   The codebase should favor small modules, explicit ownership, independently
   testable boundaries, and clear contracts between runtime, integration, and
-  presentation layers. Prefer proven Rust crates and established tooling over
+  presentation layers. Prefer proven libraries and established tooling over
   custom infrastructure when they fit the job.
 
   Cadder is cross-platform by default. Platform-specific behavior must live
@@ -38,6 +40,11 @@ rules:
     - "Define test seams, fakes, and verification strategy before describing implementation details."
     - "For a new abstraction or dependency, compare the standard library, a focused library, and a framework by net concepts, code, maintenance, and migration risk."
     - "Classify information as product, operational, diagnostic, or local, and keep local tools, mock backends, private paths, and hidden flags out of public contracts."
+  specs:
+    - "Use the OpenSpec delta format correctly: ADDED, MODIFIED, REMOVED, or RENAMED Requirements as appropriate."
+    - "For MODIFIED requirements, include the full updated requirement block, not a partial patch."
+    - "Write normative SHALL/MUST requirements with observable behavior and at least one scenario using the required heading level."
+    - "Keep specs focused on what the system must do; put implementation choices in design unless they are part of the user-facing contract."
   tasks:
     - "Break work into independently verifiable slices."
     - "Keep cleanup and implementation tasks separate when cleanup has migration risk."

@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-07-07
+goal: Define the complete Cadder 2.0 TypeScript/Node migration contract, ordered
+  acceptance gates and equal npm/Node SEA distributions before further product
+  implementation, including verified removal of the Rust product.

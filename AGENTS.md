@@ -49,6 +49,25 @@ mise run check
 
 ## Engineering Notes
 
+### Node migration
+
+`openspec/changes/reset-cadder-architecture/node-migration.md` defines the approved
+2.0 target: one TypeScript/Node product with equal npm and Node SEA distributions.
+The released Rust 1.0.5 workspace and its existing packaging remain the baseline
+until both migration distribution gates pass. Do not restore superseded 0.8
+crates or mix Rust and Node IPC.
+
+Use `nub ci` and `nub run check` for the root TypeScript workspace. Sources and
+runtime fixtures live in `src/`, `test/`, and `scripts/*.ts`; generated outputs
+and coverage belong in system or runner temp outside the checkout. The Node
+runtime gate supplements, rather than replaces, the existing Rust, docs, npm
+and cargo-dist checks. Under the approved migration sequencing, Windows Sandbox
+privilege acceptance runs on the completed product before G7 acceptance, Rust
+removal or release. It does not block Caddy integration implementation; deferred
+evidence must remain open rather than be recorded as passed.
+
+### Released Rust baseline
+
 - Cadder is cross-platform by default. OS-specific code must sit behind a small abstraction and keep Windows, Linux, and macOS behavior explicit.
 - Runtime state is per user and rooted in `directories::ProjectDirs`, with `CADDER_RUNTIME_DIR` available for tests and custom deployments.
 - IPC is versioned newline-delimited JSON over a per-user local socket via `interprocess`.
