@@ -6,7 +6,7 @@ import { errorCode } from '../../src/protocol/errors.ts';
 const runtimeDir = process.argv[2];
 if (!runtimeDir) throw new Error('Pass the owner runtime directory.');
 try {
-  await rpc(resolvePaths({ runtimeDir }), 'status');
+  await rpc(resolvePaths({ runtimeDir }), 'query-state-request');
   throw new Error('An unauthorized account contacted the runtime.');
 } catch (error) {
   assert.ok(

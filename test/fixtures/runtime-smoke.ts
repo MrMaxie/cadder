@@ -16,7 +16,7 @@ const environment = { ...process.env };
 delete environment.NODE_OPTIONS;
 let child: ChildProcessWithoutNullStreams | undefined;
 
-async function start(): Promise<ChildProcessWithoutNullStreams> {
+async function start(recovered = false): Promise<ChildProcessWithoutNullStreams> {
   const processHandle = spawn(
     process.execPath,
     [entry!, root, ...(process.getuid ? [String(process.getuid())] : [])],
@@ -31,9 +31,14 @@ async function start(): Promise<ChildProcessWithoutNullStreams> {
       processHandle.kill();
       reject(new Error(`Startup timeout: ${stderr}`));
     }, 12000);
-    processHandle.stdout.once('data', () => {
+    let stdout = '';
+    processHandle.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+      if (!stdout.includes('\n')) return;
       clearTimeout(timer);
-      resolve();
+      if (stdout.trim() !== `READY recovered=${recovered}`)
+        reject(new Error(`Unexpected fixture readiness: ${stdout}`));
+      else resolve();
     });
     processHandle.once('exit', () => {
       clearTimeout(timer);
@@ -46,18 +51,21 @@ async function start(): Promise<ChildProcessWithoutNullStreams> {
 
 try {
   child = await start();
-  assert.deepEqual(await rpc(paths, 'status'), { processId: child.pid, recovered: false });
-  await assert.rejects(start, /already locked/);
+  assert.equal((await rpc(paths, 'query-state-request')).snapshot?.runtime.processId, child.pid);
+  await assert.rejects(() => start(), /already locked/);
   let exited = once(child, 'exit');
   child.kill('SIGKILL');
   await exited;
-  child = await start();
-  assert.deepEqual(await rpc(paths, 'status'), { processId: child.pid, recovered: true });
+  child = await start(true);
+  assert.equal((await rpc(paths, 'query-state-request')).snapshot?.runtime.processId, child.pid);
   exited = once(child, 'exit');
-  await rpc(paths, 'shutdown');
+  assert.equal((await rpc(paths, 'shutdown-daemon-request')).accepted, true);
   await exited;
   child = undefined;
-  await assert.rejects(() => rpc(paths, 'status'), /Start it with cadder daemon start/);
+  await assert.rejects(
+    () => rpc(paths, 'query-state-request'),
+    /Start it with cadder daemon start/,
+  );
   process.stdout.write(`Native runtime gate passed on ${process.platform}/${process.arch}.\n`);
 } finally {
   if (child?.exitCode === null) {

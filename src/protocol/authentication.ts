@@ -96,12 +96,13 @@ export class AuthenticatedSession {
 
   send(value: unknown): void {
     const payload = JSON.stringify(value);
-    const sequence = this.sent++;
+    const sequence = this.sent;
     this.channel.send({
       sequence,
       payload,
       mac: mac(this.key, JSON.stringify([this.role, sequence, payload])),
     });
+    this.sent++;
   }
 
   async receive(timeout = 15000): Promise<unknown> {

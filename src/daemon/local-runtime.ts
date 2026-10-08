@@ -2,7 +2,7 @@ import { resolvePaths, type RuntimePaths } from './paths.ts';
 import { acquireRuntimeLock } from './runtime-lock.ts';
 import { serveIpc } from './ipc-server.ts';
 import { prepareRuntime, runtimeOwner } from '../platform/runtime-security.ts';
-import type { RpcRequest } from '../protocol/rpc.ts';
+import type { RpcHandler } from '../protocol/rpc.ts';
 import { CadderError } from '../protocol/errors.ts';
 
 export interface LocalRuntime {
@@ -12,8 +12,13 @@ export interface LocalRuntime {
 }
 
 export async function startLocalRuntime(
-  options: { runtimeDir?: string; profile?: string; runtimeOwner?: number },
-  handler: (request: RpcRequest) => Promise<unknown>,
+  options: {
+    runtimeDir?: string;
+    profile?: string;
+    runtimeOwner?: number;
+    installationRoot?: string;
+  },
+  handler: RpcHandler,
   onDenied?: () => void,
 ): Promise<LocalRuntime> {
   if (process.getuid?.() === 0 && !options.runtimeDir) {
@@ -34,17 +39,32 @@ export async function startLocalRuntime(
       recovered: lock.recovered,
       stop() {
         stopping ??= (async () => {
-          try {
-            await listener.close();
-          } finally {
-            await lock.release();
+          const failures: unknown[] = [];
+          for (const finalize of [() => listener.close(), () => lock.release()]) {
+            try {
+              await finalize();
+            } catch (error) {
+              failures.push(error);
+            }
           }
+          if (failures.length === 1) throw failures[0];
+          if (failures.length > 1)
+            throw new AggregateError(failures, 'Local runtime shutdown failed.');
         })();
         return stopping;
       },
     };
   } catch (error) {
-    await lock.release();
+    const failures = [error];
+    try {
+      await lock.release();
+    } catch (cleanupError) {
+      failures.push(cleanupError);
+    }
+    if (failures.length > 1)
+      throw new AggregateError(failures, 'Local runtime startup and cleanup failed.', {
+        cause: error,
+      });
     throw error;
   }
 }

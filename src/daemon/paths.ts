@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { CadderError } from '../protocol/errors.ts';
+import { resolveInstallationRoot } from './installation-root.ts';
 
 export interface RuntimePaths {
   directory: string;
@@ -16,7 +17,7 @@ export interface RuntimePaths {
 }
 
 export function resolvePaths(
-  options: { runtimeDir?: string; profile?: string } = {},
+  options: { runtimeDir?: string; profile?: string; installationRoot?: string } = {},
 ): RuntimePaths {
   const override = options.runtimeDir ?? process.env.CADDER_RUNTIME_DIR;
   const value = (
@@ -44,6 +45,7 @@ export function resolvePaths(
   else
     base = join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'cadder', 'run');
   let directory = join(resolve(override ?? base), 'v2');
+  if (override === undefined) directory = join(directory, digest(resolveInstallationRoot(options)));
   if (!override && profile === 'dev') {
     const id =
       process.env.CADDER_DEV_ID ??
@@ -57,6 +59,11 @@ export function resolvePaths(
     process.platform === 'win32'
       ? `\\\\.\\pipe\\cadder-v2-${instance}`
       : join(directory, 'cadder.sock');
+  if (process.platform !== 'win32' && Buffer.byteLength(endpoint, 'utf8') > 103)
+    throw new CadderError(
+      'runtime-endpoint-too-long',
+      'Runtime socket path exceeds 103 UTF-8 bytes. Select a shorter CADDER_RUNTIME_DIR.',
+    );
   return {
     directory,
     profile,

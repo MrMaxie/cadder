@@ -432,8 +432,12 @@ mod tests {
     LogEntry, LogEntryKind, LogSeverity, LogStreamIdentity, LogStreamStatus, OwnerProcessIdentity,
     RegisteredDomain, RuntimeDiagnostic, RuntimeState, SourcePath,
   };
-  use chrono::Utc;
+  use chrono::{TimeZone, Utc};
   use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+  fn fixture_time() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).single().unwrap()
+  }
 
   fn registration(
     id: &str,
@@ -441,7 +445,7 @@ mod tests {
     state: ActivationState,
     domains: &[(&str, ActivationState, Option<&str>)],
   ) -> EntrypointRegistration {
-    let now = Utc::now();
+    let now = fixture_time();
     let nonce = format!("{id}-nonce");
     EntrypointRegistration {
       registration_id: id.to_string(),
@@ -476,7 +480,7 @@ mod tests {
   }
 
   fn populated_snapshot() -> GuiStateSnapshot {
-    let now = Utc::now();
+    let now = fixture_time();
     GuiStateSnapshot {
       captured_at_utc: now,
       registrations: vec![
@@ -548,7 +552,7 @@ mod tests {
   #[test]
   fn list_and_status_outputs_cover_empty_and_populated_snapshots() {
     let empty = GuiStateSnapshot {
-      captured_at_utc: Utc::now(),
+      captured_at_utc: fixture_time(),
       registrations: Vec::new(),
       runtime: RuntimeState::idle(),
       config: ConfigState::idle(),
@@ -651,7 +655,7 @@ mod tests {
   #[test]
   fn diagnostics_and_logs_cover_empty_and_detailed_reports() {
     let empty = GuiStateSnapshot {
-      captured_at_utc: Utc::now(),
+      captured_at_utc: fixture_time(),
       registrations: Vec::new(),
       runtime: RuntimeState::idle(),
       config: ConfigState::idle(),
@@ -671,7 +675,7 @@ mod tests {
       stream_status: LogStreamStatus::Active,
       entries: vec![LogEntry {
         sequence_number: 7,
-        timestamp_utc: Utc::now(),
+        timestamp_utc: fixture_time(),
         severity: LogSeverity::Warn,
         stream,
         attribution_kind: LogAttributionKind::Domain,

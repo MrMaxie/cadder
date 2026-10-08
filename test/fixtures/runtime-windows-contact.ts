@@ -24,11 +24,11 @@ if (action === 'prepare') {
   };
   assert.equal(discovery.elevated, true, 'The fixture daemon must be elevated.');
   assert.equal(discovery.owner, owner.id, 'The daemon must have the same owner SID.');
-  const result = (await rpc(paths, 'status')) as { processId: number };
-  assert.ok(result.processId > 0);
+  const result = await rpc(paths, 'query-state-request');
+  assert.ok((result.snapshot?.runtime.processId ?? 0) > 0);
   process.stdout.write('SAME_OWNER_ELEVATED_CONTACT_PASSED\n');
 } else if (action === 'shutdown') {
-  assert.deepEqual(await rpc(paths, 'shutdown'), { stopped: true });
+  assert.equal((await rpc(paths, 'shutdown-daemon-request')).accepted, true);
   process.stdout.write('STOPPED\n');
 } else {
   throw new Error('Expected prepare, elevated-status or shutdown.');

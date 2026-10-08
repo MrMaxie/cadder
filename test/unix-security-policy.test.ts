@@ -37,18 +37,25 @@ it('requires an explicit root owner and rejects invalid owner UIDs', async () =>
   expect(await runtimeOwner()).toEqual({ id: 'uid:1234', uid: 1234, elevated: false });
 });
 
+function leafInfo(value: Stats) {
+  vi.mocked(lstat).mockImplementation(async (path) =>
+    path === 'fixture' ? value : info(0, 0o777, true),
+  );
+}
+
 it('fails closed on broad permissions, another owner and symlinks', async () => {
   unix(1234);
   const owner = { id: 'uid:1234', uid: 1234, elevated: false };
-  vi.mocked(lstat).mockResolvedValue(info(1234, 0o700, true));
+  leafInfo(info(1234, 0o700, true));
   await assertProtected('fixture', owner, true);
-  vi.mocked(lstat).mockResolvedValue(info(1234, 0o600));
+  leafInfo(info(1234, 0o600));
   await assertProtected('fixture', owner);
   for (const value of [info(1234, 0o644), info(1235, 0o600), info(1234, 0o600, false, true)]) {
-    vi.mocked(lstat).mockResolvedValue(value);
+    leafInfo(value);
     await expect(assertProtected('fixture', owner)).rejects.toMatchObject({
       code: 'unsafe-runtime-permissions',
     });
+    expect(lstat).toHaveBeenLastCalledWith('fixture');
   }
 });
 

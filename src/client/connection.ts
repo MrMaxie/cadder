@@ -5,11 +5,32 @@ import type { RuntimePaths } from '../daemon/paths.ts';
 import { assertProtected, runtimeOwner } from '../platform/runtime-security.ts';
 import { JsonChannel } from '../protocol/channel.ts';
 import { authenticateClient } from '../protocol/authentication.ts';
-import { responseSchema } from '../protocol/rpc.ts';
+import {
+  requestSchema,
+  responseSchema,
+  UNCORRELATED_REQUEST_ID,
+  type RpcMethod,
+  type RpcParams,
+  type RpcResult,
+} from '../protocol/rpc.ts';
 import { PROTOCOL_VERSION } from '../protocol/version.ts';
-import { CadderError, errorCode } from '../protocol/errors.ts';
+import { CadderError, RpcError, errorCode } from '../protocol/errors.ts';
 
-export async function rpc(paths: RuntimePaths, method: string, params?: unknown): Promise<unknown> {
+export async function rpc<M extends RpcMethod>(
+  paths: RuntimePaths,
+  method: M,
+  ...args: Record<string, never> extends RpcParams<M>
+    ? [params?: NoInfer<RpcParams<M>>]
+    : [params: NoInfer<RpcParams<M>>]
+): Promise<RpcResult<M>> {
+  const requestId = randomUUID();
+  const request = requestSchema.safeParse({
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    method,
+    params: args[0] === undefined ? {} : args[0],
+  });
+  if (!request.success) throw new CadderError('invalid-request', 'Invalid RPC request.');
   const owner = await runtimeOwner(process.getuid?.());
   let secret: Buffer;
   try {
@@ -27,13 +48,18 @@ export async function rpc(paths: RuntimePaths, method: string, params?: unknown)
   try {
     const session = await authenticateClient(channel, secret, paths.instance);
     try {
-      const requestId = randomUUID();
-      session.send({ protocolVersion: PROTOCOL_VERSION, requestId, method, params });
-      const response = responseSchema.parse(await session.receive());
-      if (response.requestId !== requestId)
+      session.send(request.data);
+      const parsed = responseSchema(method).safeParse(await session.receive());
+      if (
+        !parsed.success ||
+        parsed.data.requestId !== requestId ||
+        parsed.data.requestId === UNCORRELATED_REQUEST_ID
+      )
         throw new CadderError('invalid-response', 'Daemon response does not match this request.');
-      if (response.error) throw new CadderError(response.error.code, response.error.message);
-      return response.result;
+      const response = parsed.data;
+      if ('error' in response) throw new RpcError(response.error);
+      // The selected schema is exactly catalog[method].result.
+      return response.result as RpcResult<M>;
     } finally {
       session.close();
     }

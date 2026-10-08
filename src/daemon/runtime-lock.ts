@@ -3,7 +3,11 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import type { RuntimePaths } from './paths.ts';
 import type { RuntimeOwner } from '../platform/runtime-security.ts';
-import { assertProtected, createProtectedFile } from '../platform/runtime-security.ts';
+import {
+  assertProtected,
+  assertRuntimeDescendant,
+  createProtectedFile,
+} from '../platform/runtime-security.ts';
 import { CadderError, errorCode } from '../protocol/errors.ts';
 import { PROTOCOL_VERSION, SECURITY_POLICY_VERSION, VERSION } from '../protocol/version.ts';
 
@@ -19,17 +23,75 @@ export async function acquireRuntimeLock(
 ): Promise<RuntimeLock> {
   await assertProtected(paths.directory, owner, true);
   await createProtectedFile(paths.lock, owner);
-  const database = new DatabaseSync(paths.lock, { timeout: 0 });
-  try {
-    database.exec('PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;');
-  } catch {
-    database.close();
-    throw new CadderError(
-      'runtime-already-running',
-      'Runtime is already locked. Use cadder daemon status or cadder daemon shutdown.',
-    );
+  const journal = `${paths.lock}-journal`;
+  async function assertJournal(): Promise<void> {
+    try {
+      await assertRuntimeDescendant(paths.directory, journal, owner);
+    } catch (error) {
+      // Only this known leaf may be absent; root/chain/inspection failures stay fatal.
+      if (
+        errorCode(error) !== 'ENOENT' ||
+        !(error && typeof error === 'object' && 'path' in error && error.path === journal)
+      )
+        throw error;
+    }
   }
+  await assertJournal();
+  const database = new DatabaseSync(paths.lock, { timeout: 0 });
+  let transaction = false;
+  let metadataOwned = false;
+  let secretCreated = false;
+  let secret: Buffer | undefined;
+
+  async function finalize(failedStart: boolean): Promise<unknown[]> {
+    const failures: unknown[] = [];
+    for (const path of [
+      ...(metadataOwned ? [paths.metadata] : []),
+      ...(failedStart && secretCreated ? [paths.secret] : []),
+    ]) {
+      try {
+        await unlink(path);
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT') failures.push(error);
+      }
+    }
+    try {
+      if (transaction) database.exec('ROLLBACK;');
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      database.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    secret?.fill(0);
+    return failures;
+  }
+
   try {
+    try {
+      database.exec('PRAGMA journal_mode=DELETE;');
+      database.exec('BEGIN EXCLUSIVE;');
+      transaction = true;
+    } catch (error) {
+      const sqliteCode =
+        error &&
+        typeof error === 'object' &&
+        'errcode' in error &&
+        typeof error.errcode === 'number'
+          ? error.errcode & 0xff
+          : undefined;
+      if (sqliteCode === 5 || sqliteCode === 6) {
+        throw new CadderError(
+          'runtime-already-running',
+          'Runtime is already locked. Use cadder daemon status or cadder daemon shutdown.',
+        );
+      }
+      throw error;
+    }
+    // SQLite may have created the DELETE journal; exclusion remains held until release.
+    await assertJournal();
     let recovered = false;
     try {
       await readFile(paths.metadata);
@@ -37,11 +99,18 @@ export async function acquireRuntimeLock(
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') throw error;
     }
-    await createProtectedFile(paths.secret, owner, randomBytes(32));
-    const secret = await readFile(paths.secret);
+    const generated = randomBytes(32);
+    try {
+      secretCreated = await createProtectedFile(paths.secret, owner, generated);
+    } finally {
+      generated.fill(0);
+    }
+    secret = await readFile(paths.secret);
     if (secret.length !== 32)
       throw new CadderError('invalid-runtime-secret', 'Runtime secret must contain 32 bytes.');
     await createProtectedFile(paths.metadata, owner);
+    // Safe stale metadata becomes ours only after lock acquisition and path validation.
+    metadataOwned = true;
     await writeFile(
       paths.metadata,
       JSON.stringify({
@@ -58,26 +127,25 @@ export async function acquireRuntimeLock(
         executable: process.execPath,
       }),
     );
-    let released = false;
+    let releasing: Promise<void> | undefined;
     return {
       recovered,
       secret,
-      async release() {
-        if (released) return;
-        released = true;
-        try {
-          await unlink(paths.metadata).catch((error: unknown) => {
-            if (errorCode(error) !== 'ENOENT') throw error;
-          });
-        } finally {
-          database.exec('ROLLBACK;');
-          database.close();
-          secret.fill(0);
-        }
+      release() {
+        releasing ??= (async () => {
+          const failures = await finalize(false);
+          if (failures.length === 1) throw failures[0];
+          if (failures.length > 1)
+            throw new AggregateError(failures, 'Runtime lock cleanup failed.');
+        })();
+        return releasing;
       },
     };
   } catch (error) {
-    database.close();
-    throw error;
+    const failures = await finalize(true);
+    if (failures.length === 0) throw error;
+    throw new AggregateError([error, ...failures], 'Runtime lock acquisition and cleanup failed.', {
+      cause: error,
+    });
   }
 }

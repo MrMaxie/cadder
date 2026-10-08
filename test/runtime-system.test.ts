@@ -9,7 +9,11 @@ import { expect, it } from 'vitest';
 import { resolvePaths } from '../src/daemon/paths.ts';
 import { rpc } from '../src/client/connection.ts';
 
-async function start(root: string, entry: string): Promise<ChildProcessWithoutNullStreams> {
+async function start(
+  root: string,
+  entry: string,
+  recovered = false,
+): Promise<ChildProcessWithoutNullStreams> {
   const environment = { ...process.env };
   delete environment.NODE_OPTIONS;
   const child = spawn(
@@ -26,9 +30,14 @@ async function start(root: string, entry: string): Promise<ChildProcessWithoutNu
       child.kill();
       reject(new Error(`Fixture startup timed out: ${error}`));
     }, 12000);
-    child.stdout.once('data', () => {
+    let stdout = '';
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+      if (!stdout.includes('\n')) return;
       clearTimeout(timer);
-      resolve();
+      if (stdout.trim() !== `READY recovered=${recovered}`)
+        reject(new Error(`Unexpected fixture readiness: ${stdout}`));
+      else resolve();
     });
     child.once('exit', () => {
       clearTimeout(timer);
@@ -57,18 +66,20 @@ it(
         target: 'node24.18',
       });
       child = await start(root, entry);
-      expect(await rpc(paths, 'status')).toMatchObject({ processId: child.pid, recovered: false });
+      expect((await rpc(paths, 'query-state-request')).snapshot?.runtime.processId).toBe(child.pid);
       await expect(start(root, entry)).rejects.toThrow('already locked');
       const crashed = once(child, 'exit');
       child.kill('SIGKILL');
       await crashed;
-      child = await start(root, entry);
-      expect(await rpc(paths, 'status')).toMatchObject({ processId: child.pid, recovered: true });
+      child = await start(root, entry, true);
+      expect((await rpc(paths, 'query-state-request')).snapshot?.runtime.processId).toBe(child.pid);
       const exited = once(child, 'exit');
-      expect(await rpc(paths, 'shutdown')).toEqual({ stopped: true });
+      expect((await rpc(paths, 'shutdown-daemon-request')).accepted).toBe(true);
       await exited;
       child = undefined;
-      await expect(rpc(paths, 'status')).rejects.toThrow('Start it with cadder daemon start');
+      await expect(rpc(paths, 'query-state-request')).rejects.toThrow(
+        'Start it with cadder daemon start',
+      );
     } finally {
       if (child?.exitCode === null) {
         const exited = once(child, 'exit');

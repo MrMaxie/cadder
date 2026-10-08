@@ -53,8 +53,8 @@ try {
     });
     daemon!.once('error', reject);
   });
-  const status = (await rpc(paths, 'status')) as { processId: number };
-  assert.ok(status.processId > 0);
+  const status = await rpc(paths, 'query-state-request');
+  assert.ok((status.snapshot?.runtime.processId ?? 0) > 0);
   const discovery = JSON.parse(await readFile(paths.discovery, 'utf8')) as {
     elevated: boolean;
     owner: string;
@@ -75,16 +75,16 @@ try {
   const [code] = await once(outsider, 'exit');
   assert.equal(code, 0, deniedError);
   assert.equal(deniedOutput.trim(), 'DENIED');
-  await rpc(paths, 'status');
+  await rpc(paths, 'query-state-request');
   const exited = once(daemon, 'exit');
-  await rpc(paths, 'shutdown');
+  await rpc(paths, 'shutdown-daemon-request');
   await exited;
   daemon = undefined;
   process.stdout.write(`Native privilege gate passed on ${process.platform}/${process.arch}.\n`);
 } finally {
   if (daemon?.exitCode === null) {
     const exited = once(daemon, 'exit');
-    await rpc(paths, 'shutdown').catch(() => {});
+    await rpc(paths, 'shutdown-daemon-request').catch(() => {});
     // The fixture's fixed 30-second lifetime bounds cleanup if authentication failed.
     await exited;
   }
