@@ -28,7 +28,7 @@ function finish(): void {
     );
   else if (args[0] === 'marker') writeFileSync(args[1]!, 'executed');
   else process.stdout.write(behavior.output ?? '{}');
-  process.exit(0);
+  process.exitCode = 0;
 }
 if (args[0] === 'version' && behavior.releaseVersion) {
   const timer = setInterval(() => {

@@ -15,6 +15,15 @@ await mkdir(input);
 await mkdir(reports);
 await copyFile(process.execPath, join(input, 'node.exe'));
 await copyFile(resolve(upstream), join(input, 'caddy.exe'));
+await copyFile(
+  fileURLToPath(
+    new URL(
+      '../openspec/changes/reset-cadder-architecture/windows-product-gate.md',
+      import.meta.url,
+    ),
+  ),
+  join(input, 'README.md'),
+);
 await build({
   entryPoints: [fileURLToPath(new URL('./verify-product-journey.ts', import.meta.url))],
   outfile: join(input, 'journey.mjs'),
@@ -40,9 +49,7 @@ try {
 const escape = (value: string): string =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 const config = join(root, 'product.wsb');
-await writeFile(
-  config,
-  `<Configuration>
+const configuration = `<Configuration>
   <Networking>Disable</Networking><vGPU>Disable</vGPU><ClipboardRedirection>Disable</ClipboardRedirection>
   <AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection>
   <MappedFolders>
@@ -51,11 +58,20 @@ await writeFile(
     <MappedFolder><HostFolder>${escape(reports)}</HostFolder><SandboxFolder>C:\\CadderReports</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
   </MappedFolders>
   <LogonCommand><Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\CadderTools\\bootstrap.ps1</Command></LogonCommand>
-</Configuration>`,
+</Configuration>`;
+await writeFile(config, configuration);
+const privilegeConfig = join(root, 'privilege.wsb');
+await writeFile(
+  privilegeConfig,
+  configuration.replace(
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\CadderTools\\bootstrap.ps1',
+    'powershell.exe -NoProfile -NoExit -Command &quot;Set-Location C:\\CadderTools; Get-Content README.md&quot;',
+  ),
 );
 process.stdout.write(
   JSON.stringify({
     config,
+    privilegeConfig,
     reports,
     scope: 'Actual SEA product routing; final UAC/different-account acceptance remains separate.',
   }) + '\n',

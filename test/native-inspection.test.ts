@@ -11,8 +11,8 @@ it('observes a real listener and refuses a stale PID without affecting its owner
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Missing listener.');
     const owners = await inspectPort(address.port);
-    expect(owners.some((owner) => owner.protocol === 'tcp' && owner.pid === process.pid)).toBe(
-      true,
+    expect(owners, `Native TCP owner for port ${address.port}, PID ${process.pid}`).toContainEqual(
+      expect.objectContaining({ protocol: 'tcp', pid: process.pid }),
     );
     await expect(terminatePortOwner(address.port, 2147483646)).rejects.toMatchObject({
       code: 'target-conflict',

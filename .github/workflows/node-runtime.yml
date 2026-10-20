@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - master
-      - feat/node-runtime-migration
   pull_request:
     branches:
       - master

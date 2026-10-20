@@ -141,10 +141,10 @@ void main().then(
     // Tree/block modes deliberately retain the event loop until the owned helper kills them.
     const behavior = args[0] === 'adapt' ? settings.adapt : settings.validate;
     if (args[0] !== 'descendant' && behavior?.mode !== 'tree' && behavior?.mode !== 'block')
-      process.exit(process.exitCode ?? 0);
+      process.exitCode ??= 0;
   },
   (error: unknown) => {
     console.error(error);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

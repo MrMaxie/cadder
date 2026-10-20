@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   writeFile,
@@ -38,7 +39,7 @@ const candidate = (body = '{}'): CaddyConfig => ({
   adaptedConfig: { format: 'json', body },
 });
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'cadder-preparation-test-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'cadder-preparation-test-')));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, 'node_modules', 'cadder');
   await mkdir(root, { recursive: true });

@@ -810,6 +810,12 @@ product PATH. A repeat against the f298 candidate while the host full suite ran
 failed after shim crash with port 80 unavailable. That repeat is a failure,
 not a final-candidate pass; serial/native CI diagnosis remains open.
 
+The subsequent serial Sandbox repeat against that same f298 Windows archive
+passes the complete shared SEA journey with stock Caddy 2.11.4 and no Node on
+product PATH, including crashed-alpha expiry while beta continues serving.
+The earlier concurrent failure remains recorded; no lease or test deadline was
+relaxed. This repeat still does not provide interactive UAC/account evidence.
+
 The startup consumer probe also reproduced a Windows ACL-publication race.
 Post-launch readiness now waits for protection to finish without reading an
 unsafe secret or authenticating; pre-existing unsafe paths still fail directly.
@@ -835,3 +841,27 @@ downloaded checksum-pinned upstream fixture. Configuring that workflow is not
 execution evidence. Rust deletion, release-tool cutover and publication remain
 gated. The user explicitly authorized commit and push for native CI; this does
 not authorize a PR, tag, registry publication or GitHub release.
+
+### First native CI pass and fixture corrections
+
+Commit `5b4daee` was pushed to the existing migration PR with explicit authority.
+Docs CI passes. The first native Node matrix fails: Linux exposes a fixture file
+named `upstream` colliding with its later directory, macOS exposes uncanonical
+`/var` versus `/private/var` expectations, a modeled Linux test incorrectly walks
+macOS aliases, and a namespace-only fixture exceeds the separately enforced
+Unix socket limit. Windows also exposes short/long TEMP spelling expectations
+and fixture timeouts under parallel native helper compilation. The fixes use
+physical fixture paths, distinct file/directory names and serialized Windows
+files, preserving existing runtime permission and timeout policy.
+
+A local 32-MiB+1 stderr fixture occasionally exited before its pending pipe
+output settled. Disposable fake-Caddy preloads now exit naturally after output;
+all eight exact/overflow stream-bound cases pass. macOS native socket inspection
+still fails and now reports its actual owner rows for diagnosis. None of these
+failed native runs closes G4/G6/G7. The duplicate push-trigger matrix is removed;
+the existing PR matrix remains, alongside master push/manual triggers.
+
+The product Sandbox preparer now also emits a separate interactive privilege
+configuration and the `windows-product-gate.md` procedure. Its four PowerShell
+blocks parse and the generated Sandbox XML loads correctly. This is preparation
+only: no UAC/account pass is claimed.

@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 const nativeName = (name: string) => (process.platform === 'win32' ? `${name}.exe` : name);
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'cadder-caddy-resolution-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'cadder-caddy-resolution-')));
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const root = join(directory, 'project', 'node_modules', 'cadder');
   await mkdir(join(root, 'dist'), { recursive: true });
@@ -298,7 +298,7 @@ it('rejects hardlinked npm bin identities and skips aliased entries on PATH', as
   await expect(s.resolver({ explicitOverride: candidate }).pin()).rejects.toThrow(
     'Cadder distribution',
   );
-  const upstreamDir = join(s.directory, 'upstream');
+  const upstreamDir = join(s.directory, 'upstream-bin');
   await mkdir(upstreamDir);
   const upstream = join(upstreamDir, nativeName('caddy'));
   await rename(real, upstream);

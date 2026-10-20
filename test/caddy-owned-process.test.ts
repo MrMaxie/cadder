@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, normalize } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -184,7 +184,9 @@ it('owned command retains stream boundary, cwd, stdin EOF and nonzero native exi
     ['-e', 'process.stdout.write(process.cwd())'],
     { cwd: tmpdir() },
   );
-  expect(normalize(cwd.stdout.toString()).toLowerCase()).toBe(normalize(tmpdir()).toLowerCase());
+  expect(normalize(cwd.stdout.toString()).toLowerCase()).toBe(
+    normalize(await realpath(tmpdir())).toLowerCase(),
+  );
 });
 
 it.each([0, 16])(

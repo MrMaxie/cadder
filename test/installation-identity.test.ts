@@ -225,6 +225,8 @@ it('preserves existing empty override cwd resolution without installation anchor
 
 it('keeps dev namespaces beneath each installation and validates dev ids', async () => {
   const root = await fixture();
+  // Socket length has its own boundary cases below.
+  if (process.platform !== 'win32') vi.mocked(homedir).mockReturnValue('/h');
   const a = join(root, 'A');
   const b = join(root, 'B');
   await mkdir(a);

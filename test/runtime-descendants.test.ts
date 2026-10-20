@@ -22,7 +22,9 @@ beforeEach(async (context) => {
   vi.mocked(fs.lstat).mockReset().mockImplementation(nativeFs.lstat);
   owner = await security.runtimeOwner(process.getuid?.());
   if (process.platform === 'win32' && owner.elevated) context.skip();
-  fixture = await fs.mkdtemp(join(tmpdir(), 'cadder-descendant-'));
+  fixture = await fs.realpath(
+    await fs.mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'cadder-descendant-')),
+  );
   root = join(fixture, 'protected');
   await security.prepareRuntime(root, owner);
 });

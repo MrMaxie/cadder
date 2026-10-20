@@ -6,6 +6,8 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.{ts,tsx}'],
     testTimeout: 15000,
+    // Native Windows fixtures compile helpers and change process/file state.
+    fileParallelism: process.platform !== 'win32',
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
