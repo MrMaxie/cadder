@@ -3,12 +3,15 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { packNode, npmCli } from './pack-node.ts';
+import { join, resolve } from 'node:path';
+import { packNode, npmCli, repositoryRoot } from './pack-node.ts';
 import { fileURLToPath } from 'node:url';
+import { terminalSmoke } from './terminal-smoke.ts';
+import { sourceIdentity } from './source-identity.ts';
+import { VERSION } from '../src/protocol/version.ts';
 
 const execute = promisify(execFile);
-const packed = await packNode();
+const archive = process.argv[3] ? resolve(process.argv[3]) : (await packNode()).archive;
 const consumer = await mkdtemp(join(tmpdir(), 'cadder-node-consumer-'));
 const environment = { ...process.env, CADDER_RUNTIME_DIR: join(consumer, 'runtime') };
 let command: string | undefined;
@@ -24,11 +27,24 @@ try {
       '--no-audit',
       '--no-fund',
       '--package-lock=false',
-      packed.archive,
+      archive,
     ],
     { timeout: 120000, maxBuffer: 1024 * 1024 },
   );
   command = join(consumer, 'node_modules/cadder/lib/entrypoints/cadder.js');
+  const manifest = JSON.parse(
+    await readFile(join(consumer, 'node_modules/cadder/package.json'), 'utf8'),
+  ) as {
+    name: string;
+    version: string;
+    license: string;
+    cadderBuild: { revision: string; dirty: boolean };
+  };
+  assert.equal(manifest.name, 'cadder');
+  assert.equal(manifest.version, VERSION);
+  assert.equal(manifest.license, 'Apache-2.0');
+  assert.equal(manifest.cadderBuild.revision, (await sourceIdentity(repositoryRoot)).revision);
+  if (process.argv[3]) assert.equal(manifest.cadderBuild.dirty, false);
   if (process.argv[2])
     await execute(
       process.execPath,
@@ -47,13 +63,14 @@ try {
       timeout: 45000,
       maxBuffer: 1024 * 1024,
     });
-  assert.match((await run(['--version'])).stdout, /^2\.0\.0-rc\.1\s*$/);
+  assert.equal((await run(['--version'])).stdout.trim(), VERSION);
   assert.match((await run([])).stderr, /Usage: cadder/);
   await assert.rejects(
     run(['status']),
     (error: unknown) => (error as { code?: unknown }).code === 3,
   );
   const prefix = join(consumer, 'global');
+  await terminalSmoke(process.execPath, [command], environment);
   await execute(
     process.execPath,
     [
@@ -65,7 +82,7 @@ try {
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
-      packed.archive,
+      archive,
     ],
     { timeout: 120000, maxBuffer: 1024 * 1024 },
   );
@@ -82,7 +99,12 @@ try {
               { env: environment, windowsVerbatimArguments: true },
             )
           : await execute(wrapper, arguments_, { env: environment });
-      assert.match(result.stdout, /2\.0\.0-rc\.1/);
+      assert.equal(
+        name === 'caddy'
+          ? (JSON.parse(result.stdout) as { version: string }).version
+          : result.stdout.trim(),
+        VERSION,
+      );
     }
   }
   const globalPackage = join(
@@ -110,7 +132,7 @@ try {
   );
   process.stdout.write(
     JSON.stringify({
-      archive: packed.archive,
+      archive,
       result: 'PASS',
       scope:
         'compiled npm local lifecycle, local/global three-bin wrappers, actual SQLite worker and CLI, no TS loader',

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { terminalSmoke } from './terminal-smoke.ts';
 
 const execute = promisify(execFile);
 let stage = resolve(process.argv[2] ?? '');
@@ -95,6 +96,7 @@ try {
   assert.match((await run(['logs', 'runtime', '--limit', '1'])).stdout, /Daemon started/);
   assert.match((await run(['daemon', 'restart'])).stdout, /running/);
   assert.match((await run(['daemon', 'stop'])).stdout, /stopped/);
+  await terminalSmoke(binary('cadder'), [], environment);
   process.stdout.write(
     JSON.stringify({
       stage,

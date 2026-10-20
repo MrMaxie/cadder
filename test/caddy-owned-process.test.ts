@@ -184,7 +184,7 @@ it('owned command retains stream boundary, cwd, stdin EOF and nonzero native exi
     ['-e', 'process.stdout.write(process.cwd())'],
     { cwd: tmpdir() },
   );
-  expect(normalize(cwd.stdout.toString()).toLowerCase()).toBe(
+  expect(normalize(await realpath(cwd.stdout.toString())).toLowerCase()).toBe(
     normalize(await realpath(tmpdir())).toLowerCase(),
   );
 });

@@ -35,6 +35,11 @@ environment.PATH = node
 if (node && process.platform === 'win32')
   environment.PATH += ';' + join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
 environment.CADDER_RUNTIME_DIR = join(root, 'runtime');
+environment.PATH = [
+  node ? join(stage, '../.bin') : stage,
+  dirname(resolve(upstream)),
+  environment.PATH,
+].join(process.platform === 'win32' ? ';' : ':');
 const execute = promisify(execFile);
 const run = (args: string[]) => {
   const entry = command('cadder', args);
@@ -111,12 +116,64 @@ async function project(name: string, body: string) {
   return { path, config, shim: child('caddy', ['run', '--config', config], path) };
 }
 try {
-  const daemon = child('cadderd', ['--real-caddy', resolve(upstream)], root);
+  const delegated = async (file: string, args: string[], input = '') => {
+    const operation = execute(file, args, { env: environment, cwd: root, timeout: 45000 });
+    operation.child.stdin?.end(input);
+    return operation.then(
+      ({ stdout, stderr }) => ({ code: 0, stdout, stderr }),
+      (error: { code: unknown; stdout: string; stderr: string }) => ({
+        code: error.code,
+        stdout: error.stdout,
+        stderr: error.stderr,
+      }),
+    );
+  };
+  for (const args of [
+    ['fmt', '-'],
+    ['fmt', '--invalid-cadder-acceptance-flag'],
+  ]) {
+    const entry = command('caddy', args);
+    const input = args[1] === '-' ? 'stream.localhost {\nrespond "retained input"\n}\n' : '';
+    const original = await delegated(resolve(upstream), args, input);
+    assert.equal(original.code, args[1] === '-' ? 0 : 1);
+    if (args[1] === '-') assert.match(original.stdout, /respond "retained input"/);
+    assert.deepEqual(await delegated(entry.file, entry.args, input), original);
+  }
+  const inspection = command('caddy', ['version']);
+  const inspected = await delegated(inspection.file, inspection.args);
+  assert.equal(inspected.code, 0);
+  assert.match(inspected.stdout, /v2\.11\.4/);
+  assert.match(inspected.stderr, /real-Caddy inspection/);
+  if (process.platform === 'darwin') {
+    // Native macOS web ports require an elevated daemon; clients retain their user identity.
+    const entry = command('cadderd', [
+      '--runtime-owner',
+      String(process.getuid!()),
+      '--runtime-dir',
+      environment.CADDER_RUNTIME_DIR!,
+      '--real-caddy',
+      resolve(upstream),
+    ]);
+    const elevated = spawn('/usr/bin/sudo', ['-n', entry.file, ...entry.args], {
+      env: environment,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    elevated.stderr.on('data', (bytes: Buffer) => {
+      daemonErrors = (daemonErrors + bytes.toString()).slice(-8192);
+    });
+    children.push(elevated);
+    await until(async () => assert.match((await run(['status'])).stdout, /cadderd {2}running/));
+    const discovery = JSON.parse(
+      await readFile(join(environment.CADDER_RUNTIME_DIR!, 'v2/cadder-ipc.json'), 'utf8'),
+    ) as { elevated: boolean; owner: string };
+    assert.equal(discovery.elevated, true);
+    assert.equal(discovery.owner, `uid:${process.getuid!()}`);
+  }
+  const alpha = await project('alpha', 'alpha.localhost {\n respond "alpha"\n}\n');
   await until(async () => {
-    assert.equal(daemon.exitCode, null);
+    assert.equal(alpha.shim.exitCode, null);
     assert.match((await run(['status'])).stdout, /cadderd {2}running/);
   });
-  const alpha = await project('alpha', 'alpha.localhost {\n respond "alpha"\n}\n');
   await until(async () => assert.equal((await request('alpha.localhost')).body, 'alpha'));
   assert.equal((await request('alpha.localhost', true)).body, 'alpha');
   const beta = await project('beta', 'beta.localhost {\n respond "beta"\n}\n');
@@ -192,6 +249,7 @@ try {
       distribution: node ? 'npm' : 'sea',
       checks: [
         'actual daemon/shim/operator',
+        'shim stdin/stdout/stderr/exit fidelity and non-recursive PATH',
         'multi-project HTTP/verified HTTPS',
         'domain/project toggles',
         'conflict and malformed rejection with last-known-good',
