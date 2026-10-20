@@ -79,17 +79,15 @@ export async function packNode(): Promise<{ stage: string; archive: string }> {
           cadderd: 'lib/entrypoints/cadderd.js',
           caddy: 'lib/entrypoints/caddy.js',
         },
-        files: ['lib', 'LICENSE', 'README.md'],
+        files: ['lib', 'LICENSE', 'README.md', 'cadder.toml.example'],
       },
       null,
       2,
     ) + '\n',
   );
   await copyFile(join(repositoryRoot, 'LICENSE'), join(stage, 'LICENSE'));
-  await writeFile(
-    join(stage, 'README.md'),
-    '# Cadder 2.0 release candidate\n\nCoordinate project Caddyfiles through one local daemon. Upstream Caddy is a separate prerequisite. This unpublished migration candidate requires Node 24 LTS >=24.18.0.\n\nRun `cadder --help` for commands, `cadder tui` for the routes workspace, or `caddy run` from a project directory. Stop the previous daemon before switching versions. Existing Rust runtime data is preserved; projects register again from their Caddyfiles.\n',
-  );
+  await copyFile(join(repositoryRoot, 'docs/NODE-CANDIDATE.md'), join(stage, 'README.md'));
+  await copyFile(join(repositoryRoot, 'cadder.toml.example'), join(stage, 'cadder.toml.example'));
   for (const entry of ['cadder', 'cadderd', 'caddy'])
     await chmod(join(stage, 'lib/entrypoints', `${entry}.js`), 0o755);
   const packed = await execute(
@@ -104,7 +102,7 @@ export async function packNode(): Promise<{ stage: string; archive: string }> {
     !result ||
     result.files.some(
       ({ path }) =>
-        !['package.json', 'README.md', 'LICENSE'].includes(path) &&
+        !['package.json', 'README.md', 'LICENSE', 'cadder.toml.example'].includes(path) &&
         (!path.startsWith('lib/') || !path.endsWith('.js')),
     )
   )

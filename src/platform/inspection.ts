@@ -71,8 +71,10 @@ export async function inspectPort(port: number): Promise<PortOwner[]> {
         )
       ).stdout;
     } catch (error) {
-      if ((error as { code?: unknown }).code === 1) return [];
-      throw error;
+      const result = error as { code?: unknown; stdout?: string; stderr?: string };
+      // macOS lsof returns 1 when only one requested protocol has matches.
+      if (result.code !== 1 || result.stderr?.trim()) throw error;
+      output = result.stdout ?? '';
     }
     const owners: PortOwner[] = [];
     let pid: number | null = null;

@@ -14,7 +14,14 @@ export async function sourceIdentity(root: string) {
       if (entry.isFile() && (/\.tsx?$/.test(entry.name) || entry.name.endsWith('-LICENSE')))
         files.push(join(entry.parentPath, entry.name));
   files.push(
-    ...['package.json', 'nub.lock', 'tsconfig.json', 'LICENSE'].map((name) => join(root, name)),
+    ...[
+      'package.json',
+      'nub.lock',
+      'tsconfig.json',
+      'LICENSE',
+      'docs/NODE-CANDIDATE.md',
+      'cadder.toml.example',
+    ].map((name) => join(root, name)),
   );
   const hash = createHash('sha256');
   for (const file of files.sort())

@@ -76,6 +76,8 @@ for (const entry of ['cadder', 'cadderd', 'caddy']) {
   artifacts.push(output);
 }
 await copyFile(join(root, 'LICENSE'), join(payload, 'LICENSE'));
+await copyFile(join(root, 'docs/NODE-CANDIDATE.md'), join(payload, 'README.md'));
+await copyFile(join(root, 'cadder.toml.example'), join(payload, 'cadder.toml.example'));
 let nodeLicense: string | undefined;
 for (const candidate of ['LICENSE', '../LICENSE', '../share/doc/node/LICENSE']) {
   try {
@@ -144,9 +146,14 @@ await writeFile(
 const checksums: string[] = [];
 for (const path of [
   ...artifacts,
-  ...['LICENSE', 'NODE-LICENSE', 'THIRD-PARTY-NOTICES', 'BUILD.json'].map((name) =>
-    join(payload, name),
-  ),
+  ...[
+    'LICENSE',
+    'NODE-LICENSE',
+    'THIRD-PARTY-NOTICES',
+    'BUILD.json',
+    'README.md',
+    'cadder.toml.example',
+  ].map((name) => join(payload, name)),
 ])
   checksums.push(
     `${createHash('sha256')

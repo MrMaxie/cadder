@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { get } from 'node:http';
 import { get as getTls } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
 
 // Run on an isolated native machine with free loopback ports 80 and 443.
 const [directory, upstream, node] = process.argv.slice(2);
@@ -131,6 +132,21 @@ try {
   assert.notEqual((await request('beta.localhost')).body, 'beta');
   await run(['projects', 'enable', beta.config]);
   assert.equal((await request('beta.localhost')).body, 'beta');
+  const database = new DatabaseSync(join(environment.CADDER_RUNTIME_DIR!, 'v2/runtime.sqlite3'), {
+    timeout: 1000,
+  });
+  try {
+    database.exec(
+      "CREATE TRIGGER gate_reject_desired BEFORE UPDATE ON desired BEGIN SELECT RAISE(FAIL, 'acceptance persistence refusal'); END",
+    );
+    await assert.rejects(run(['projects', 'disable', beta.config]));
+    assert.equal((await request('beta.localhost')).body, 'beta');
+  } finally {
+    database.exec('DROP TRIGGER IF EXISTS gate_reject_desired');
+    database.close();
+  }
+  await run(['projects', 'enable', beta.config]);
+  assert.equal((await request('beta.localhost')).body, 'beta');
   const conflict = await project('conflict', 'alpha.localhost {\n respond "conflict"\n}\n');
   await until(async () => assert.equal(conflict.shim.exitCode, 1));
   assert.equal((await request('alpha.localhost')).body, 'alpha');
@@ -179,6 +195,7 @@ try {
         'multi-project HTTP/verified HTTPS',
         'domain/project toggles',
         'conflict and malformed rejection with last-known-good',
+        'post-apply SQLite failure restores last-known-good',
         'heartbeat and crashed-session expiry',
         'unauthorized admin denial',
         'owned shutdown',

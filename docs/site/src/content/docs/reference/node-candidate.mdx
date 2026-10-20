@@ -26,7 +26,13 @@ Standalone executables include their Node runtime and do not require Node or npm
 
 ## Run a project
 
-[Configure real Caddy](../../user-guide/cadder-toml/), then run the existing Caddyfile from its project directory:
+Create a per-user `cadder.toml` from the supplied `cadder.toml.example`:
+
+- Windows: `%APPDATA%\Cadder\Cadder\config\cadder.toml`.
+- macOS: `~/Library/Application Support/dev.Cadder.Cadder/cadder.toml`.
+- Linux: `$XDG_CONFIG_HOME/cadder/cadder.toml`, or `~/.config/cadder/cadder.toml` when unset.
+
+Set `real_path` to the absolute path of your separately installed Caddy, or `real_command` to its program name on PATH. Set one selector. Then run the existing Caddyfile from its project directory:
 
 ```sh
 caddy run

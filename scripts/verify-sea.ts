@@ -48,7 +48,14 @@ try {
   const allowed = new Set(
     ['cadder', 'cadderd', 'caddy']
       .map((name) => (process.platform === 'win32' ? `${name}.exe` : name))
-      .concat(['LICENSE', 'NODE-LICENSE', 'THIRD-PARTY-NOTICES', 'BUILD.json']),
+      .concat([
+        'LICENSE',
+        'NODE-LICENSE',
+        'THIRD-PARTY-NOTICES',
+        'BUILD.json',
+        'README.md',
+        'cadder.toml.example',
+      ]),
   );
   assert.deepEqual((await readdir(stage)).sort(), [...allowed, 'SHA256SUMS'].sort());
   const checksums = (await readFile(join(stage, 'SHA256SUMS'), 'utf8')).trim().split('\n');

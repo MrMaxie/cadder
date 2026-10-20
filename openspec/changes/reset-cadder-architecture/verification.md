@@ -865,3 +865,28 @@ The product Sandbox preparer now also emits a separate interactive privilege
 configuration and the `windows-product-gate.md` procedure. Its four PowerShell
 blocks parse and the generated Sandbox XML loads correctly. This is preparation
 only: no UAC/account pass is claimed.
+
+### Native follow-up
+
+The Linux x64 Node job passes at `86eb714` and again at `0180d68`, including
+coverage, compiled runtime/privilege fixtures, the packed npm local/global
+consumer, real-Caddy multi-project HTTP/HTTPS and extracted SEA lifecycle plus
+the same real-Caddy journey. These runs precede the final candidate-asset and
+post-apply storage-failure additions; they do not close the final revision gate.
+
+macOS diagnostics identify a concrete adapter defect: lsof can return exit 1
+with valid TCP output when its UDP selector has no match. The adapter now parses
+that stdout while still rejecting stderr errors. The existing native test checks
+real TCP and UDP ownership separately; temporary raw-command diagnostics are
+removed. Earlier intermittent macOS process-group observation failures remain
+failures; OS causes are retained for diagnosis and native fixture files run
+serially rather than competing during helper startup. No product deadline or
+ownership check was weakened.
+
+Both candidate packages now carry the same portable README and configuration
+example; standalone inventory/checksums include these assets. The source digest
+also covers them. Local npm local/global verification and Astro check/build pass
+after these changes. The shared real-Caddy catalog additionally injects one
+SQLite desired-state write refusal, verifies actual post-apply rollback, removes
+its test-only trigger and checks that a later mutation works. It introduces no
+production fault flag or exported private runtime data.
