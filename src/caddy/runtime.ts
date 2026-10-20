@@ -21,6 +21,7 @@ export type CaddyRuntimeOptions = Readonly<{
   startupMs?: number;
   stopMs?: number;
   pollMs?: number;
+  onOutput?: (stream: 'stdout' | 'stderr', bytes: Buffer) => void;
 }>;
 type Execution = {
   abort: AbortController;
@@ -63,6 +64,7 @@ export class CaddyRuntime implements ConfigurationRuntime {
   readonly #startupMs: number;
   readonly #stopMs: number;
   readonly #pollMs: number;
+  readonly #onOutput: CaddyRuntimeOptions['onOutput'];
   #execution: Execution | undefined;
   #uncertain = false;
   #closed = false;
@@ -90,6 +92,7 @@ export class CaddyRuntime implements ConfigurationRuntime {
     this.#startupMs = bound(options.startupMs, 30_000);
     this.#stopMs = bound(options.stopMs, 5000);
     this.#pollMs = bound(options.pollMs, 50);
+    this.#onOutput = options.onOutput;
     this.#admin = new CaddyAdminClient(this.#policy);
     this.#validator = new CaddyConfigValidator(resolver, { env: this.#policy.environment });
   }
@@ -128,6 +131,11 @@ export class CaddyRuntime implements ConfigurationRuntime {
       // An exit during observation cannot be cached as successful active state.
       return this.#execution.completed ? unavailable() : observed;
     }, unavailable());
+  }
+
+  status(): 'running' | 'idle' | 'unhealthy' {
+    if (this.#uncertain || this.#execution?.completed) return 'unhealthy';
+    return this.#execution?.started ? 'running' : 'idle';
   }
 
   /** Refuse admission immediately, cancel pending admin/start work, then drain native work/staging. */
@@ -231,6 +239,7 @@ export class CaddyRuntime implements ConfigurationRuntime {
           signal: execution.abort.signal,
           env: this.#policy.environment,
           cwd: this.#policy.paths.scratch,
+          ...(this.#onOutput ? { onOutput: this.#onOutput } : {}),
           onStarted: () => {
             execution.started = true;
             notifyStarted();

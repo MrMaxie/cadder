@@ -18,15 +18,22 @@ const execute = promisify(execFile);
 
 it('owned command preserves native argv and binary streams', async () => {
   const args = ['space value', 'quote"value', 'trailing\\', '', 'line\nvalue'];
-  const output = await runOwnedCommand(process.execPath, [
-    '-e',
-    'process.stdout.write(JSON.stringify(process.argv.slice(1))); process.stderr.write(Buffer.from([0,255,128]));',
-    '--',
-    ...args,
-  ]);
+  const observed: Record<'stdout' | 'stderr', Buffer[]> = { stdout: [], stderr: [] };
+  const output = await runOwnedCommand(
+    process.execPath,
+    [
+      '-e',
+      'process.stdout.write(JSON.stringify(process.argv.slice(1))); process.stderr.write(Buffer.from([0,255,128]));',
+      '--',
+      ...args,
+    ],
+    { onOutput: (stream, bytes) => observed[stream].push(Buffer.from(bytes)) },
+  );
   expect(output.exitCode).toBe(0);
   expect(JSON.parse(output.stdout.toString())).toEqual(args);
   expect(output.stderr).toEqual(Buffer.from([0, 255, 128]));
+  expect(Buffer.concat(observed.stdout)).toEqual(output.stdout);
+  expect(Buffer.concat(observed.stderr)).toEqual(output.stderr);
 });
 
 it('verified startup notification precedes immediate binary output without leaking handshake bytes', async () => {

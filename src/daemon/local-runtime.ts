@@ -2,6 +2,7 @@ import { resolvePaths, type RuntimePaths } from './paths.ts';
 import { acquireRuntimeLock } from './runtime-lock.ts';
 import { serveIpc } from './ipc-server.ts';
 import { prepareRuntime, runtimeOwner } from '../platform/runtime-security.ts';
+import type { RuntimeOwner } from '../contracts/ports.ts';
 import type { RpcHandler } from '../protocol/rpc.ts';
 import { CadderError } from '../protocol/errors.ts';
 
@@ -17,6 +18,7 @@ export async function startLocalRuntime(
     profile?: string;
     runtimeOwner?: number;
     installationRoot?: string;
+    initialize?: (paths: RuntimePaths, owner: RuntimeOwner) => Promise<{ close(): Promise<void> }>;
   },
   handler: RpcHandler,
   onDenied?: () => void,
@@ -31,7 +33,9 @@ export async function startLocalRuntime(
   const paths = resolvePaths(options);
   await prepareRuntime(paths.directory, owner);
   const lock = await acquireRuntimeLock(paths, owner);
+  let owned: { close(): Promise<void> } | undefined;
   try {
+    owned = await options.initialize?.(paths, owner);
     const listener = await serveIpc(paths, owner, lock.secret, handler, onDenied);
     let stopping: Promise<void> | undefined;
     return {
@@ -39,6 +43,8 @@ export async function startLocalRuntime(
       recovered: lock.recovered,
       stop() {
         stopping ??= (async () => {
+          // Keep the endpoint/exclusion until owned teardown is proved complete.
+          await owned?.close();
           const failures: unknown[] = [];
           for (const finalize of [() => listener.close(), () => lock.release()]) {
             try {
@@ -57,6 +63,7 @@ export async function startLocalRuntime(
   } catch (error) {
     const failures = [error];
     try {
+      await owned?.close();
       await lock.release();
     } catch (cleanupError) {
       failures.push(cleanupError);

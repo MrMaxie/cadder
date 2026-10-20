@@ -9,6 +9,10 @@
     "node": ">=24.18.0 <25"
   },
   "scripts": {
+    "dev": "tsx src/entrypoints/cadder.ts",
+    "pack:node": "node scripts/pack-node.ts",
+    "pack:sea": "node scripts/pack-sea.ts",
+    "verify:node": "node scripts/verify-node.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "coverage": "vitest run --coverage",

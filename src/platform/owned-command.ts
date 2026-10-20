@@ -11,6 +11,8 @@ export interface OwnedCommandOptions {
   longLived?: boolean;
   /** Verified native creation/resume, not application readiness. Callback failures stop owned work. */
   onStarted?: () => void;
+  /** Observes application bytes only, after native framing has been removed. */
+  onOutput?: (stream: 'stdout' | 'stderr', bytes: Buffer) => void;
   /** Verify immediately before actual native creation (after Windows wrapper startup). */
   beforeSpawn?: () => Promise<void>;
   /** Reverify the pinned image after creation; Windows does this while it is suspended. */
@@ -237,7 +239,9 @@ export async function runOwnedCommand(
         maxStreamBytes: options.longLived ? -1 : limit,
       }),
     ).toString('base64');
-    for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+    for (const key of Object.keys(env))
+      if (['psmodulepath', 'lib', 'libpath', 'include'].includes(key.toLowerCase()))
+        delete env[key];
     env.PSModulePath = join(executable, '..', 'Modules');
   }
   return await new Promise<OwnedCommandOutput>((resolve, reject) => {
@@ -419,6 +423,12 @@ export async function runOwnedCommand(
           const payloadBytes = Math.max(0, combined.length - 4);
           bytes = combined.subarray(0, payloadBytes);
           stdoutTail = Buffer.from(combined.subarray(payloadBytes));
+        }
+        try {
+          if (bytes.length) options.onOutput?.(index === 0 ? 'stdout' : 'stderr', bytes);
+        } catch (error) {
+          fail(error);
+          return;
         }
         if (options.longLived) return;
         counts[index]! += bytes.length;

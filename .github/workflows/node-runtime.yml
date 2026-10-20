@@ -17,11 +17,11 @@ jobs:
   runtime:
     name: Node runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: actions/setup-node@v7.0.0
@@ -53,6 +53,37 @@ jobs:
       - name: Prepare interactive Windows gate without launching Sandbox
         if: runner.os == 'Windows'
         run: node scripts/prepare-windows-runtime-sandbox.ts
+      - name: Prepare the separate, checksum-pinned upstream Caddy fixture
+        id: upstream
+        shell: bash
+        run: |
+          path="$(node scripts/prepare-caddy-gate.ts)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      - name: Allow the separate Linux fixture to bind web ports
+        if: runner.os == 'Linux'
+        run: sudo setcap cap_net_bind_service=+ep "${{ steps.upstream.outputs.path }}"
+      - name: Verify packed npm and the shared real-Caddy catalog on the Node minimum
+        run: nub run verify:node "${{ steps.upstream.outputs.path }}"
+      - name: Select the independently pinned SEA builder
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.12.0
+      - name: Build native SEA artifacts without publishing
+        id: sea
+        shell: bash
+        run: |
+          node scripts/pack-sea.ts > "$RUNNER_TEMP/cadder-sea.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const report = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, "cadder-sea.json"), "utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT, "archive=" + report.archive + "\nstage=" + report.stage + "\n");'
+      - name: Verify extracted SEA without Node/npm on product PATH
+        run: node scripts/verify-sea.ts "${{ steps.sea.outputs.archive }}"
+      - name: Verify SEA through the same real-Caddy catalog
+        run: node scripts/verify-product-journey.ts "${{ steps.sea.outputs.stage }}" "${{ steps.upstream.outputs.path }}"
+      - name: Retain exact native candidate artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cadder-node-candidate-${{ matrix.os }}
+          path: ${{ steps.sea.outputs.archive }}
+          if-no-files-found: error
       - name: Verify no tracked build output
         run: git diff --exit-code
       - name: Upload coverage

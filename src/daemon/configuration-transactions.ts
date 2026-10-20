@@ -9,6 +9,7 @@ import type {
 } from '../contracts/ports.ts';
 import { registrationSchema, type EntrypointRegistration } from '../protocol/dto.ts';
 import { RpcError, type ProtocolError } from '../protocol/errors.ts';
+import { desiredStateSchema } from '../storage/schema.ts';
 
 export type ConfigurationSnapshot = Readonly<{
   config: CaddyConfig | null;
@@ -46,23 +47,7 @@ const configurationSnapshotSchema = z.strictObject({
       adaptedConfig: z.strictObject({ format: z.literal('json'), body: z.string() }),
     })
     .nullable(),
-  desiredState: z.strictObject({
-    projects: z.array(
-      z.strictObject({
-        projectKey: z.string(),
-        sourceWorkingDirectory: z.string(),
-        sourceConfigPath: z.string(),
-        enabled: z.boolean(),
-        domains: z.array(
-          z.strictObject({
-            canonicalDomain: z.string(),
-            upstream: z.string().nullable(),
-            enabled: z.boolean(),
-          }),
-        ),
-      }),
-    ),
-  }),
+  desiredState: desiredStateSchema,
   registrations: z.array(registrationSchema),
 });
 
@@ -203,7 +188,8 @@ export class ConfigurationTransactions {
           'config_prepare_failed',
           'Configuration preparation was rejected.',
         );
-    } catch {
+    } catch (error) {
+      if (error instanceof RpcError) return { ok: false, error: error.protocolError };
       return failure(
         'configuration',
         'config_prepare_failed',

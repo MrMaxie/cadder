@@ -65,6 +65,7 @@ export default defineConfig({
           label: 'Reference',
           items: [
             { label: 'Releases', slug: 'reference/releases' },
+            { label: 'Try the 2.0 candidate', slug: 'reference/node-candidate' },
             { label: 'Runtime configuration', slug: 'reference/runtime-configuration' },
             { label: 'Real Caddy resolution', slug: 'reference/real-caddy-resolution' },
           ],

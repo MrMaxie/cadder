@@ -1,4 +1,5 @@
-import { domainToASCII } from 'node:url';
+import { canonicalizeDomain } from '../protocol/domain.ts';
+export { canonicalizeDomain } from '../protocol/domain.ts';
 import type { CaddyConfig } from '../contracts/ports.ts';
 import type { EntrypointRegistration } from '../protocol/dto.ts';
 import { assertCandidate } from './preparation.ts';
@@ -26,23 +27,6 @@ export function compareText(left: string, right: string): number {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
-}
-
-/** Match the retained literal-domain IDNA boundary, not URL host parsing. */
-export function canonicalizeDomain(raw: string): string {
-  const domain = raw.trim().replace(/\.+$/, '');
-  const fallback = domain.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-  // These characters would invoke URL decoding, separators or bracket-host parsing.
-  if (
-    /[\s%/:\\@#?]/u.test(domain) ||
-    domain.includes('[') ||
-    domain.includes(']') ||
-    [...domain].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
-  )
-    return fallback;
-  const suffix = '.cadder-idna';
-  const mapped = domainToASCII(domain + suffix);
-  return mapped.endsWith(suffix) ? mapped.slice(0, -suffix.length) : fallback;
 }
 
 export function isEnabled(state: CompositionRegistration['activationState']): boolean {

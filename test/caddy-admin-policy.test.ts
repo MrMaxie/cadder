@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   normalizeCaddyConfig,
+  configForRoutePlan,
   prepareSecureAdminPolicy,
   type SecureAdminPolicy,
   type SecureAdminPolicyOptions,
@@ -190,6 +191,23 @@ async function refused(overrides: Partial<SecureAdminPolicyOptions>, code?: stri
   expect(result.error.message.length).toBeLessThan(256);
   expect(JSON.stringify(result)).not.toMatch(/SECRET|PRIVATE KEY|attacker|parser/);
 }
+
+it('changes guarded routes while reusing the verified identity and immutable base policy', async () => {
+  const prepared = await policy();
+  const before = prepared.config.adaptedConfig.body;
+  const empty = composeRoutePlan([]);
+  if (!empty.ok) throw new Error('Empty route plan failed.');
+  const next = configForRoutePlan(prepared, empty.value);
+  const previous = JSON.parse(before);
+  const updated = JSON.parse(next.adaptedConfig.body);
+  expect(updated.admin).toEqual(previous.admin);
+  expect(updated.apps.pki).toEqual(previous.apps.pki);
+  expect(updated.apps.tls.certificates.automate).toEqual([]);
+  expect(updated.apps.http.servers.cadder_http.routes).toEqual([]);
+  expect(prepared.config.adaptedConfig.body).toBe(before);
+  expect(next.effectiveConfigHash).not.toBe(prepared.config.effectiveConfigHash);
+  expect(vi.mocked(loadOrCreateAdminMaterial)).toHaveBeenCalledOnce();
+});
 
 it('assembles native mutual-TLS policy, imported CA paths and real internal web issuance', async () => {
   const value = await policy();

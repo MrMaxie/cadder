@@ -59,27 +59,27 @@ the corrected migration scope. Retain existing task IDs for evidence continuity.
 
 ## 5. State, diagnostic logs, shared client and routes CLI/TUI (G5, requires G4)
 
-- [ ] 5.1 Implement the single node:sqlite application-state/diagnostic-log worker with schema creation, integrity validation, bounded jobs and orderly close; test corrupt/newer schemas, rollback and worker errors (STO-001/002/003).
-- [ ] 5.2 Persist stable desired state and bounded diagnostic logs without restoring live sessions or introducing history queries; prove the old Rust runtime/database is neither imported nor deleted (STO-004, REG-003, OBS-001/002).
-- [ ] 5.3 Port pre-write redaction and deterministic log retention, including supported text/JSON/URL credentials and private keys; test boundaries and terminal-safe presentation (OBS-001/002/004).
-- [ ] 5.4 Preserve bounded canonical runtime/project/domain stream queries and correct domain attribution; test 1-200 limits, newest-row selection and ascending order, without source/severity/all-log filters or TUI log views (OBS-003).
-- [ ] 5.5 Implement shared client-service methods/models over the eight-operation RPC catalog for current lifecycle, projects, domains, diagnostics and bounded CLI logs; test offline/malformed states without importing daemon storage or adding RPC methods (IPC-003, TOP-002).
-- [ ] 5.6 Implement Commander released-command parity and human-readable output/exit contracts against the group 1 catalog; test arguments, snapshots and rejection of removed commands/options from fake client responses (CLI-001).
-- [ ] 5.7 Preserve attach-only state/inspection commands and explicit daemon start/restart, managed shim startup, tui --start-daemon and offline-TUI start; test bounded launch behavior and bare help with/without TTY never spawning a daemon (CLI-001, RUN-002).
+- [x] 5.1 Implement the single node:sqlite application-state/diagnostic-log worker with schema creation, integrity validation, bounded jobs and orderly close; test corrupt/newer schemas, rollback and worker errors (STO-001/002/003).
+- [x] 5.2 Persist stable desired state and bounded diagnostic logs without restoring live sessions or introducing history queries; prove the old Rust runtime/database is neither imported nor deleted (STO-004, REG-003, OBS-001/002).
+- [x] 5.3 Port pre-write redaction and deterministic log retention, including supported text/JSON/URL credentials and private keys; test boundaries and terminal-safe presentation (OBS-001/002/004).
+- [x] 5.4 Preserve bounded canonical runtime/project/domain stream queries and correct domain attribution; test 1-200 limits, newest-row selection and ascending order, without source/severity/all-log filters or TUI log views (OBS-003).
+- [x] 5.5 Implement shared client-service methods/models over the eight-operation RPC catalog for current lifecycle, projects, domains, diagnostics and bounded CLI logs; test offline/malformed states without importing daemon storage or adding RPC methods (IPC-003, TOP-002).
+- [x] 5.6 Implement Commander released-command parity and human-readable output/exit contracts against the group 1 catalog; test arguments, snapshots and rejection of removed commands/options from fake client responses (CLI-001).
+- [x] 5.7 Preserve attach-only state/inspection commands and explicit daemon start/restart, managed shim startup, tui --start-daemon and offline-TUI start; test bounded launch behavior and bare help with/without TTY never spawning a daemon (CLI-001, RUN-002).
 - [ ] 5.8 Implement the current routes-first Ink/React TUI through the same client service with real state, tree rows and no separate activity/logs/history/platform views; remove production mocks/random statuses and test Space/Enter toggles, offline Enter-to-start, pending actions and small terminals (TUI-001/002/003/004).
 - [ ] 5.9 Preserve bare cadder help on TTY/non-TTY and explicit cadder tui with optional --start-daemon; prove terminal restoration on normal exit, error and Ctrl+C with rendering tests plus a real terminal smoke (CLI-001, TUI-004).
 - [ ] 5.10 Pass an actual Node daemon/shim/operator journey with multiple projects, domain changes, bounded CLI logs and shutdown; record G5 parity against the catalog, not only fixture-runtime success.
 
 ## 6. Equal npm/SEA distributions and documentation (G6, requires G5)
 
-- [ ] 6.1 Emit npm JS using tsc import-extension rewriting exclusively into external staging; generate the consumer manifest and three bin entries with matching version/license/repository/assets (DIST-004, QT-003).
+- [x] 6.1 Emit npm JS using tsc import-extension rewriting exclusively into external staging; generate the consumer manifest and three bin entries with matching version/license/repository/assets (DIST-004, QT-003).
 - [ ] 6.2 Pack one npm tarball with the publication packer and verify its file allowlist, no optional platform packages/postinstall/download/build/loader/real Caddy; test local/global installation and PATH recursion outside checkout (QT-006, DIST-004).
-- [ ] 6.3 Select, verify and pin the Node 26 SEA builder patch independently of the Node 24.18.0 npm minimum; record source/runtime compatibility and builder inputs (QT-001, DIST-001).
-- [ ] 6.4 Bundle the same sources with esbuild and build three SEA entries plus assets outside checkout; prove state/log SQLite workers and owned child launch without a system Node executable (DIST-002).
+- [x] 6.3 Select, verify and pin the Node 26 SEA builder patch independently of the Node 24.18.0 npm minimum; record source/runtime compatibility and builder inputs (QT-001, DIST-001).
+- [x] 6.4 Bundle the same sources with esbuild and build three SEA entries plus assets outside checkout; prove state/log SQLite workers and owned child launch without a system Node executable (DIST-002).
 - [ ] 6.5 Build Windows x64, Linux x64, macOS x64 and arm64 archives with checksums/provenance and exact accepted asset sets; reject version/source drift (DIST-001/002/005).
 - [ ] 6.6 Run native SEA smoke for every variant with Node/npm absent from PATH, covering all entries, actual CLI/TUI, SQLite workers, Caddy adapter children and platform helper launch (DIST-002, QT-006).
 - [ ] 6.7 Run the same current-scope functional catalog through packed npm and extracted SEA on native runners, including local/global npm wrappers and daemon start/restart; record cross-channel parity (DIST-005).
-- [ ] 6.8 Move Astro/Starlight dependencies and tasks to Nub with exact locks; replace Bun/legacy instructions and document both channels equally, including separate Caddy prerequisite and safe transition (DOC-001/002/004).
+- [x] 6.8 Move Astro/Starlight dependencies and tasks to Nub with exact locks; replace Bun/legacy instructions and document both channels equally, including separate Caddy prerequisite and safe transition (DOC-001/002/004).
 - [ ] 6.9 Build/check docs from the supported workflow and verify each public command/example against real product acceptance, without fixture/private/hidden diagnostic seams (DOC-003/004).
 - [ ] 6.10 Make CI validate the same non-publishing pack process used for publication, with native archive verification and least-privilege/provenance safeguards; record G6 only after both channels pass (QT-004/006/007).
 

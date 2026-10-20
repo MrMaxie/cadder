@@ -49,7 +49,15 @@ export async function rpc<M extends RpcMethod>(
     const session = await authenticateClient(channel, secret, paths.instance);
     try {
       session.send(request.data);
-      const parsed = responseSchema(method).safeParse(await session.receive());
+      const mutation = [
+        'register-entrypoint-request',
+        'unregister-entrypoint-request',
+        'set-entrypoint-enabled-request',
+        'set-domain-enabled-request',
+      ].includes(method);
+      const parsed = responseSchema(method).safeParse(
+        await session.receive(mutation ? 120000 : 15000),
+      );
       if (
         !parsed.success ||
         parsed.data.requestId !== requestId ||

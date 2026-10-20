@@ -1,0 +1,52 @@
+---
+title: Try the 2.0 candidate
+description: Install a supplied Cadder 2.0 release candidate through npm or a standalone archive.
+---
+
+Cadder 2.0 is an unpublished migration candidate. The current public release remains 1.0.5. Use this page only with a supplied 2.0.0-rc.1 package or archive; availability in npm and GitHub Releases has not been announced.
+
+Both distributions provide the same three commands: `cadder`, `cadderd`, and the `caddy` shim. Upstream Caddy is a separate prerequisite in both cases.
+
+## Install the npm package
+
+Use Node 24 LTS, version 24.18.0 or later within the 24.x series. Install the supplied tarball with npm:
+
+```sh
+npm install --global ./cadder-2.0.0-rc.1.tgz
+cadder --version
+```
+
+The package contains compiled JavaScript. Installation does not download Caddy or a platform binary, compile source, or require a TypeScript loader.
+
+## Install the standalone archive
+
+Choose the supplied archive for Windows x64, Linux x64, Intel macOS, or Apple Silicon macOS. Extract it into a user-owned directory, verify its files against `SHA256SUMS`, and add that directory to PATH. Keep all three executables and accompanying files together.
+
+Standalone executables include their Node runtime and do not require Node or npm on PATH. `BUILD.json` identifies the candidate source and platform; `NODE-LICENSE` and `THIRD-PARTY-NOTICES` contain the bundled software notices.
+
+## Run a project
+
+[Configure real Caddy](../../user-guide/cadder-toml/), then run the existing Caddyfile from its project directory:
+
+```sh
+caddy run
+```
+
+In another terminal:
+
+```sh
+cadder status
+cadder projects list
+cadder domains list
+cadder tui
+```
+
+In the TUI, Up and Down select a project or domain; Enter or Space toggles it. Press `s` and confirm with `y` to stop the daemon, `r` to restart it, or `q` to quit the TUI. When offline, Enter starts the daemon. Bare `cadder` displays help.
+
+## Switch from 1.0.5
+
+1. Use the old installation's `cadder daemon stop` before changing PATH.
+2. Install all three commands from the same 2.0 candidate. Avoid mixing npm and standalone commands in one installation directory.
+3. Run `caddy run` again in each project. Live registrations are not restored across the transition.
+
+The candidate uses separate runtime storage and does not import or delete the Rust database. Keep the previous release available for rollback. Before switching back, stop the candidate with `cadder daemon stop`, restore the previous commands on PATH, and register the projects again.

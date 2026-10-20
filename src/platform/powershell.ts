@@ -19,9 +19,10 @@ export async function powershell(script: string): Promise<string> {
     'v1.0',
     'powershell.exe',
   );
-  // Windows worker environments can contain differently cased duplicate keys.
+  // Add-Type must not inherit unrelated native compiler search paths.
+  const excluded = new Set(['psmodulepath', 'lib', 'libpath', 'include']);
   const environment = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'psmodulepath'),
+    Object.entries(process.env).filter(([key]) => !excluded.has(key.toLowerCase())),
   );
   environment.PSModulePath = join(dirname(executable), 'Modules');
   const result = await execute(

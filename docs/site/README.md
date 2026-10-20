@@ -14,14 +14,14 @@ mise run docs-build
 When working directly in this package, run commands from `docs/site`.
 
 ```sh
-npm ci
-npm run dev
-npm run check
-npm run build
-npm run preview
+nub ci
+nub run dev
+nub run check
+nub run build
+nub run preview
 ```
 
-`npm run build` writes generated output to `docs/site/dist`. Do not commit generated output, `.astro`, cache directories, or preview artifacts.
+`nub run build` writes generated output to `docs/site/dist`. Do not commit generated output, `.astro`, cache directories, or preview artifacts.
 
 ## Content source
 
@@ -35,6 +35,6 @@ The repository CI validates documentation from source on `master` through `mise 
 mise run docs-check
 ```
 
-Release or publishing workflows may additionally run `mise run docs-build` and upload `docs/site/dist`, but they should not write generated site output back to the repository.
+The documentation workflow runs `mise run docs-build` and uploads `docs/site/dist`.
 
 Production documentation is published below `https://maxie.dev/cadder/`.

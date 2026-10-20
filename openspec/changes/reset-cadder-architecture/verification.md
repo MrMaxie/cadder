@@ -744,3 +744,94 @@ changes failing the known missing-delta validator. No fake delta or checker
 workaround was introduced; focused changes remain unarchived. mTLS, owned server
 lifecycle, native/distribution and final-product Sandbox proof remain pending.
 No stage, commit, publication, real Caddy or host privilege/account action occurred.
+
+## Node product implementation checkpoint (2026-10-20)
+
+The `migrate-node-project-runtime` slice joins the existing queue, protected local
+runtime and Caddy backend to application SQLite storage, the eight RPC handlers,
+shared client, Commander CLI, routes Ink TUI and managed/delegated shim. It also
+adds non-publishing npm/SEA packers and native candidate CI. These are implemented
+capabilities, not G1-G7 acceptance or permission to remove Rust.
+
+### Executed local checks
+
+- `nub run check`: 44 files, 830 passing cases and two existing Unix-only skips;
+  2436/2745 own-source lines, 88.74%. Types, lints and formatting pass. Coverage
+  still includes entrypoints, workers and non-host platform branches; their child
+  execution is separate evidence, not silently excluded from V8's denominator.
+- `mise run node-check`: locked Nub reinstall plus the same full check passes.
+  A prior concurrent run with Windows Sandbox had two 15-second native-test
+  timeouts. The serial rerun passes without increasing test limits.
+- `mise run check`: Rust formatting, Clippy and workspace tests pass, followed by
+  the known OpenSpec 1.5 missing-delta failure. The run preceded the addition of
+  its Node-check delegation. Strict main specs pass 15/15; the reset change passes;
+  the full delta validator reports 17 passing items and seven implementation-only
+  changes without deltas. Downstream legacy npm/cargo-dist steps were not reached.
+  No fake deltas or validation-policy bypass were added.
+- In `docs/site`, `nub run check` reports zero errors/warnings/hints and
+  `nub run build` builds 14 pages. Existing empty-i18n/missing-404 build warnings
+  remain. Nub owns the exact docs lock; Astro's established ignored output and
+  Pages workflow stay in place during the retained Rust baseline.
+- `nub run verify:node`: compiled npm local-install daemon/SQLite/CLI lifecycle,
+  three local and global bin wrappers, removed-option rejection and clean stop
+  pass on Node 24.18.0. The consumer has no TS loader, install scripts or optional
+  native packages.
+- `node scripts/verify-sea.ts <archive>`: extracted Windows x64 SEA passes all
+  three versions, exact file/checksum inventory, authenticated IPC, SQLite worker,
+  logs, restart and stop with only Windows system tools on product PATH.
+- Real Windows PTY: bare help succeeds without creating runtime state; routes TUI
+  opens offline, explicitly starts the daemon, confirms stop, returns offline,
+  quits successfully and restores the terminal. This does not prove every error,
+  Ctrl+C, viewport or Unix TTY case.
+- Supplementary Fedora 44/WSL2 x64 proof builds native Linux SEA entries from the
+  same platform-neutral bundles with the checksum-verified Linux Node 26.12.0
+  builder. The native no-Node-PATH lifecycle/SQLite/restart probe passes under
+  Node 24.18.0 as the external test driver. This is not native CI, the complete
+  Linux pack process, real-Caddy routing or Unix privilege acceptance.
+
+### Candidate identity and actual Caddy evidence
+
+The local npm and Windows SEA candidates share base revision
+`81c120b1b67d640b2c344abc040943c4cd2b3435`, dirty source/build-input digest
+`f298de6361cd2f750eca5562cfff92b0d7e116a64981a7920ee2c7c04334de2d`
+and version `2.0.0-rc.1`. They are local candidates, not published releases or a
+clean candidate revision. Their SHA-256 values are:
+
+- npm tarball: `591fbebe5a403f3d818992b335644b253dacc02df5d9989ec940313d9d623a8f`.
+- Windows archive: `e2983e3bbcec0bf98f1507ae46606985c3488fa2a127167d157277849b72ee62`.
+
+A prior Windows Sandbox product candidate with source digest
+`c88a3550b1a250e9a7cc0763b246f06851b60288d6d084a25d6d82d67fce80e8`
+passed actual daemon/shim/operator registration, simultaneous projects, HTTP and
+CA-verified HTTPS, project/domain toggles, conflicts/malformed-update rejection
+with last-known-good, heartbeat/crashed-session expiry, unauthenticated admin
+denial and owned shutdown, using separate stock Caddy 2.11.4 and no Node on the
+product PATH. A repeat against the f298 candidate while the host full suite ran
+failed after shim crash with port 80 unavailable. That repeat is a failure,
+not a final-candidate pass; serial/native CI diagnosis remains open.
+
+The startup consumer probe also reproduced a Windows ACL-publication race.
+Post-launch readiness now waits for protection to finish without reading an
+unsafe secret or authenticating; pre-existing unsafe paths still fail directly.
+A failed readiness attempt terminates only its own newly launched child. The
+regression and a fresh local/global npm consumer run pass. Log overflow now
+recognizes case-insensitive private-key markers; failed worker posting settles
+requests and terminates that worker.
+
+### Test scope and remaining gates
+
+Removed over 700 lines of declaration/source-string/self-mock checks from the
+port and compatibility suites. Retained the frozen behavior data and security,
+process-ownership, schema-refusal and rollback regressions. New tests exercise
+real SQLite, handlers, CLI grammar, Ink input and host socket ownership. The
+total case count grows because the missing product is now implemented; a lower
+test count is not an acceptance criterion.
+
+G4/G5 native fidelity, full shared npm/SEA catalog, macOS variants, final Unix
+owner/elevated behavior, interactive Windows same-SID/UAC/cancellation/different-
+account checks and one clean-revision G7 ledger remain open. Candidate CI now
+runs the shared real-Caddy journey for both distributions with a separately
+downloaded checksum-pinned upstream fixture. Configuring that workflow is not
+execution evidence. Rust deletion, release-tool cutover and publication remain
+gated. The user explicitly authorized commit and push for native CI; this does
+not authorize a PR, tag, registry publication or GitHub release.

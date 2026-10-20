@@ -133,6 +133,38 @@ function candidate(body: string): CaddyConfig {
   return config;
 }
 
+function routeApplications(plan: CaddyRoutePlan) {
+  return {
+    http: {
+      servers: {
+        cadder_http: { ...plan.servers.cadder_http, automatic_https: { disable: true } },
+        cadder_https: {
+          ...plan.servers.cadder_https,
+          automatic_https: { disable: true },
+          tls_connection_policies: [{}],
+        },
+      },
+    },
+    tls: {
+      automation: {
+        policies: plan.tlsSubjects.length
+          ? [{ subjects: plan.tlsSubjects, issuers: [{ module: 'internal', ca: 'local' }] }]
+          : [],
+      },
+      certificates: { automate: plan.tlsSubjects },
+    },
+  };
+}
+
+/** Reuse one verified identity; only the guarded HTTP/TLS route plan changes. */
+export function configForRoutePlan(policy: SecureAdminPolicy, input: CaddyRoutePlan): CaddyConfig {
+  const plan = guardedPlan(input);
+  const root = object(JSON.parse(policy.config.adaptedConfig.body) as unknown);
+  return candidate(
+    canonicalBody({ ...root, apps: { ...object(root.apps), ...routeApplications(plan) } }),
+  );
+}
+
 /**
  * Normalize a complete submitted or independently fetched JSON object, not a receipt.
  * Object keys sort lexically (including numeric keys); arrays and opaque data stay intact.
@@ -364,32 +396,7 @@ export async function prepareSecureAdminPolicy(
               local: { install_trust: false },
             },
           },
-          http: {
-            servers: {
-              cadder_http: { ...plan.servers.cadder_http, automatic_https: { disable: true } },
-              cadder_https: {
-                ...plan.servers.cadder_https,
-                automatic_https: { disable: true },
-                tls_connection_policies: [{}],
-              },
-            },
-          },
-          // The retained local/internal web issuer, distinct from the imported admin CA.
-          // An empty subject list must not become a catch-all issuance policy.
-          tls: {
-            automation: {
-              policies:
-                plan.tlsSubjects.length === 0
-                  ? []
-                  : [
-                      {
-                        subjects: plan.tlsSubjects,
-                        issuers: [{ module: 'internal', ca: 'local' }],
-                      },
-                    ],
-            },
-            certificates: { automate: plan.tlsSubjects },
-          },
+          ...routeApplications(plan),
         },
       }),
     );

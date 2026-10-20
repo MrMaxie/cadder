@@ -61,3 +61,42 @@ it('settles concurrent stop consistently while attempting listener and lock fina
   expect(close).toHaveBeenCalledOnce();
   expect(release).toHaveBeenCalledOnce();
 });
+
+it('initializes before readiness and retains endpoint/exclusion until owned teardown settles', async () => {
+  let finish!: () => void;
+  const owned = {
+    close: vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    ),
+  };
+  const initialize = vi.fn(async () => owned);
+  const runtime = await startLocalRuntime({ runtimeDir: '/fault-runtime', initialize }, vi.fn());
+  expect(initialize.mock.invocationCallOrder[0]).toBeLessThan(
+    vi.mocked(serveIpc).mock.invocationCallOrder[0]!,
+  );
+  const stopping = runtime.stop();
+  expect(close).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  finish();
+  await stopping;
+  expect(close).toHaveBeenCalledOnce();
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('does not release exclusion after unproved owned cleanup', async () => {
+  const owned = {
+    close: vi.fn(async () => {
+      throw failure;
+    }),
+  };
+  const runtime = await startLocalRuntime(
+    { runtimeDir: '/fault-runtime', initialize: async () => owned },
+    vi.fn(),
+  );
+  await expect(runtime.stop()).rejects.toBe(failure);
+  expect(close).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+});
