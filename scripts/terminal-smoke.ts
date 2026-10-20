@@ -14,12 +14,14 @@ export async function terminalSmoke(
     const args = scenario === 'help' ? [] : ['tui'];
     if (scenario === 'explicit') args.push('--start-daemon');
     const command = [file, ...prefix, ...args];
-    const quoted = command.map((part) => "'" + part.replaceAll("'", "'\\''") + "'").join(' ');
+    // System Python provides the native PTY; the product inherits only its restricted PATH.
     const running = execute(
-      '/usr/bin/script',
-      process.platform === 'darwin'
-        ? ['-q', '/dev/null', ...command]
-        : ['-qec', quoted, '/dev/null'],
+      '/usr/bin/python3',
+      [
+        '-c',
+        'import os,pty,sys;sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))',
+        ...command,
+      ],
       {
         env: { ...environment, CI: 'false', TERM: 'xterm-256color' },
         timeout: 20000,
