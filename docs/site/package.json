@@ -16,9 +16,17 @@
     "@fontsource-variable/space-grotesk": "5.3.0",
     "@fortawesome/free-solid-svg-icons": "7.3.1",
     "astro": "7.3.2",
+    "astro-expressive-code": "0.44.2",
     "sharp": "0.35.4",
     "simple-icons": "16.31.0",
     "typescript": "6.0.3"
   },
-  "packageManager": "npm@11.16.0"
+  "packageManager": "nub@0.7.5",
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.7.5",
+      "onFail": "ignore"
+    }
+  }
 }

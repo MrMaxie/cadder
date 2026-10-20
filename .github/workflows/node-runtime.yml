@@ -1,0 +1,125 @@
+name: Node runtime migration gate
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm-artifact:
+    name: Pack the single npm candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      filename: ${{ steps.pack.outputs.filename }}
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+      - run: npm install --global @nubjs/nub@0.7.5
+      - run: nub ci
+      - name: Pack once outside checkout
+        id: pack
+        run: |
+          node scripts/pack-node.ts > "$RUNNER_TEMP/cadder-npm.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const report = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, "cadder-npm.json"), "utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT, "archive=" + report.archive + "\nfilename=" + path.basename(report.archive) + "\n");'
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cadder-npm-candidate
+          path: ${{ steps.pack.outputs.archive }}
+          if-no-files-found: error
+      - run: git diff --exit-code
+  runtime:
+    name: Node runtime (${{ matrix.os }})
+    needs: npm-artifact
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24.18.0
+      - name: Bootstrap pinned repository manager
+        run: npm install --global @nubjs/nub@0.7.5
+      - name: Install exact locked dependencies
+        run: nub ci
+      - name: Check TypeScript
+        run: nub run typecheck
+      - name: Check lints
+        run: nub run lint
+      - name: Check formatting
+        run: nub run format:check
+      - name: Test runtime and coverage
+        env:
+          CADDER_COVERAGE_DIR: ${{ runner.temp }}/cadder-node-coverage
+        run: nub run coverage
+      - name: Pack native runtime fixtures outside checkout
+        id: fixtures
+        shell: bash
+        run: echo "stage=$(node scripts/prepare-runtime-gate.ts)" >> "$GITHUB_OUTPUT"
+      - name: Native compiled-JS runtime smoke without TS loader
+        run: node "${{ steps.fixtures.outputs.stage }}/runtime-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs"
+      - name: Native same-owner elevated daemon and different-account denial
+        if: runner.os != 'Windows'
+        run: node "${{ steps.fixtures.outputs.stage }}/runtime-privilege-smoke.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-child.mjs" "${{ steps.fixtures.outputs.stage }}/runtime-denied-client.mjs"
+      - name: Prepare interactive Windows gate without launching Sandbox
+        if: runner.os == 'Windows'
+        run: node scripts/prepare-windows-runtime-sandbox.ts
+      - name: Prepare the separate, checksum-pinned upstream Caddy fixture
+        id: upstream
+        shell: bash
+        run: |
+          path="$(node scripts/prepare-caddy-gate.ts)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      - name: Allow the separate Linux fixture to bind web ports
+        if: runner.os == 'Linux'
+        run: sudo setcap cap_net_bind_service=+ep "${{ steps.upstream.outputs.path }}"
+      - name: Fetch the exact npm candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v7.0.0
+        with:
+          name: cadder-npm-candidate
+          path: ${{ runner.temp }}/cadder-npm-candidate
+      - name: Verify packed npm and the shared real-Caddy catalog on the Node minimum
+        run: nub run verify:node "${{ steps.upstream.outputs.path }}" "${{ runner.temp }}/cadder-npm-candidate/${{ needs.npm-artifact.outputs.filename }}"
+      - name: Select the independently pinned SEA builder
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.12.0
+      - name: Build native SEA artifacts without publishing
+        id: sea
+        shell: bash
+        run: |
+          node scripts/pack-sea.ts > "$RUNNER_TEMP/cadder-sea.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const report = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, "cadder-sea.json"), "utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT, "archive=" + report.archive + "\nstage=" + report.stage + "\n");'
+      - name: Verify extracted SEA without Node/npm on product PATH
+        run: node scripts/verify-sea.ts "${{ steps.sea.outputs.archive }}"
+      - name: Verify SEA through the same real-Caddy catalog
+        run: node scripts/verify-product-journey.ts "${{ steps.sea.outputs.stage }}" "${{ steps.upstream.outputs.path }}"
+      - name: Retain exact native candidate artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cadder-node-candidate-${{ matrix.os }}
+          path: ${{ steps.sea.outputs.archive }}
+          if-no-files-found: error
+      - name: Verify no tracked build output
+        run: git diff --exit-code
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: node-coverage-${{ matrix.os }}
+          path: ${{ runner.temp }}/cadder-node-coverage
+          if-no-files-found: ignore
+          retention-days: 14

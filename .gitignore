@@ -1,6 +1,9 @@
 # Rust / Cargo
 target/
 
+# Node dependencies and transient test output
+.astro/
+
 # Build and release outputs
 artifacts/
 dist/

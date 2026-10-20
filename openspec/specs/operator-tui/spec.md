@@ -6,11 +6,12 @@ Define the keyboard-operated Cadder 1.0 interface.
 ## Requirements
 
 ### Requirement: TUI-001: One routes-first workspace exposes current state
-The TUI SHALL render every project and domain in one primary table and SHALL support collections of arbitrary length without fixed row-count assumptions. Domain rows SHALL use tree connectors beneath their project, and projects SHALL follow one another without empty separator rows. The TUI SHALL NOT expose a separate activity or logs view.
+Ink/React TUI SHALL render real daemon-backed projects and domains in one routes-first primary table through the same client service used by CLI, without production mocks or random statuses. Domain rows SHALL use tree connectors beneath their project, with no empty separator rows between projects. Collections SHALL support scrolling without fixed lengths. The TUI SHALL NOT add separate activity, logs, history, IIS or autostart views; explicit diagnostics and bounded logs SHALL remain CLI surfaces.
 
-#### Scenario: Many registrations
-- **WHEN** more projects or domains exist than fit in the viewport
-- **THEN** selection and scrolling remain bounded by the actual collection length
+#### Scenario: Operator changes a domain
+- **WHEN** the user changes activation in the routes workspace
+- **THEN** the TUI SHALL render committed daemon state without unrelated diagnostic details
+- **AND** fixture data SHALL be limited to tests/development, not production
 
 ### Requirement: TUI-002: Routine state is quiet and exceptional state is actionable
 The TUI SHALL keep `cadderd` connection state and Caddy runtime state separately visible in the header, SHALL use filled and empty shape markers for route activation, and SHALL omit diagnostic identifiers, redundant counts, and repeated state labels from the primary workspace. Neutral colors SHALL carry routine structure while the green accent is reserved for focus, enabled state, and available keys.
@@ -24,11 +25,12 @@ The TUI SHALL keep `cadderd` connection state and Caddy runtime state separately
 - **THEN** the interface presents the failure and available recovery guidance inline
 
 ### Requirement: TUI-003: Lifecycle actions are explicit
-The primary workspace MUST provide idempotent Start, confirmed bounded Stop, and ordered Restart actions with pending, offline, failure, and success states.
+TUI SHALL offer idempotent explicit start while offline, confirmed bounded stop and ordered restart with pending/success/failure states. Startup SHALL follow the shared client launch boundary. Opening cadder tui without --start-daemon SHALL NOT imply daemon start; the explicit --start-daemon option SHALL start or attach before rendering.
 
-#### Scenario: Restart
-- **WHEN** the user confirms Restart
-- **THEN** the TUI observes shutdown before launching and confirming the new daemon
+#### Scenario: Offline TUI opens
+- **WHEN** the user opens cadder tui without --start-daemon and no daemon is running
+- **THEN** TUI SHALL display offline state and offer an explicit start action
+- **AND** restart SHALL observe prior shutdown before starting the replacement
 
 ### Requirement: TUI-004: Rendering remains accessible and recoverable
 The TUI MUST support keyboard-only navigation, visible focus, shape-based state meaning independent of color, bounded layouts, and terminal restoration after success, error, panic, or cancellation. Space and Enter SHALL both toggle the selected project or domain while Enter SHALL start `cadderd` when the daemon is offline.

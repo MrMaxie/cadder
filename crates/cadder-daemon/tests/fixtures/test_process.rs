@@ -1,7 +1,7 @@
 use std::{
   env,
   fs::{self, OpenOptions},
-  io::{self, Write},
+  io::{self, Read, Write},
   path::{Path, PathBuf},
   process::{Command, ExitCode, Stdio},
   thread,
@@ -68,6 +68,10 @@ fn fake_caddy(directory: &Path, mode: &str) -> io::Result<u8> {
   let arguments = env::args().skip(1).collect::<Vec<_>>();
   append_line(directory.join("fake-caddy.log"), &arguments.join(" "))?;
 
+  if mode.starts_with("shim-passthrough-") {
+    return shim_passthrough(directory, mode, &arguments);
+  }
+
   match arguments.first().map(String::as_str) {
     Some("adapt") => adapt(mode),
     Some("reload") => reload(directory, mode),
@@ -75,6 +79,26 @@ fn fake_caddy(directory: &Path, mode: &str) -> io::Result<u8> {
     Some("run") => run_server(directory, mode, &arguments),
     _ => Ok(64),
   }
+}
+
+fn shim_passthrough(directory: &Path, mode: &str, arguments: &[String]) -> io::Result<u8> {
+  let mut stdin = Vec::new();
+  io::stdin().read_to_end(&mut stdin)?;
+  let record = serde_json::json!({
+    "args": arguments,
+    "stdin_bytes": stdin,
+  });
+  fs::write(
+    directory.join("shim-passthrough.json"),
+    serde_json::to_vec(&record).map_err(io::Error::other)?,
+  )?;
+  println!("FAKE_CADDY_PASSTHROUGH_STDOUT");
+  eprintln!("FAKE_CADDY_PASSTHROUGH_STDERR");
+  Ok(if mode == "shim-passthrough-failure" {
+    23
+  } else {
+    0
+  })
 }
 
 fn adapt(mode: &str) -> io::Result<u8> {

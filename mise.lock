@@ -126,6 +126,10 @@ url = "https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip"
 version = "1.5.0"
 backend = "npm:@fission-ai/openspec"
 
+[[tools."npm:@nubjs/nub"]]
+version = "0.7.5"
+backend = "npm:@nubjs/nub"
+
 [[tools.rust]]
 version = "1.95.0"
 backend = "core:rust"

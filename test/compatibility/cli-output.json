@@ -1,0 +1,50 @@
+{
+  "sourceRevision": "93942af84f555eab2bd68e0a4a9db487ff82d040",
+  "version": "1.0.5",
+  "platform": "win32",
+  "capture": "redirected non-TTY stdout and stderr; cargo build --locked -p cadder-client -p cadder-shim",
+  "cases": [
+    {
+      "argv": [],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "Inspect and manage Cadder routes\n\nUsage: cadder <COMMAND>\n\nCommands:\n  status       Show cadderd, Caddy, and configuration state\n  daemon       Start, stop, or restart cadderd\n  projects     Inspect and manage registered projects\n  domains      Inspect and manage registered domains\n  port         Inspect a local port or terminate its expected owner\n  caddyfile    Inspect a Caddyfile registration and its local upstreams\n  diagnostics  Show explicit runtime and configuration diagnostics\n  logs         Read bounded, redacted daemon logs\n  tui          Open the full-screen operator\n  help         Print this message or the help of the given subcommand(s)\n\nOptions:\n  -h, --help     Print help\n  -V, --version  Print version\n"
+    },
+    {
+      "argv": ["--help"],
+      "exitCode": 0,
+      "stdout": "Inspect and manage Cadder routes\n\nUsage: cadder <COMMAND>\n\nCommands:\n  status       Show cadderd, Caddy, and configuration state\n  daemon       Start, stop, or restart cadderd\n  projects     Inspect and manage registered projects\n  domains      Inspect and manage registered domains\n  port         Inspect a local port or terminate its expected owner\n  caddyfile    Inspect a Caddyfile registration and its local upstreams\n  diagnostics  Show explicit runtime and configuration diagnostics\n  logs         Read bounded, redacted daemon logs\n  tui          Open the full-screen operator\n  help         Print this message or the help of the given subcommand(s)\n\nOptions:\n  -h, --help     Print help\n  -V, --version  Print version\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["--version"],
+      "exitCode": 0,
+      "stdout": "cadder 1.0.5\n",
+      "stderr": ""
+    },
+    {
+      "argv": ["history"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "error: unrecognized subcommand 'history'\n\nUsage: cadder <COMMAND>\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "argv": ["status", "--json"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "error: unexpected argument '--json' found\n\nUsage: cadder status\n\nFor more information, try '--help'.\n"
+    },
+    {
+      "argv": ["daemon"],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": "Start, stop, or restart cadderd\n\nUsage: cadder daemon <COMMAND>\n\nCommands:\n  start    Start cadderd or attach when it is already running\n  stop     Stop cadderd and its owned Caddy process\n  restart  Stop and start cadderd in order\n  help     Print this message or the help of the given subcommand(s)\n\nOptions:\n  -h, --help  Print help\n"
+    },
+    {
+      "argv": ["tui", "--json"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "error: unexpected argument '--json' found\n\nUsage: cadder tui [OPTIONS]\n\nFor more information, try '--help'.\n"
+    }
+  ]
+}

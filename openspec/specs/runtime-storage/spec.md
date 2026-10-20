@@ -6,29 +6,32 @@ Define the single SQLite durability boundary, its ownership rules, and the guara
 ## Requirements
 
 ### Requirement: STO-001: One owner-protected SQLite database is authoritative
-Cadder MUST store application state only in `data/cadder.sqlite3` beneath the installation runtime using the bundled SQLite engine and owner-only filesystem permissions.
+The Node daemon SHALL own a protected v2 application-state and diagnostic-log database using node:sqlite, separate from the lifetime exclusion database. No client SHALL directly access either database. Initial schema creation SHALL be transactional and finish before product operations are accepted.
 
-#### Scenario: Database is created
-- **WHEN** the daemon initializes an empty runtime
-- **THEN** it creates schema version 1 in one transaction before accepting operations
+#### Scenario: Empty v2 application database
+- **WHEN** the Node daemon first creates application-state and diagnostic-log storage
+- **THEN** it SHALL create and validate its schema under owner-only protection
+- **AND** the separate SQLite exclusion connection SHALL remain held
 
 ### Requirement: STO-002: Database work is single flight and bounded
-One `tokio-rusqlite` connection SHALL serialize database closures behind a pre-call permit with an interrupt handle, rollback journal, full synchronous commits, foreign keys, busy timeout, integrity validation, and bounded close.
+One worker SHALL serialize application-state and diagnostic-log database work, with bounded jobs, transaction rollback, integrity checks and orderly close. Worker failures SHALL settle pending requests with typed errors and SHALL NOT release daemon exclusion while owned work/resources remain active.
 
-#### Scenario: Operation deadline expires
-- **WHEN** a database closure exceeds its deadline
-- **THEN** Cadder interrupts it and waits for a terminal result before releasing the permit
+#### Scenario: Worker or transaction fails
+- **WHEN** persistence cannot finish successfully
+- **THEN** uncommitted data SHALL be rolled back and pending callers informed
+- **AND** shutdown SHALL settle worker work before releasing runtime exclusion
 
-### Requirement: STO-003: Schema compatibility is exact before 1.0
-Cadder MUST initialize version zero only when the database is otherwise empty and MUST reject partial, corrupt, or newer schemas before cleanup or runtime mutation.
+### Requirement: STO-003: The Node schema is validated before mutation
+Startup SHALL initialize only an empty uninitialized Node database, and SHALL reject partial, corrupt or unsupported/newer schemas before runtime mutation. It SHALL NOT delete unrelated entries to recover from schema failure.
 
-#### Scenario: Partial database exists
-- **WHEN** required tables or indexes do not match schema version 1
-- **THEN** startup fails with a storage diagnostic without deleting unrelated data
+#### Scenario: Partial schema exists
+- **WHEN** database objects or integrity do not match the supported Node schema
+- **THEN** startup SHALL fail with a storage diagnostic without destructive repair
 
-### Requirement: STO-004: Legacy cleanup is allowlisted
-After endpoint ownership and healthy database validation, Cadder MAY delete only the named pre-1.0 storage artifacts beneath `data`, MUST refuse link traversal, and MUST preserve unknown entries and the database.
+### Requirement: STO-004: Old runtime data remains untouched
+The Node migration SHALL NOT import, delete or implicitly clean up the Rust runtime or database. Projects SHALL re-register from existing configuration. Old releases and data SHALL remain available for rollback; stable intent SHALL NOT resurrect a live session. Durable logs and state SHALL NOT introduce a history command or view.
 
-#### Scenario: Cleanup partially fails
-- **WHEN** one allowlisted artifact cannot be removed
-- **THEN** startup continues with a redacted diagnostic and retries that artifact on the next start
+#### Scenario: Node first starts beside old data
+- **WHEN** old Rust runtime data exists during Node startup
+- **THEN** Node SHALL use its separate v2 storage and leave the old data untouched
+- **AND** project routes SHALL become live only through current registration
