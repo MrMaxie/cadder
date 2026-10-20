@@ -890,3 +890,30 @@ after these changes. The shared real-Caddy catalog additionally injects one
 SQLite desired-state write refusal, verifies actual post-apply rollback, removes
 its test-only trigger and checks that a later mutation works. It introduces no
 production fault flag or exported private runtime data.
+
+### Exact npm candidate and native product follow-up
+
+At `e3be920`, CI packs one npm tarball and distributes those exact bytes to
+the four native jobs, verifying clean source revision and version before use.
+The shared catalog now checks actual delegated stdin/stdout/stderr/exit codes,
+shim-first startup and Unix PTY help/TUI cleanup. Native execution remains open:
+Linux exposes asynchronous certificate issuance before the first verified HTTPS
+request; macOS requires an elevated daemon for web ports and exposes root-owned
+new runtime ancestors; Windows still has a short/long TEMP comparison fixture.
+The fixture comparison uses physical paths on both sides.
+
+A fresh Windows Sandbox shim-first run fails at the original 30-second startup
+budget. A separate actual-product probe records failure after 34.6 seconds and
+successful foreground readiness after another 28.6 seconds. Client startup now
+allows 60 seconds for cold native ACL preparation; unsafe permissions still
+refuse authentication and failed readiness still stops only its own child.
+The existing client regression now crosses the old 30-second boundary.
+
+Root startup now assigns only newly created runtime ancestors to the explicitly
+selected Unix owner. The compiled native Linux privilege probe passes with a
+previously absent runtime parent, ordinary-owner access and different-account
+denial. macOS product probes retain ordinary clients, start the actual daemon
+with explicit owner under sudo, read only the public Caddy CA for verified TLS,
+and clean their own elevated temporary data. HTTPS probes wait for actual
+certificate readiness. These corrections require a fresh full native matrix and
+Windows product repeat; they do not close G7 or authorize Rust removal.

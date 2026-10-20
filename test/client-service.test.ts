@@ -105,6 +105,7 @@ it('waits for startup ACL publication without accepting an unsafe connection or 
       new CadderError('unsafe-runtime-permissions', 'ACL is not published yet'),
     )
     .mockResolvedValueOnce(ready);
+  vi.spyOn(Date, 'now').mockReturnValue(31000).mockReturnValueOnce(0);
   await client.start();
   expect(kill).not.toHaveBeenCalled();
   vi.mocked(rpc)

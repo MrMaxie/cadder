@@ -81,11 +81,18 @@ async function until(check: () => Promise<void>, timeout = 120000): Promise<void
   throw new Error(`Product scenario deadline exceeded: ${String(last)}\n${daemonErrors}`);
 }
 async function request(host: string, tls = false): Promise<{ status: number; body: string }> {
-  const ca = tls
-    ? await readFile(
-        join(environment.CADDER_RUNTIME_DIR!, 'v2/caddy/data/caddy/pki/authorities/local/root.crt'),
-      )
-    : undefined;
+  const certificate = join(
+    environment.CADDER_RUNTIME_DIR!,
+    'v2/caddy/data/caddy/pki/authorities/local/root.crt',
+  );
+  let ca: Buffer | string | undefined;
+  if (tls) {
+    // The elevated Caddy owns its storage; export only the public CA certificate to this probe.
+    ca =
+      process.platform === 'darwin'
+        ? (await execute('/usr/bin/sudo', ['-n', '/bin/cat', certificate])).stdout
+        : await readFile(certificate);
+  }
   return new Promise((resolveResponse, reject) => {
     const request_ = (tls ? getTls : get)(
       {
@@ -175,11 +182,11 @@ try {
     assert.match((await run(['status'])).stdout, /cadderd {2}running/);
   });
   await until(async () => assert.equal((await request('alpha.localhost')).body, 'alpha'));
-  assert.equal((await request('alpha.localhost', true)).body, 'alpha');
+  await until(async () => assert.equal((await request('alpha.localhost', true)).body, 'alpha'));
   const beta = await project('beta', 'beta.localhost {\n respond "beta"\n}\n');
   await until(async () => assert.equal((await request('beta.localhost')).body, 'beta'));
   assert.equal((await request('alpha.localhost')).body, 'alpha');
-  assert.equal((await request('beta.localhost', true)).body, 'beta');
+  await until(async () => assert.equal((await request('beta.localhost', true)).body, 'beta'));
   assert.notEqual((await request('unknown.localhost')).body, 'alpha');
   await run(['domains', 'disable', 'alpha.localhost']);
   assert.notEqual((await request('alpha.localhost')).body, 'alpha');
@@ -285,5 +292,7 @@ try {
 } finally {
   await run(['daemon', 'stop']).catch(() => {});
   for (const process_ of children) if (process_.exitCode === null) process_.kill();
-  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  if (process.platform === 'darwin')
+    await execute('/usr/bin/sudo', ['-n', '/bin/rm', '-rf', '--', root]);
+  else await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 }

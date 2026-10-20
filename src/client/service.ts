@@ -42,7 +42,8 @@ export class ClientService implements ClientServicePort {
     let ready = false;
     let permissionsFailure: unknown;
     try {
-      const deadline = Date.now() + 30000;
+      // Cold Windows ACL preparation can exceed thirty seconds in an isolated VM.
+      const deadline = Date.now() + 60000;
       while (Date.now() < deadline) {
         try {
           await this.snapshot();

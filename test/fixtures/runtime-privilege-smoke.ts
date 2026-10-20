@@ -5,7 +5,6 @@ import { chmod, copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { rpc } from '../../src/client/connection.ts';
 import { resolvePaths } from '../../src/daemon/paths.ts';
-import { prepareRuntime, runtimeOwner } from '../../src/platform/runtime-security.ts';
 
 if (process.platform === 'win32' || !process.getuid || process.getuid() === 0)
   throw new Error('Run this Unix privilege gate as a non-root user with sudo -n available.');
@@ -17,7 +16,8 @@ if (!daemonEntry || !deniedEntry)
 // Publish only the executable and test bundle in a disposable shared directory.
 const inputs = await mkdtemp('/tmp/cadder-privilege-inputs-');
 const root = await mkdtemp('/tmp/cadder-privilege-runtime-');
-const paths = resolvePaths({ runtimeDir: root });
+const runtimeDirectory = join(root, 'new-runtime');
+const paths = resolvePaths({ runtimeDir: runtimeDirectory });
 const environment = { ...process.env };
 delete environment.NODE_OPTIONS;
 let daemon: ChildProcessWithoutNullStreams | undefined;
@@ -31,10 +31,13 @@ try {
   await chmod(outsiderEntry, 0o644);
   await chmod(inputs, 0o755);
   await chmod(root, 0o755);
-  await prepareRuntime(paths.directory, await runtimeOwner());
-  daemon = spawn('sudo', ['-n', process.execPath, daemonEntry, root, String(process.getuid())], {
-    env: environment,
-  });
+  daemon = spawn(
+    'sudo',
+    ['-n', process.execPath, daemonEntry, runtimeDirectory, String(process.getuid())],
+    {
+      env: environment,
+    },
+  );
   let error = '';
   daemon.stderr.on('data', (data: Buffer) => {
     error += data.toString();
@@ -61,9 +64,13 @@ try {
   };
   assert.equal(discovery.elevated, true);
   assert.equal(discovery.owner, `uid:${process.getuid()}`);
-  const outsider = spawn('sudo', ['-n', '-u', 'nobody', outsiderNode, outsiderEntry, root], {
-    env: environment,
-  });
+  const outsider = spawn(
+    'sudo',
+    ['-n', '-u', 'nobody', outsiderNode, outsiderEntry, runtimeDirectory],
+    {
+      env: environment,
+    },
+  );
   let deniedOutput = '';
   let deniedError = '';
   outsider.stdout.on('data', (data: Buffer) => {

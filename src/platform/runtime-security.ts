@@ -101,7 +101,17 @@ export async function prepareRuntime(directory: string, owner: RuntimeOwner): Pr
   } catch (error) {
     if (errorCode(error) !== 'ENOENT') throw error;
     try {
-      await mkdir(dirname(directory), { mode: 0o700, recursive: true });
+      const parent = dirname(directory);
+      const created = await mkdir(parent, { mode: 0o700, recursive: true });
+      if (created && process.getuid?.() === 0) {
+        // Only newly created ancestors may be assigned to the explicit runtime owner.
+        let path = created;
+        await protectCreated(path, owner, true);
+        for (const component of relative(created, parent).split(sep).filter(Boolean)) {
+          path = join(path, component);
+          await protectCreated(path, owner, true);
+        }
+      }
       await mkdir(directory, { mode: 0o700 });
       await protectCreated(directory, owner, true);
     } catch (error) {
