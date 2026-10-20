@@ -10,7 +10,9 @@ export async function terminalSmoke(
 ): Promise<void> {
   if (process.platform === 'win32') return;
   const execute = promisify(execFile);
-  for (const args of [[], ['tui']]) {
+  for (const scenario of ['help', 'lifecycle', 'explicit', 'interrupt']) {
+    const args = scenario === 'help' ? [] : ['tui'];
+    if (scenario === 'explicit') args.push('--start-daemon');
     const command = [file, ...prefix, ...args];
     const quoted = command.map((part) => "'" + part.replaceAll("'", "'\\''") + "'").join(' ');
     const running = execute(
@@ -25,16 +27,31 @@ export async function terminalSmoke(
       },
     );
     let frame = '';
-    let quit = false;
+    let step = scenario === 'explicit' ? 1 : 0;
     running.child.stdout?.on('data', (bytes: Buffer) => {
       frame = (frame + bytes.toString()).slice(-8192);
-      if (args.length && !quit && frame.includes('Press Enter')) {
-        quit = true;
-        running.child.stdin?.write('q');
+      if (scenario === 'help') return;
+      let input: string | undefined;
+      if (step === 0 && frame.includes('Press Enter')) {
+        input = scenario === 'interrupt' ? '\x03' : '\r';
+      } else if (step === 1 && frame.includes('No projects registered')) {
+        input = 's';
+      } else if (step === 2 && frame.includes('Stop cadderd')) {
+        input = 'y';
+      } else if (step === 3 && frame.includes('Press Enter')) {
+        input = 'q';
+      }
+      if (input !== undefined) {
+        frame = '';
+        step++;
+        running.child.stdin?.write(input);
       }
     });
     const { stdout } = await running;
     assert.match(stdout, args.length ? /Press Enter/ : /Usage: cadder/);
-    if (args.length) assert.ok(stdout.includes('\x1b[?25h'), 'TUI must restore cursor visibility.');
+    if (args.length) {
+      assert.equal(step, scenario === 'interrupt' ? 1 : 4);
+      assert.ok(stdout.includes('\x1b[?25h'), 'TUI must restore cursor visibility.');
+    }
   }
 }
