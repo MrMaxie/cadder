@@ -375,7 +375,9 @@ export async function runOwnedCommand(
               process.kill(-child.pid, 0);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code === 'ESRCH') break;
-              failure = new OwnedCommandError('cleanup', 'Cannot observe owned group settlement.');
+              failure = new OwnedCommandError('cleanup', 'Cannot observe owned group settlement.', {
+                cause: error,
+              });
               break;
             }
             if (performance.now() >= deadline) {
